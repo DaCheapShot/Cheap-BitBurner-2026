@@ -45,10 +45,14 @@ const BATCH_PADDING_MS = 200;
 const DRIFT_MONEY_FLOOR = 0.90; // re-prep if moneyAvailable < 90% of moneyMax
 const DRIFT_SEC_CEILING = 5;    // re-prep if hackDifficulty > minDifficulty + 5
 
+// Thresholds for detecting that a prep cycle has completed.
+const PREP_READY_SEC_TOLERANCE = 0.1;  // max sec above minDifficulty to consider prepped
+const PREP_READY_MONEY_FLOOR   = 0.99; // min fraction of moneyMax to consider prepped
+
 // RAM to keep free on home for manager itself and any scripts run manually.
 // Reserved = max(floor, percentage) so it scales with home upgrades.
 const HOME_RESERVE_GB  = 32;
-const HOME_RESERVE_PCT = 0.25;
+const HOME_RESERVE_PCT = 0.10;
 
 // Hardcoded RAM per thread for each worker. Avoids needing ns.getScriptRam() in manager
 // (which would add ~1 GB to manager's permanent RAM reservation).
@@ -342,10 +346,14 @@ export async function main(ns) {
     // root.js BFS-scans the network and nukes any newly rootable servers.
     // Re-running every 60s catches servers that become affordable as hack level rises.
     if (now - lastRootTime >= ROOT_INTERVAL_MS) {
-      if (ns.exec("root.js", "home", 1) === 0) {
+      // Only advance the timer on success — if root.js failed to launch,
+      // retry next cycle rather than waiting another 60s.
+      const rootPid = ns.exec("root.js", "home", 1);
+      if (rootPid === 0) {
         ns.print("WARN: root.js failed to launch (already running, or file missing)");
+      } else {
+        lastRootTime = now;
       }
-      lastRootTime = now;
     }
 
     // ── 2. Discover all servers ───────────────────────────────────────────────
@@ -373,10 +381,13 @@ export async function main(ns) {
 
       // Drift check: if a farming target has degraded, demote it back to prep.
       // This handles unexpected security spikes or money drops between cycles.
-      if (targetPhase.get(target) === "farm") {
+      let phase = targetPhase.get(target) ?? "prep";
+
+      if (phase === "farm") {
         const moneyDrifted = server.moneyAvailable < server.moneyMax * DRIFT_MONEY_FLOOR;
         const secDrifted   = server.hackDifficulty  > server.minDifficulty + DRIFT_SEC_CEILING;
         if (moneyDrifted || secDrifted) {
+          phase = "prep";
           targetPhase.set(target, "prep");
           ns.print(
             `[drift] ${target} → re-prep | ` +
@@ -386,13 +397,11 @@ export async function main(ns) {
         }
       }
 
-      const phase = targetPhase.get(target) ?? "prep";
-
       if (phase === "prep") {
         // Check if target is already at minSec + maxMoney (e.g. after a game reload).
         // If so, skip straight to farm without wasting threads on an unnecessary prep.
-        const isReady = server.hackDifficulty <= server.minDifficulty + 0.1 &&
-                        server.moneyAvailable >= server.moneyMax * 0.99;
+        const isReady = server.hackDifficulty <= server.minDifficulty + PREP_READY_SEC_TOLERANCE &&
+                        server.moneyAvailable >= server.moneyMax * PREP_READY_MONEY_FLOOR;
         if (isReady) {
           targetPhase.set(target, "farm");
           ns.print(`[ready] ${target} is prepped → starting farm`);
