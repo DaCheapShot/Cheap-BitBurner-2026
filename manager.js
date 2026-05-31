@@ -122,11 +122,61 @@ function fitAndExec(ns, execHosts, script, totalThreads, args) {
   }
 }
 
+/**
+ * Build the list of servers available to run worker scripts this cycle.
+ *
+ * - Home is always included, with a reserved-RAM slice withheld.
+ * - All rooted network servers (including purchased pserv-*) are included.
+ * - When a newly rooted host is seen for the first time, deploy.js is launched
+ *   for it and it's skipped as an exec host THIS cycle. Next cycle it's ready.
+ *   (This one-cycle gap prevents exec calls on a host before files land.)
+ * - Mutates deployedHosts to track which hosts are set up.
+ *
+ * @param {NS} ns
+ * @param {string[]} allServers         — full network from scanNetwork()
+ * @param {Set<string>} deployedHosts   — hosts that already have worker scripts
+ * @returns {Array<{host: string, freeRam: number}>}
+ */
+function buildExecHosts(ns, allServers, deployedHosts) {
+  const hosts = [];
+
+  // Home: always available, apply the reserved-RAM floor
+  const home     = ns.getServer("home");
+  const reserved = Math.max(HOME_RESERVE_GB, home.maxRam * HOME_RESERVE_PCT);
+  const homeFree = Math.max(0, home.maxRam - home.ramUsed - reserved);
+  if (homeFree > 0) hosts.push({ host: "home", freeRam: homeFree });
+
+  // All rooted servers on the network (purchased servers appear here too via BFS)
+  for (const host of allServers) {
+    const server = ns.getServer(host);
+    if (!server.hasAdminRights) continue; // can't run scripts without root
+    if (server.maxRam < 2)      continue; // too small for even one worker thread
+
+    if (!deployedHosts.has(host)) {
+      // First time seeing this host: launch deploy.js and record it.
+      // Skip it as an exec host this cycle — deploy.js may still be running.
+      if (ns.exec("deploy.js", "home", 1, host) > 0) {
+        deployedHosts.add(host);
+        ns.print(`[deploy] Queuing workers → ${host}`);
+      }
+      continue; // available next cycle
+    }
+
+    const freeRam = server.maxRam - server.ramUsed;
+    if (freeRam > 0) hosts.push({ host, freeRam });
+  }
+
+  return hosts;
+}
+
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-  // Verify the script loads correctly. Full loop added in Task 9.
-  ns.tprint("manager.js: constants and utilities loaded OK");
-  const allServers = scanNetwork(ns);
-  ns.tprint(`Discovered ${allServers.length} servers via BFS`);
+  const deployedHosts = new Set(["home"]);
+  const allServers    = scanNetwork(ns);
+  const execHosts     = buildExecHosts(ns, allServers, deployedHosts);
+  ns.tprint("Exec hosts this cycle:");
+  for (const { host, freeRam } of execHosts) {
+    ns.tprint(`  ${host}: ${freeRam.toFixed(1)} GB free`);
+  }
 }
