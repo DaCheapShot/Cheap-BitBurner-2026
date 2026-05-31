@@ -111,13 +111,17 @@ function fitAndExec(ns, execHosts, script, totalThreads, args) {
   for (const entry of execHosts) {
     if (remaining <= 0) break;
     const canFit = Math.floor(entry.freeRam / ramPerThread);
+    ns.print(`  [fit] ${entry.host}: ${entry.freeRam.toFixed(1)}GB free → canFit=${canFit} of ${script}`);
     if (canFit <= 0) continue;
 
     const threads = Math.min(canFit, remaining);
     const pid     = ns.exec(script, entry.host, threads, ...args);
+    ns.print(`  [fit] exec ${threads}t → pid=${pid}`);
     if (pid > 0) {
       entry.freeRam -= threads * ramPerThread; // track consumed RAM for this cycle
       remaining     -= threads;
+    } else {
+      ns.print(`  [fit] EXEC FAILED on ${entry.host} (game rejected, actual RAM may differ)`);
     }
   }
 
@@ -157,8 +161,8 @@ function buildExecHosts(ns, allServers, deployedHosts) {
   // All rooted servers on the network (purchased servers appear here too via BFS)
   for (const host of allServers) {
     const server = ns.getServer(host);
-    if (!server.hasAdminRights) continue; // can't run scripts without root
-    if (server.maxRam < 2)      continue; // too small for even one worker thread
+    if (!server.hasAdminRights) { ns.print(`[hosts] SKIP ${host}: no root`); continue; }
+    if (server.maxRam < 2)      { ns.print(`[hosts] SKIP ${host}: maxRam=${server.maxRam}GB < 2`); continue; }
 
     if (!deployedHosts.has(host)) {
       // First time seeing this host: launch deploy.js and record it.
