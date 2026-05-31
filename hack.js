@@ -3,7 +3,7 @@
  * RAM: 1.60 GB base + 0.10 GB (ns.hack) = 1.70 GB per thread.
  *
  * Args:
- *   ns.args[0] {string} target — hostname to hack
+ *   ns.args[0] {string} target — hostname to hack (required)
  *   ns.args[1] {number} delay  — ms to sleep before acting (HWGW batch timing)
  */
 /** @param {NS} ns */
