@@ -148,6 +148,10 @@ function buildExecHosts(ns, allServers, deployedHosts) {
   const home     = ns.getServer("home");
   const reserved = Math.max(HOME_RESERVE_GB, home.maxRam * HOME_RESERVE_PCT);
   const homeFree = Math.max(0, home.maxRam - home.ramUsed - reserved);
+  ns.print(
+    `[hosts] home: ${home.maxRam}GB max | ${home.ramUsed.toFixed(1)}GB used | ` +
+    `${reserved.toFixed(1)}GB reserved → ${homeFree.toFixed(1)}GB free`
+  );
   if (homeFree > 0) hosts.push({ host: "home", freeRam: homeFree });
 
   // All rooted servers on the network (purchased servers appear here too via BFS)
@@ -167,6 +171,7 @@ function buildExecHosts(ns, allServers, deployedHosts) {
     }
 
     const freeRam = server.maxRam - server.ramUsed;
+    ns.print(`[hosts] ${host}: ${server.maxRam}GB max | ${server.ramUsed.toFixed(1)}GB used → ${freeRam.toFixed(1)}GB free`);
     if (freeRam > 0) hosts.push({ host, freeRam });
   }
 
@@ -242,11 +247,15 @@ function dispatchPrep(ns, target, server, execHosts) {
   // Weaken threads to offset the security raise from grow (0.004 security per grow thread)
   const weaken2Threads = Math.max(1, Math.ceil(growThreads * 0.004 / 0.05));
 
+  const prepRamNeeded = weaken1Threads * SCRIPT_RAM["weaken.js"]
+                      + growThreads    * SCRIPT_RAM["grow.js"]
+                      + weaken2Threads * SCRIPT_RAM["weaken.js"];
   ns.print(
     `[prep] ${target} | ` +
     `sec ${server.hackDifficulty.toFixed(1)}→${server.minDifficulty.toFixed(1)} | ` +
     `money $${(server.moneyAvailable / 1e6).toFixed(1)}m→$${(server.moneyMax / 1e6).toFixed(1)}m | ` +
-    `w1=${weaken1Threads} g=${growThreads} w2=${weaken2Threads}`
+    `w1=${weaken1Threads} g=${growThreads} w2=${weaken2Threads} | ` +
+    `RAM needed: ${prepRamNeeded.toFixed(1)}GB`
   );
 
   // delay=0 for all three — timing is not critical for prep, only for farm
@@ -310,12 +319,17 @@ function dispatchFarm(ns, target, server, execHosts, weakenTime) {
   const growDelay    = Math.max(0, weakenTime - growTime + BATCH_PADDING_MS);
   const weaken2Delay = BATCH_PADDING_MS * 2;
 
+  const farmRamNeeded = hackThreads    * SCRIPT_RAM["hack.js"]
+                      + weaken1Threads * SCRIPT_RAM["weaken.js"]
+                      + growThreads    * SCRIPT_RAM["grow.js"]
+                      + weaken2Threads * SCRIPT_RAM["weaken.js"];
   ns.print(
     `[farm] ${target} | ` +
     `h=${hackThreads}(+${hackDelay}ms) ` +
     `w1=${weaken1Threads} ` +
     `g=${growThreads}(+${growDelay}ms) ` +
-    `w2=${weaken2Threads}(+${weaken2Delay}ms)`
+    `w2=${weaken2Threads}(+${weaken2Delay}ms) | ` +
+    `RAM needed: ${farmRamNeeded.toFixed(1)}GB`
   );
 
   fitAndExec(ns, execHosts, "hack.js",   hackThreads,    [target, hackDelay]);
@@ -369,6 +383,8 @@ export async function main(ns) {
 
     // ── 3. Build exec host list; deploy workers to new hosts ─────────────────
     const execHosts = buildExecHosts(ns, allServers, deployedHosts);
+    const totalFreeRam = execHosts.reduce((sum, e) => sum + e.freeRam, 0);
+    ns.print(`[hosts] ${execHosts.length} exec host(s) | ${totalFreeRam.toFixed(1)}GB total free`);
 
     // ── 4. Score and select top targets ──────────────────────────────────────
     const targets = pickTargets(ns, allServers, TOP_TARGETS);
