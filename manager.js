@@ -385,7 +385,6 @@ export async function main(ns) {
     for (const target of targets) {
       const server      = ns.getServer(target);
       const weakenTime  = ns.getWeakenTime(target);
-      maxWeakenTime     = Math.max(maxWeakenTime, weakenTime);
 
       // Drift check: if a farming target has degraded, demote it back to prep.
       // This handles unexpected security spikes or money drops between cycles.
@@ -416,12 +415,15 @@ export async function main(ns) {
           // fall through to farm dispatch below
         } else {
           dispatchPrep(ns, target, server, execHosts);
+          // Only count weaken time when workers were actually dispatched.
+          maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
           continue; // don't farm until prep completes next cycle
         }
       }
 
       // Phase is "farm" — either it was already, or just promoted above.
       dispatchFarm(ns, target, server, execHosts, weakenTime);
+      maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
     }
 
     // ── 6. Sleep until all batch workers should be done ──────────────────────
