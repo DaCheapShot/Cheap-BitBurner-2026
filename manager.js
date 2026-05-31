@@ -105,18 +105,29 @@ function fitAndExec(ns, execHosts, script, totalThreads, args) {
 
   for (const entry of execHosts) {
     if (remaining <= 0) break;
-    const canFit = Math.floor(entry.freeRam / ramPerThread);
-    ns.print(`  [fit] ${entry.host}: ${entry.freeRam.toFixed(1)}GB free → canFit=${canFit} of ${script}`);
+
+    // Read live RAM — deploy.js scripts launched earlier in this cycle may have
+    // consumed RAM that isn't reflected in the snapshot entry.freeRam was built from.
+    const live = ns.getServer(entry.host);
+    const liveReserve = entry.host === "home"
+      ? Math.max(HOME_RESERVE_GB, live.maxRam * HOME_RESERVE_PCT)
+      : 0;
+    const liveFree = Math.max(0, live.maxRam - live.ramUsed - liveReserve);
+
+    // Use the lower of tracked (committed this cycle) and live — whichever is tighter.
+    const effectiveFree = Math.min(entry.freeRam, liveFree);
+    const canFit = Math.floor(effectiveFree / ramPerThread);
+    ns.print(`  [fit] ${entry.host}: tracked=${entry.freeRam.toFixed(1)}GB live=${liveFree.toFixed(1)}GB canFit=${canFit}`);
     if (canFit <= 0) continue;
 
     const threads = Math.min(canFit, remaining);
     const pid     = ns.exec(script, entry.host, threads, ...args);
-    ns.print(`  [fit] exec ${threads}t → pid=${pid}`);
+    ns.print(`  [fit] exec ${threads}t ${script} → pid=${pid}`);
     if (pid > 0) {
-      entry.freeRam -= threads * ramPerThread; // track consumed RAM for this cycle
+      entry.freeRam -= threads * ramPerThread;
       remaining     -= threads;
     } else {
-      ns.print(`  [fit] EXEC FAILED on ${entry.host} (game rejected, actual RAM may differ)`);
+      ns.print(`  [fit] EXEC FAILED — live RAM too low even after re-read`);
     }
   }
 
