@@ -323,14 +323,98 @@ function dispatchFarm(ns, target, server, execHosts, weakenTime) {
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
+  ns.print("=== manager.js started ===");
+
+  // Hosts that already have hack/grow/weaken deployed. Home always has its own files.
   const deployedHosts = new Set(["home"]);
-  const allServers    = scanNetwork(ns);
-  const execHosts     = buildExecHosts(ns, allServers, deployedHosts);
-  const targets       = pickTargets(ns, allServers, 1);
-  if (targets.length === 0) { ns.tprint("No targets"); return; }
-  const target      = targets[0];
-  const server      = ns.getServer(target);
-  const weakenTime  = ns.getWeakenTime(target);
-  dispatchFarm(ns, target, server, execHosts, weakenTime);
-  ns.tprint(`Farm batch dispatched for ${target}. Weaken time: ${(weakenTime/1000).toFixed(1)}s`);
+
+  // Current phase for each target: "prep" (getting ready) or "farm" (earning money).
+  // New targets default to "prep" — they must reach minSec+maxMoney before farming.
+  const targetPhase = new Map();
+
+  // Timestamp of last root.js launch (ms). Initialized to 0 so it fires on first cycle.
+  let lastRootTime = 0;
+
+  while (true) {
+    const now = Date.now();
+
+    // ── 1. Periodically re-run root.js ───────────────────────────────────────
+    // root.js BFS-scans the network and nukes any newly rootable servers.
+    // Re-running every 60s catches servers that become affordable as hack level rises.
+    if (now - lastRootTime >= ROOT_INTERVAL_MS) {
+      if (ns.exec("root.js", "home", 1) === 0) {
+        ns.print("WARN: root.js failed to launch (already running, or file missing)");
+      }
+      lastRootTime = now;
+    }
+
+    // ── 2. Discover all servers ───────────────────────────────────────────────
+    const allServers = scanNetwork(ns);
+
+    // ── 3. Build exec host list; deploy workers to new hosts ─────────────────
+    const execHosts = buildExecHosts(ns, allServers, deployedHosts);
+
+    // ── 4. Score and select top targets ──────────────────────────────────────
+    const targets = pickTargets(ns, allServers, TOP_TARGETS);
+
+    if (targets.length === 0) {
+      ns.print("No eligible targets yet. Retrying in 10s...");
+      await ns.sleep(10_000);
+      continue;
+    }
+
+    // ── 5. Dispatch batches ───────────────────────────────────────────────────
+    let maxWeakenTime = 0;
+
+    for (const target of targets) {
+      const server      = ns.getServer(target);
+      const weakenTime  = ns.getWeakenTime(target);
+      maxWeakenTime     = Math.max(maxWeakenTime, weakenTime);
+
+      // Drift check: if a farming target has degraded, demote it back to prep.
+      // This handles unexpected security spikes or money drops between cycles.
+      if (targetPhase.get(target) === "farm") {
+        const moneyDrifted = server.moneyAvailable < server.moneyMax * DRIFT_MONEY_FLOOR;
+        const secDrifted   = server.hackDifficulty  > server.minDifficulty + DRIFT_SEC_CEILING;
+        if (moneyDrifted || secDrifted) {
+          targetPhase.set(target, "prep");
+          ns.print(
+            `[drift] ${target} → re-prep | ` +
+            `money=${(server.moneyAvailable / server.moneyMax * 100).toFixed(0)}% | ` +
+            `sec=${server.hackDifficulty.toFixed(1)}`
+          );
+        }
+      }
+
+      const phase = targetPhase.get(target) ?? "prep";
+
+      if (phase === "prep") {
+        // Check if target is already at minSec + maxMoney (e.g. after a game reload).
+        // If so, skip straight to farm without wasting threads on an unnecessary prep.
+        const isReady = server.hackDifficulty <= server.minDifficulty + 0.1 &&
+                        server.moneyAvailable >= server.moneyMax * 0.99;
+        if (isReady) {
+          targetPhase.set(target, "farm");
+          ns.print(`[ready] ${target} is prepped → starting farm`);
+          // fall through to farm dispatch below
+        } else {
+          dispatchPrep(ns, target, server, execHosts);
+          continue; // don't farm until prep completes next cycle
+        }
+      }
+
+      // Phase is "farm" — either it was already, or just promoted above.
+      dispatchFarm(ns, target, server, execHosts, weakenTime);
+    }
+
+    // ── 6. Sleep until all batch workers should be done ──────────────────────
+    // Use the slowest target's weaken time + a 1s buffer so no old workers are
+    // still running when we re-dispatch next cycle.
+    const sleepMs = Math.max(CYCLE_SLEEP_MS, maxWeakenTime + 1_000);
+    ns.print(
+      `[cycle] ${targets.length} target(s) | ` +
+      `sleep ${(sleepMs / 1_000).toFixed(1)}s`
+    );
+    await ns.sleep(sleepMs);
+  }
 }
