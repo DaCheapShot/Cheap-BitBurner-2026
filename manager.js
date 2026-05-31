@@ -7,6 +7,10 @@
  *   3. Scores all hackable targets; picks top 5
  *   4. For each target: prep to minSec+maxMoney, then run HWGW farm batches
  *
+ * Usage:
+ *   run manager.js           — minimal log window output; all detail in manager.log.txt
+ *   run manager.js --debug   — full verbose output in both log window and file
+ *
  * Permanent RAM reservation (summed across all NS functions used):
  *   ns.scan()               0.20 GB  — BFS network discovery each cycle
  *   ns.exec()               1.30 GB  — launch workers and helpers
@@ -18,8 +22,9 @@
  *   ns.hackAnalyzeThreads() 1.00 GB  — hack thread count
  *   ns.hackAnalyzeChance()  1.00 GB  — target scoring
  *   ns.getHackingLevel()    0.05 GB  — target eligibility
+ *   ns.write()              1.00 GB  — log file output
  *   ns.sleep() / ns.print() 0.00 GB  — free
- *   Total: ~7.70 GB + 1.60 GB base = ~9.30 GB
+ *   Total: ~8.70 GB + 1.60 GB base = ~10.30 GB
  */
 
 // ─── Tuning constants ────────────────────────────────────────────────────────
@@ -55,8 +60,35 @@ const HOME_RESERVE_GB  = 32;
 const HOME_RESERVE_PCT = 0.10;
 
 // Populated at startup from ns.getScriptRam() — accurate regardless of Bitburner version.
-// Small extra RAM cost (~0.1 GB) is worth avoiding stale hardcoded values.
 const SCRIPT_RAM = { "hack.js": 0, "grow.js": 0, "weaken.js": 0, "deploy.js": 0 };
+
+// ─── Logger ──────────────────────────────────────────────────────────────────
+
+// Module-level logger so all helper functions share it without extra parameters.
+// Initialized in main() after args are parsed.
+let log = null;
+
+/**
+ * Create a logger that always writes to logFile and selectively prints to the
+ * in-game log window.
+ *
+ * log.info(msg)  — always visible in window + written to file
+ * log.debug(msg) — file only (window only if --debug was passed)
+ * log.warn(msg)  — always visible in window (prefixed WARN) + written to file
+ *
+ * @param {NS} ns
+ * @param {boolean} debug   — true if --debug flag was passed
+ * @param {string}  logFile — filename to append log lines to
+ */
+function makeLogger(ns, debug, logFile) {
+  const ts    = () => new Date().toLocaleTimeString();
+  const write = (msg) => ns.write(logFile, `${ts()} ${msg}\n`, "a");
+  return {
+    info:  (msg) => { write(msg);           ns.print(msg); },
+    debug: (msg) => { write(msg);           if (debug) ns.print(msg); },
+    warn:  (msg) => { write(`WARN: ${msg}`); ns.print(`WARN: ${msg}`); },
+  };
+}
 
 // ─── Utility helpers ─────────────────────────────────────────────────────────
 
@@ -86,7 +118,6 @@ function scanNetwork(ns) {
 /**
  * Split totalThreads of script across available exec hosts, filling each in order.
  * Mutates entry.freeRam so subsequent calls within the same cycle stay accurate.
- * Logs a warning if we run out of RAM before deploying all threads.
  *
  * Security constants referenced throughout manager:
  *   ns.hack()   raises target security by 0.002 per thread
@@ -117,22 +148,22 @@ function fitAndExec(ns, execHosts, script, totalThreads, args) {
     // Use the lower of tracked (committed this cycle) and live — whichever is tighter.
     const effectiveFree = Math.min(entry.freeRam, liveFree);
     const canFit = Math.floor(effectiveFree / ramPerThread);
-    ns.print(`  [fit] ${entry.host}: tracked=${entry.freeRam.toFixed(1)}GB live=${liveFree.toFixed(1)}GB canFit=${canFit}`);
+    log.debug(`  [fit] ${entry.host}: tracked=${entry.freeRam.toFixed(1)}GB live=${liveFree.toFixed(1)}GB canFit=${canFit}`);
     if (canFit <= 0) continue;
 
     const threads = Math.min(canFit, remaining);
     const pid     = ns.exec(script, entry.host, threads, ...args);
-    ns.print(`  [fit] exec ${threads}t ${script} → pid=${pid}`);
+    log.debug(`  [fit] exec ${threads}t ${script} → pid=${pid}`);
     if (pid > 0) {
       entry.freeRam -= threads * ramPerThread;
       remaining     -= threads;
     } else {
-      ns.print(`  [fit] EXEC FAILED — live RAM too low even after re-read`);
+      log.warn(`fit exec failed: ${threads}t ${script} on ${entry.host} (live RAM too low)`);
     }
   }
 
   if (remaining > 0) {
-    ns.print(`WARN fitAndExec: ${remaining}/${totalThreads} threads undeployed for ${script}`);
+    log.warn(`fitAndExec: ${remaining}/${totalThreads} threads undeployed for ${script}`);
   }
 }
 
@@ -158,8 +189,8 @@ function buildExecHosts(ns, allServers, deployedHosts) {
   // Process all rooted servers first — deploy.js launches happen here and consume home RAM.
   for (const host of allServers) {
     const server = ns.getServer(host);
-    if (!server.hasAdminRights) { ns.print(`[hosts] SKIP ${host}: no root`); continue; }
-    if (server.maxRam < 2)      { ns.print(`[hosts] SKIP ${host}: maxRam=${server.maxRam}GB < 2`); continue; }
+    if (!server.hasAdminRights) { log.debug(`[hosts] SKIP ${host}: no root`); continue; }
+    if (server.maxRam < 2)      { log.debug(`[hosts] SKIP ${host}: maxRam=${server.maxRam}GB < 2`); continue; }
 
     if (!deployedHosts.has(host)) {
       // First time seeing this host: launch deploy.js and record it.
@@ -167,13 +198,13 @@ function buildExecHosts(ns, allServers, deployedHosts) {
       if (ns.exec("deploy.js", "home", 1, host) > 0) {
         deployedHosts.add(host);
         deployRamUsed += SCRIPT_RAM["deploy.js"]; // track RAM consumed on home
-        ns.print(`[deploy] Queuing workers → ${host} (${SCRIPT_RAM["deploy.js"]}GB)`);
+        log.info(`[deploy] Queuing workers → ${host} (${SCRIPT_RAM["deploy.js"]}GB)`);
       }
       continue; // available next cycle
     }
 
     const freeRam = server.maxRam - server.ramUsed;
-    ns.print(`[hosts] ${host}: ${server.maxRam}GB max | ${server.ramUsed.toFixed(1)}GB used → ${freeRam.toFixed(1)}GB free`);
+    log.debug(`[hosts] ${host}: ${server.maxRam}GB max | ${server.ramUsed.toFixed(1)}GB used → ${freeRam.toFixed(1)}GB free`);
     if (freeRam > 0) hosts.push({ host, freeRam });
   }
 
@@ -181,7 +212,7 @@ function buildExecHosts(ns, allServers, deployedHosts) {
   const home     = ns.getServer("home");
   const reserved = Math.max(HOME_RESERVE_GB, home.maxRam * HOME_RESERVE_PCT);
   const homeFree = Math.max(0, home.maxRam - home.ramUsed - reserved - deployRamUsed);
-  ns.print(
+  log.debug(
     `[hosts] home: ${home.maxRam}GB max | ${home.ramUsed.toFixed(1)}GB used | ` +
     `${reserved.toFixed(1)}GB reserved | ${deployRamUsed.toFixed(1)}GB deploy → ${homeFree.toFixed(1)}GB free`
   );
@@ -262,7 +293,7 @@ function dispatchPrep(ns, target, server, execHosts) {
   const prepRamNeeded = weaken1Threads * SCRIPT_RAM["weaken.js"]
                       + growThreads    * SCRIPT_RAM["grow.js"]
                       + weaken2Threads * SCRIPT_RAM["weaken.js"];
-  ns.print(
+  log.info(
     `[prep] ${target} | ` +
     `sec ${server.hackDifficulty.toFixed(1)}→${server.minDifficulty.toFixed(1)} | ` +
     `money $${(server.moneyAvailable / 1e6).toFixed(1)}m→$${(server.moneyMax / 1e6).toFixed(1)}m | ` +
@@ -335,7 +366,7 @@ function dispatchFarm(ns, target, server, execHosts, weakenTime) {
                       + weaken1Threads * SCRIPT_RAM["weaken.js"]
                       + growThreads    * SCRIPT_RAM["grow.js"]
                       + weaken2Threads * SCRIPT_RAM["weaken.js"];
-  ns.print(
+  log.info(
     `[farm] ${target} | ` +
     `h=${hackThreads}(+${hackDelay}ms) ` +
     `w1=${weaken1Threads} ` +
@@ -354,21 +385,29 @@ function dispatchFarm(ns, target, server, execHosts, weakenTime) {
 export async function main(ns) {
   ns.disableLog("ALL");
 
+  const debug   = ns.args.includes("--debug");
+  const logFile = "manager.log.txt";
+
+  // Append a session separator so each run is distinguishable in the log file.
+  ns.write(logFile, `\n=== session start ${new Date().toLocaleString()} ===\n`, "a");
+  log = makeLogger(ns, debug, logFile);
+
   // Read actual script RAM from the game — avoids stale hardcoded values across versions.
   SCRIPT_RAM["hack.js"]   = ns.getScriptRam("hack.js");
   SCRIPT_RAM["grow.js"]   = ns.getScriptRam("grow.js");
   SCRIPT_RAM["weaken.js"] = ns.getScriptRam("weaken.js");
   SCRIPT_RAM["deploy.js"] = ns.getScriptRam("deploy.js");
 
-  ns.print("=== manager.js started ===");
-  ns.print(`[init] Script RAM — hack=${SCRIPT_RAM["hack.js"]}GB grow=${SCRIPT_RAM["grow.js"]}GB weaken=${SCRIPT_RAM["weaken.js"]}GB`);
+  log.info("=== manager.js started ===");
+  log.info(`[init] Script RAM — hack=${SCRIPT_RAM["hack.js"]}GB grow=${SCRIPT_RAM["grow.js"]}GB weaken=${SCRIPT_RAM["weaken.js"]}GB deploy=${SCRIPT_RAM["deploy.js"]}GB`);
+  if (debug) log.info("[init] debug mode ON — verbose output in log window");
+  else       log.info("[init] debug mode OFF — verbose output in manager.log.txt only");
 
   // Launch the server buyer once. buy.js loops on its own; manager just needs to start it.
-  // exec() returns 0 if it's already running — that's fine, we don't need two copies.
   if (ns.exec("buy.js", "home", 1) === 0) {
-    ns.print("WARN: buy.js failed to launch (already running, or file missing)");
+    log.warn("buy.js failed to launch (already running, or file missing)");
   } else {
-    ns.print("[buy] buy.js launched");
+    log.info("[buy] buy.js launched");
   }
 
   // Hosts that already have hack/grow/weaken deployed. Home always has its own files.
@@ -388,11 +427,9 @@ export async function main(ns) {
     // root.js BFS-scans the network and nukes any newly rootable servers.
     // Re-running every 60s catches servers that become affordable as hack level rises.
     if (now - lastRootTime >= ROOT_INTERVAL_MS) {
-      // Only advance the timer on success — if root.js failed to launch,
-      // retry next cycle rather than waiting another 60s.
       const rootPid = ns.exec("root.js", "home", 1);
       if (rootPid === 0) {
-        ns.print("WARN: root.js failed to launch (already running, or file missing)");
+        log.warn("root.js failed to launch (already running, or file missing)");
       } else {
         lastRootTime = now;
       }
@@ -402,15 +439,15 @@ export async function main(ns) {
     const allServers = scanNetwork(ns);
 
     // ── 3. Build exec host list; deploy workers to new hosts ─────────────────
-    const execHosts = buildExecHosts(ns, allServers, deployedHosts);
+    const execHosts    = buildExecHosts(ns, allServers, deployedHosts);
     const totalFreeRam = execHosts.reduce((sum, e) => sum + e.freeRam, 0);
-    ns.print(`[hosts] ${execHosts.length} exec host(s) | ${totalFreeRam.toFixed(1)}GB total free`);
+    log.info(`[hosts] ${execHosts.length} exec host(s) | ${totalFreeRam.toFixed(1)}GB total free`);
 
     // ── 4. Score and select top targets ──────────────────────────────────────
     const targets = pickTargets(ns, allServers, TOP_TARGETS);
 
     if (targets.length === 0) {
-      ns.print("No eligible targets yet. Retrying in 10s...");
+      log.warn("no eligible targets yet — retrying in 10s");
       await ns.sleep(10_000);
       continue;
     }
@@ -419,11 +456,10 @@ export async function main(ns) {
     let maxWeakenTime = 0;
 
     for (const target of targets) {
-      const server      = ns.getServer(target);
-      const weakenTime  = ns.getWeakenTime(target);
+      const server     = ns.getServer(target);
+      const weakenTime = ns.getWeakenTime(target);
 
       // Drift check: if a farming target has degraded, demote it back to prep.
-      // This handles unexpected security spikes or money drops between cycles.
       let phase = targetPhase.get(target) ?? "prep";
 
       if (phase === "farm") {
@@ -432,7 +468,7 @@ export async function main(ns) {
         if (moneyDrifted || secDrifted) {
           phase = "prep";
           targetPhase.set(target, "prep");
-          ns.print(
+          log.info(
             `[drift] ${target} → re-prep | ` +
             `money=${(server.moneyAvailable / server.moneyMax * 100).toFixed(0)}% | ` +
             `sec=${server.hackDifficulty.toFixed(1)}`
@@ -442,16 +478,14 @@ export async function main(ns) {
 
       if (phase === "prep") {
         // Check if target is already at minSec + maxMoney (e.g. after a game reload).
-        // If so, skip straight to farm without wasting threads on an unnecessary prep.
         const isReady = server.hackDifficulty <= server.minDifficulty + PREP_READY_SEC_TOLERANCE &&
                         server.moneyAvailable >= server.moneyMax * PREP_READY_MONEY_FLOOR;
         if (isReady) {
           targetPhase.set(target, "farm");
-          ns.print(`[ready] ${target} is prepped → starting farm`);
+          log.info(`[ready] ${target} is prepped → starting farm`);
           // fall through to farm dispatch below
         } else {
           dispatchPrep(ns, target, server, execHosts);
-          // Only count weaken time when workers were actually dispatched.
           maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
           continue; // don't farm until prep completes next cycle
         }
@@ -463,13 +497,8 @@ export async function main(ns) {
     }
 
     // ── 6. Sleep until all batch workers should be done ──────────────────────
-    // Use the slowest target's weaken time + a 1s buffer so no old workers are
-    // still running when we re-dispatch next cycle.
     const sleepMs = Math.max(CYCLE_SLEEP_MS, maxWeakenTime + 1_000);
-    ns.print(
-      `[cycle] ${targets.length} target(s) | ` +
-      `sleep ${(sleepMs / 1_000).toFixed(1)}s`
-    );
+    log.info(`[cycle] ${targets.length} target(s) | sleep ${(sleepMs / 1_000).toFixed(1)}s`);
     await ns.sleep(sleepMs);
   }
 }
