@@ -3,7 +3,7 @@ export async function main(ns) {
   // Never spend more than this fraction of cash in a single action.
   const BUDGET_PCT = 0.10;
   const SLEEP_MS   = 10_000;
-  const PREFIX     = "cloud";
+  const PREFIX     = "cheap";
 
   // All valid RAM tiers: 2, 4, 8 ... 2^20 (1 TB max per Bitburner docs)
   const RAM_TIERS = Array.from({ length: 20 }, (_, i) => 2 ** (i + 1));

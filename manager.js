@@ -52,7 +52,7 @@ const PREP_READY_MONEY_FLOOR   = 0.99; // min fraction of moneyMax to consider p
 // RAM to keep free on home for manager itself and any scripts run manually.
 // Reserved = max(floor, percentage) so it scales with home upgrades.
 const HOME_RESERVE_GB  = 32;
-const HOME_RESERVE_PCT = 0.25;
+const HOME_RESERVE_PCT = 0.10;
 
 // Hardcoded RAM per thread for each worker. Avoids needing ns.getScriptRam() in manager
 // (which would add ~1 GB to manager's permanent RAM reservation).
@@ -328,6 +328,14 @@ function dispatchFarm(ns, target, server, execHosts, weakenTime) {
 export async function main(ns) {
   ns.disableLog("ALL");
   ns.print("=== manager.js started ===");
+
+  // Launch the server buyer once. buy.js loops on its own; manager just needs to start it.
+  // exec() returns 0 if it's already running — that's fine, we don't need two copies.
+  if (ns.exec("buy.js", "home", 1) === 0) {
+    ns.print("WARN: buy.js failed to launch (already running, or file missing)");
+  } else {
+    ns.print("[buy] buy.js launched");
+  }
 
   // Hosts that already have hack/grow/weaken deployed. Home always has its own files.
   const deployedHosts = new Set(["home"]);
