@@ -54,14 +54,9 @@ const PREP_READY_MONEY_FLOOR   = 0.99; // min fraction of moneyMax to consider p
 const HOME_RESERVE_GB  = 32;
 const HOME_RESERVE_PCT = 0.10;
 
-// Hardcoded RAM per thread for each worker. Avoids needing ns.getScriptRam() in manager
-// (which would add ~1 GB to manager's permanent RAM reservation).
-// Formula: 1.60 GB base + function cost
-const SCRIPT_RAM = {
-  "hack.js":   1.70, // 1.60 + 0.10 (ns.hack)
-  "grow.js":   1.75, // 1.60 + 0.15 (ns.grow)
-  "weaken.js": 1.75, // 1.60 + 0.15 (ns.weaken)
-};
+// Populated at startup from ns.getScriptRam() — accurate regardless of Bitburner version.
+// Small extra RAM cost (~0.1 GB) is worth avoiding stale hardcoded values.
+const SCRIPT_RAM = { "hack.js": 0, "grow.js": 0, "weaken.js": 0 };
 
 // ─── Utility helpers ─────────────────────────────────────────────────────────
 
@@ -345,7 +340,14 @@ function dispatchFarm(ns, target, server, execHosts, weakenTime) {
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
+
+  // Read actual script RAM from the game — avoids stale hardcoded values across versions.
+  SCRIPT_RAM["hack.js"]   = ns.getScriptRam("hack.js");
+  SCRIPT_RAM["grow.js"]   = ns.getScriptRam("grow.js");
+  SCRIPT_RAM["weaken.js"] = ns.getScriptRam("weaken.js");
+
   ns.print("=== manager.js started ===");
+  ns.print(`[init] Script RAM — hack=${SCRIPT_RAM["hack.js"]}GB grow=${SCRIPT_RAM["grow.js"]}GB weaken=${SCRIPT_RAM["weaken.js"]}GB`);
 
   // Launch the server buyer once. buy.js loops on its own; manager just needs to start it.
   // exec() returns 0 if it's already running — that's fine, we don't need two copies.
