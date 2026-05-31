@@ -52,7 +52,7 @@ const PREP_READY_MONEY_FLOOR   = 0.99; // min fraction of moneyMax to consider p
 // RAM to keep free on home for manager itself and any scripts run manually.
 // Reserved = max(floor, percentage) so it scales with home upgrades.
 const HOME_RESERVE_GB  = 32;
-const HOME_RESERVE_PCT = 0.10;
+const HOME_RESERVE_PCT = 0.25;
 
 // Hardcoded RAM per thread for each worker. Avoids needing ns.getScriptRam() in manager
 // (which would add ~1 GB to manager's permanent RAM reservation).
