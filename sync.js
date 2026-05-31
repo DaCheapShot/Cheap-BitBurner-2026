@@ -10,6 +10,7 @@ export async function main(ns) {
     "deploy.js",
     "root.js",
     "manager.js",
+    "buy.js",
   ];
 
   ns.tprint("Syncing files from GitHub...");
