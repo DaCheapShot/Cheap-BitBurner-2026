@@ -24,10 +24,10 @@ export async function main(ns) {
         const cost     = ns.cloud.getServerCost(ram);
         const hostname = ns.cloud.purchaseServer(PREFIX, ram);
         if (hostname !== "") {
-          ns.print(`BOUGHT ${hostname} (${ns.format.ram(ram)}) for ${ns.format.money(cost)}`);
+          ns.print(`BOUGHT ${hostname} (${ns.format.ram(ram)}) for ${ns.format.number(cost)}`);
         }
       } else {
-        ns.print(`Waiting — cheapest server > budget (${ns.format.money(budget)})`);
+        ns.print(`Waiting — cheapest server > budget (${ns.format.number(budget)})`);
       }
     } else {
       // All slots filled — upgrade the weakest server if affordable.
@@ -46,10 +46,10 @@ export async function main(ns) {
         if (cost > 0 && cost <= budget) {
           const ok = ns.cloud.upgradeServer(target, nextRam);
           if (ok) {
-            ns.print(`UPGRADED ${target}: ${ns.format.ram(curRam)} → ${ns.format.ram(nextRam)} for ${ns.format.money(cost)}`);
+            ns.print(`UPGRADED ${target}: ${ns.format.ram(curRam)} → ${ns.format.ram(nextRam)} for ${ns.format.number(cost)}`);
           }
         } else {
-          ns.print(`Waiting — upgrade ${target} → ${ns.format.ram(nextRam)} costs ${ns.format.money(cost)} (budget: ${ns.format.money(budget)})`);
+          ns.print(`Waiting — upgrade ${target} → ${ns.format.ram(nextRam)} costs ${ns.format.number(cost)} (budget: ${ns.format.number(budget)})`);
         }
       }
     }
