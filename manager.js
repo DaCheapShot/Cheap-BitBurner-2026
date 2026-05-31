@@ -169,14 +169,57 @@ function buildExecHosts(ns, allServers, deployedHosts) {
   return hosts;
 }
 
+/**
+ * Score all hackable servers and return the best N hostnames.
+ *
+ * Score = moneyMax × hackChance / weakenTime
+ *   Higher moneyMax   → more income per hack
+ *   Higher hackChance → more reliable income (important early game)
+ *   Lower weakenTime  → faster cycles → higher income per hour
+ *
+ * A server is eligible to target when:
+ *   - We have root access
+ *   - Our hacking level meets its requirement
+ *   - It has money (filters out purchased servers, special servers, etc.)
+ *
+ * @param {NS} ns
+ * @param {string[]} allServers
+ * @param {number} maxCount
+ * @returns {string[]} hostnames sorted best-first, up to maxCount
+ */
+function pickTargets(ns, allServers, maxCount) {
+  const hackLevel = ns.getHackingLevel();
+  const scored    = [];
+
+  for (const host of allServers) {
+    const server = ns.getServer(host);
+    if (!server.hasAdminRights)                   continue;
+    if (server.requiredHackingSkill > hackLevel)  continue;
+    if (!server.moneyMax || server.moneyMax <= 0) continue; // excludes pserv-*, etc.
+
+    const score = server.moneyMax
+                * ns.hackAnalyzeChance(host)
+                / ns.getWeakenTime(host);
+    scored.push({ host, score });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, maxCount).map(s => s.host);
+}
+
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-  const deployedHosts = new Set(["home"]);
-  const allServers    = scanNetwork(ns);
-  const execHosts     = buildExecHosts(ns, allServers, deployedHosts);
-  ns.tprint("Exec hosts this cycle:");
-  for (const { host, freeRam } of execHosts) {
-    ns.tprint(`  ${host}: ${freeRam.toFixed(1)} GB free`);
+  const allServers = scanNetwork(ns);
+  const targets    = pickTargets(ns, allServers, TOP_TARGETS);
+  if (targets.length === 0) {
+    ns.tprint("No eligible targets — check root access and hack level");
+    return;
+  }
+  ns.tprint(`Top ${targets.length} target(s):`);
+  for (const host of targets) {
+    const s     = ns.getServer(host);
+    const score = s.moneyMax * ns.hackAnalyzeChance(host) / ns.getWeakenTime(host);
+    ns.tprint(`  ${host}: $${(s.moneyMax/1e6).toFixed(1)}m | score=${score.toFixed(4)}`);
   }
 }
