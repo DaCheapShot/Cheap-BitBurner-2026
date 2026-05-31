@@ -251,6 +251,75 @@ function dispatchPrep(ns, target, server, execHosts) {
   fitAndExec(ns, execHosts, "weaken.js", weaken2Threads, [target, 0]);
 }
 
+/**
+ * Dispatch one HWGW batch against a prepped target.
+ * All four workers launch at the same real-world time but sleep different delays,
+ * so they complete in this order (BATCH_PADDING_MS apart):
+ *
+ *   Hack    finishes at T                 → steals HACK_STEAL_PCT of moneyMax
+ *   Weaken1 finishes at T + 200ms         → offsets hack's security raise
+ *   Grow    finishes at T + 400ms         → restores stolen money
+ *   Weaken2 finishes at T + 600ms         → offsets grow's security raise
+ *
+ * This ordering keeps the server at minSec + maxMoney after every batch,
+ * so the next batch's thread calculations remain accurate without re-prepping.
+ *
+ * Delay math (all workers launched simultaneously, then sleep their delay):
+ *   W1: delay = 0                           → finishes at T + weakenTime (baseline)
+ *   H:  delay = weakenTime - hackTime - 200 → finishes at T + weakenTime - 200ms
+ *   G:  delay = weakenTime - growTime + 200 → finishes at T + weakenTime + 200ms
+ *   W2: delay = 400                         → finishes at T + weakenTime + 400ms
+ *
+ * Thread math:
+ *   hackAnalyzeThreads takes a dollar amount, not a fraction.
+ *   hack   raises security 0.002/thread → weaken1 = ceil(hackThreads × 0.002 / 0.05)
+ *   grow   raises security 0.004/thread → weaken2 = ceil(growThreads × 0.004 / 0.05)
+ *   After stealing 50%, need 1/(1-0.50) = 2× growth to restore to maxMoney.
+ *
+ * @param {NS} ns
+ * @param {string} target
+ * @param {ReturnType<NS["getServer"]>} server  — ns.getServer(target), assumed prepped
+ * @param {Array<{host: string, freeRam: number}>} execHosts
+ * @param {number} weakenTime — ms for ns.weaken() on this target (pre-computed by caller)
+ */
+function dispatchFarm(ns, target, server, execHosts, weakenTime) {
+  const hackTime = ns.getHackTime(target);
+  const growTime = ns.getGrowTime(target);
+
+  // --- Thread counts ---
+  // hackAnalyzeThreads(host, dollarAmount) — pass dollar amount, not fraction
+  const hackThreads = Math.max(1, Math.floor(
+    ns.hackAnalyzeThreads(target, server.moneyMax * HACK_STEAL_PCT)
+  ));
+  // Each hack thread raises security by 0.002; each weaken thread lowers it by 0.05
+  const weaken1Threads = Math.max(1, Math.ceil(hackThreads * 0.002 / 0.05));
+  // Restore from (1 - HACK_STEAL_PCT) × moneyMax back to moneyMax
+  const restoreMult    = 1 / (1 - HACK_STEAL_PCT); // = 2.0 at 50% steal
+  const growThreads    = Math.max(1, Math.ceil(ns.growthAnalyze(target, restoreMult)));
+  // Each grow thread raises security by 0.004
+  const weaken2Threads = Math.max(1, Math.ceil(growThreads * 0.004 / 0.05));
+
+  // --- Stagger delays (ms) ---
+  // Math.max(0, ...) guards against negative delays on very fast servers
+  const hackDelay    = Math.max(0, weakenTime - hackTime - BATCH_PADDING_MS);
+  const weaken1Delay = 0;
+  const growDelay    = Math.max(0, weakenTime - growTime + BATCH_PADDING_MS);
+  const weaken2Delay = BATCH_PADDING_MS * 2;
+
+  ns.print(
+    `[farm] ${target} | ` +
+    `h=${hackThreads}(+${hackDelay}ms) ` +
+    `w1=${weaken1Threads} ` +
+    `g=${growThreads}(+${growDelay}ms) ` +
+    `w2=${weaken2Threads}(+${weaken2Delay}ms)`
+  );
+
+  fitAndExec(ns, execHosts, "hack.js",   hackThreads,    [target, hackDelay]);
+  fitAndExec(ns, execHosts, "weaken.js", weaken1Threads, [target, weaken1Delay]);
+  fitAndExec(ns, execHosts, "grow.js",   growThreads,    [target, growDelay]);
+  fitAndExec(ns, execHosts, "weaken.js", weaken2Threads, [target, weaken2Delay]);
+}
+
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
@@ -259,7 +328,9 @@ export async function main(ns) {
   const execHosts     = buildExecHosts(ns, allServers, deployedHosts);
   const targets       = pickTargets(ns, allServers, 1);
   if (targets.length === 0) { ns.tprint("No targets"); return; }
-  const server = ns.getServer(targets[0]);
-  dispatchPrep(ns, targets[0], server, execHosts);
-  ns.tprint(`Prep dispatched for ${targets[0]}`);
+  const target      = targets[0];
+  const server      = ns.getServer(target);
+  const weakenTime  = ns.getWeakenTime(target);
+  dispatchFarm(ns, target, server, execHosts, weakenTime);
+  ns.tprint(`Farm batch dispatched for ${target}. Weaken time: ${(weakenTime/1000).toFixed(1)}s`);
 }
