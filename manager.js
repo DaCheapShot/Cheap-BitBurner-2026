@@ -56,7 +56,7 @@ const HOME_RESERVE_PCT = 0.10;
 
 // Populated at startup from ns.getScriptRam() — accurate regardless of Bitburner version.
 // Small extra RAM cost (~0.1 GB) is worth avoiding stale hardcoded values.
-const SCRIPT_RAM = { "hack.js": 0, "grow.js": 0, "weaken.js": 0 };
+const SCRIPT_RAM = { "hack.js": 0, "grow.js": 0, "weaken.js": 0, "deploy.js": 0 };
 
 // ─── Utility helpers ─────────────────────────────────────────────────────────
 
@@ -153,18 +153,9 @@ function fitAndExec(ns, execHosts, script, totalThreads, args) {
  */
 function buildExecHosts(ns, allServers, deployedHosts) {
   const hosts = [];
+  let deployRamUsed = 0; // RAM consumed on home by deploy.js launches this call
 
-  // Home: always available, apply the reserved-RAM floor
-  const home     = ns.getServer("home");
-  const reserved = Math.max(HOME_RESERVE_GB, home.maxRam * HOME_RESERVE_PCT);
-  const homeFree = Math.max(0, home.maxRam - home.ramUsed - reserved);
-  ns.print(
-    `[hosts] home: ${home.maxRam}GB max | ${home.ramUsed.toFixed(1)}GB used | ` +
-    `${reserved.toFixed(1)}GB reserved → ${homeFree.toFixed(1)}GB free`
-  );
-  if (homeFree > 0) hosts.push({ host: "home", freeRam: homeFree });
-
-  // All rooted servers on the network (purchased servers appear here too via BFS)
+  // Process all rooted servers first — deploy.js launches happen here and consume home RAM.
   for (const host of allServers) {
     const server = ns.getServer(host);
     if (!server.hasAdminRights) { ns.print(`[hosts] SKIP ${host}: no root`); continue; }
@@ -175,7 +166,8 @@ function buildExecHosts(ns, allServers, deployedHosts) {
       // Skip it as an exec host this cycle — deploy.js may still be running.
       if (ns.exec("deploy.js", "home", 1, host) > 0) {
         deployedHosts.add(host);
-        ns.print(`[deploy] Queuing workers → ${host}`);
+        deployRamUsed += SCRIPT_RAM["deploy.js"]; // track RAM consumed on home
+        ns.print(`[deploy] Queuing workers → ${host} (${SCRIPT_RAM["deploy.js"]}GB)`);
       }
       continue; // available next cycle
     }
@@ -184,6 +176,16 @@ function buildExecHosts(ns, allServers, deployedHosts) {
     ns.print(`[hosts] ${host}: ${server.maxRam}GB max | ${server.ramUsed.toFixed(1)}GB used → ${freeRam.toFixed(1)}GB free`);
     if (freeRam > 0) hosts.push({ host, freeRam });
   }
+
+  // Compute home free RAM AFTER all deploy.js launches so deployRamUsed is accurate.
+  const home     = ns.getServer("home");
+  const reserved = Math.max(HOME_RESERVE_GB, home.maxRam * HOME_RESERVE_PCT);
+  const homeFree = Math.max(0, home.maxRam - home.ramUsed - reserved - deployRamUsed);
+  ns.print(
+    `[hosts] home: ${home.maxRam}GB max | ${home.ramUsed.toFixed(1)}GB used | ` +
+    `${reserved.toFixed(1)}GB reserved | ${deployRamUsed.toFixed(1)}GB deploy → ${homeFree.toFixed(1)}GB free`
+  );
+  if (homeFree > 0) hosts.unshift({ host: "home", freeRam: homeFree }); // home first
 
   return hosts;
 }
@@ -356,6 +358,7 @@ export async function main(ns) {
   SCRIPT_RAM["hack.js"]   = ns.getScriptRam("hack.js");
   SCRIPT_RAM["grow.js"]   = ns.getScriptRam("grow.js");
   SCRIPT_RAM["weaken.js"] = ns.getScriptRam("weaken.js");
+  SCRIPT_RAM["deploy.js"] = ns.getScriptRam("deploy.js");
 
   ns.print("=== manager.js started ===");
   ns.print(`[init] Script RAM — hack=${SCRIPT_RAM["hack.js"]}GB grow=${SCRIPT_RAM["grow.js"]}GB weaken=${SCRIPT_RAM["weaken.js"]}GB`);
