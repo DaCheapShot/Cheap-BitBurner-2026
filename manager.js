@@ -207,19 +207,59 @@ function pickTargets(ns, allServers, maxCount) {
   return scored.slice(0, maxCount).map(s => s.host);
 }
 
+/**
+ * Dispatch prep workers to bring target to minDifficulty + moneyMax.
+ * Must complete before farm batches start (prep is a prerequisite for accurate HWGW math).
+ *
+ * Launches all three workers simultaneously with delay=0.
+ * This is safe because grow always finishes before weaken (growTime < weakenTime),
+ * so weaken2 will still be running when grow completes and will correctly offset
+ * the security that grow added.
+ *
+ * Thread math:
+ *   weaken lowers security by 0.05 per thread
+ *   grow   raises security by 0.004 per thread → weaken2 compensates for this
+ *
+ * @param {NS} ns
+ * @param {string} target
+ * @param {ReturnType<NS["getServer"]>} server  — ns.getServer(target) result
+ * @param {Array<{host: string, freeRam: number}>} execHosts
+ */
+function dispatchPrep(ns, target, server, execHosts) {
+  // Weaken threads to reach minimum security
+  const secDelta       = server.hackDifficulty - server.minDifficulty;
+  const weaken1Threads = Math.max(1, Math.ceil(secDelta / 0.05));
+
+  // Grow threads to reach maximum money.
+  // Clamp moneyAvailable to 1 to avoid division-by-zero on a completely empty server.
+  const growMult    = server.moneyMax / Math.max(server.moneyAvailable, 1);
+  const growThreads = Math.max(1, Math.ceil(ns.growthAnalyze(target, growMult)));
+
+  // Weaken threads to offset the security raise from grow (0.004 security per grow thread)
+  const weaken2Threads = Math.max(1, Math.ceil(growThreads * 0.004 / 0.05));
+
+  ns.print(
+    `[prep] ${target} | ` +
+    `sec ${server.hackDifficulty.toFixed(1)}→${server.minDifficulty.toFixed(1)} | ` +
+    `money $${(server.moneyAvailable / 1e6).toFixed(1)}m→$${(server.moneyMax / 1e6).toFixed(1)}m | ` +
+    `w1=${weaken1Threads} g=${growThreads} w2=${weaken2Threads}`
+  );
+
+  // delay=0 for all three — timing is not critical for prep, only for farm
+  fitAndExec(ns, execHosts, "weaken.js", weaken1Threads, [target, 0]);
+  fitAndExec(ns, execHosts, "grow.js",   growThreads,    [target, 0]);
+  fitAndExec(ns, execHosts, "weaken.js", weaken2Threads, [target, 0]);
+}
+
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-  const allServers = scanNetwork(ns);
-  const targets    = pickTargets(ns, allServers, TOP_TARGETS);
-  if (targets.length === 0) {
-    ns.tprint("No eligible targets — check root access and hack level");
-    return;
-  }
-  ns.tprint(`Top ${targets.length} target(s):`);
-  for (const host of targets) {
-    const s     = ns.getServer(host);
-    const score = s.moneyMax * ns.hackAnalyzeChance(host) / ns.getWeakenTime(host);
-    ns.tprint(`  ${host}: $${(s.moneyMax/1e6).toFixed(1)}m | score=${score.toFixed(4)}`);
-  }
+  const deployedHosts = new Set(["home"]);
+  const allServers    = scanNetwork(ns);
+  const execHosts     = buildExecHosts(ns, allServers, deployedHosts);
+  const targets       = pickTargets(ns, allServers, 1);
+  if (targets.length === 0) { ns.tprint("No targets"); return; }
+  const server = ns.getServer(targets[0]);
+  dispatchPrep(ns, targets[0], server, execHosts);
+  ns.tprint(`Prep dispatched for ${targets[0]}`);
 }
