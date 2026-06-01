@@ -32,6 +32,7 @@ export async function main(ns) {
     // Parse host and filename from "contracts/pending/I.I.I.I@contract-001.cct.txt"
     const base     = pendingPath.replace("contracts/pending/", "").replace(/\.txt$/, "");
     const at       = base.indexOf("@");
+    if (at === -1) { ns.rm(pendingPath, "home"); continue; } // stale pre-fix marker
     const host     = base.slice(0, at);
     const filename = base.slice(at + 1);
 
