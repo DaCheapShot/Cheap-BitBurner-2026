@@ -157,6 +157,19 @@ class RamManager {
   }
 
   /**
+   * How many threads of `script` could be placed right now across all hosts?
+   * Read-only — does not mutate snapshot. Returns min(placeable, threads).
+   */
+  canFit(script, threads) {
+    const ramPerThread = SCRIPT_RAM[script];
+    let placeable = 0;
+    for (const { freeRam } of this._hosts.values()) {
+      placeable += Math.floor(freeRam / ramPerThread);
+    }
+    return Math.min(placeable, threads);
+  }
+
+  /**
    * Distribute `threads` of `script` across exec hosts in snapshot order.
    * Performs a live RAM check per host as a safety net for RAM consumed after
    * snapshot time. Mutates freeRam entries. Logs a warning if threads go undeployed.
@@ -278,8 +291,16 @@ function dispatchPrep(ns, target, server, ramMgr) {
     `RAM needed: ${prepRamNeeded.toFixed(1)}GB`
   );
 
+  const w1Fit = ramMgr.canFit("weaken.js", weaken1Threads);
+  if (w1Fit < weaken1Threads) log.warn(`[prep] ${target}: only ${w1Fit}/${weaken1Threads} weaken1 threads fit`);
   ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, 0]);
-  ramMgr.allocate(ns, "grow.js",   growThreads,    [target, 0]);
+
+  const gFit = ramMgr.canFit("grow.js", growThreads);
+  if (gFit < growThreads) log.warn(`[prep] ${target}: only ${gFit}/${growThreads} grow threads fit`);
+  ramMgr.allocate(ns, "grow.js", growThreads, [target, 0]);
+
+  const w2Fit = ramMgr.canFit("weaken.js", weaken2Threads);
+  if (w2Fit < weaken2Threads) log.warn(`[prep] ${target}: only ${w2Fit}/${weaken2Threads} weaken2 threads fit`);
   ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, 0]);
 }
 
@@ -313,9 +334,20 @@ function dispatchFarm(ns, target, server, ramMgr, weakenTime) {
     `RAM needed: ${farmRamNeeded.toFixed(1)}GB`
   );
 
-  ramMgr.allocate(ns, "hack.js",   hackThreads,    [target, hackDelay]);
+  const hFit = ramMgr.canFit("hack.js", hackThreads);
+  if (hFit < hackThreads) log.warn(`[farm] ${target}: only ${hFit}/${hackThreads} hack threads fit`);
+  ramMgr.allocate(ns, "hack.js", hackThreads, [target, hackDelay]);
+
+  const w1Fit = ramMgr.canFit("weaken.js", weaken1Threads);
+  if (w1Fit < weaken1Threads) log.warn(`[farm] ${target}: only ${w1Fit}/${weaken1Threads} weaken1 threads fit`);
   ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, weaken1Delay]);
-  ramMgr.allocate(ns, "grow.js",   growThreads,    [target, growDelay]);
+
+  const gFit = ramMgr.canFit("grow.js", growThreads);
+  if (gFit < growThreads) log.warn(`[farm] ${target}: only ${gFit}/${growThreads} grow threads fit`);
+  ramMgr.allocate(ns, "grow.js", growThreads, [target, growDelay]);
+
+  const w2Fit = ramMgr.canFit("weaken.js", weaken2Threads);
+  if (w2Fit < weaken2Threads) log.warn(`[farm] ${target}: only ${w2Fit}/${weaken2Threads} weaken2 threads fit`);
   ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, weaken2Delay]);
 }
 
