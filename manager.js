@@ -338,15 +338,15 @@ function dispatchPrep(ns, target, server, ramMgr) {
 
   const w1Fit = ramMgr.canFit("weaken.js", weaken1Threads);
   if (w1Fit < weaken1Threads) log.warn(`[prep] ${target}: only ${w1Fit}/${weaken1Threads} weaken1 threads fit`);
-  let placed = ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, 0, "prep", 0]);
+  let placed = ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, 0]);
 
   const gFit = ramMgr.canFit("grow.js", growThreads);
   if (gFit < growThreads) log.warn(`[prep] ${target}: only ${gFit}/${growThreads} grow threads fit`);
-  placed += ramMgr.allocate(ns, "grow.js", growThreads, [target, 0, "prep", 0]);
+  placed += ramMgr.allocate(ns, "grow.js", growThreads, [target, 0]);
 
   const w2Fit = ramMgr.canFit("weaken.js", weaken2Threads);
   if (w2Fit < weaken2Threads) log.warn(`[prep] ${target}: only ${w2Fit}/${weaken2Threads} weaken2 threads fit`);
-  placed += ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, 0, "prep", 0]);
+  placed += ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, 0]);
 
   return placed > 0;
 }
@@ -607,11 +607,7 @@ export async function main(ns) {
       // Phase is "farm" — either it was already, or just promoted above.
       const batches = dispatchFarm(ns, target, server, ramMgr, weakenTime, formulasAvailable);
       if (batches > 0) {
-        const numOps      = formulasAvailable ? 3 : 4;
-        const batchPeriod = BATCH_PADDING_MS * numOps;
-        // Last operation of the last batch finishes at:
-        //   weakenTime + (numOps-2)*BATCH_PADDING_MS + (batches-1)*batchPeriod
-        const endMs = weakenTime + BATCH_PADDING_MS * (numOps - 2) + (batches - 1) * batchPeriod;
+        const endMs = weakenTime + (batches - 1) * BATCH_PADDING_MS;
         maxEndMs = Math.max(maxEndMs, endMs);
       }
     }
