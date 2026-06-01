@@ -29,9 +29,11 @@
 
 // ─── Tuning constants ────────────────────────────────────────────────────────
 
-// Fraction of moneyMax to steal per farm batch.
-// 50% is a reliable default: high income, and grow can restore it in one batch.
-const HACK_STEAL_PCT = 0.50;
+// Steal% range for dynamic RAM-driven selection. stackBatches tries from MAX
+// down to MIN in STEP increments, picking the highest that lets ≥1 full batch fit.
+const STEAL_PCT_MAX  = 0.95;
+const STEAL_PCT_MIN  = 0.10;
+const STEAL_PCT_STEP = 0.05;
 
 // Max targets managed in parallel. More targets = higher RAM usage per cycle.
 const TOP_TARGETS = 5;
@@ -307,53 +309,124 @@ function dispatchPrep(ns, target, server, ramMgr) {
   return placed > 0;
 }
 
-function dispatchFarm(ns, target, server, ramMgr, weakenTime) {
-  const hackTime = ns.getHackTime(target);
-  const growTime = ns.getGrowTime(target);
+// ─── Batch planning ──────────────────────────────────────────────────────────
 
-  const hackThreads    = Math.max(1, Math.floor(
-    ns.hackAnalyzeThreads(target, server.moneyMax * HACK_STEAL_PCT)
-  ));
-  const weaken1Threads = Math.max(1, Math.ceil(hackThreads * 0.002 / 0.05));
-  const restoreMult    = 1 / (1 - HACK_STEAL_PCT);
-  const growThreads    = Math.max(1, Math.ceil(ns.growthAnalyze(target, restoreMult)));
-  const weaken2Threads = Math.max(1, Math.ceil(growThreads * 0.004 / 0.05));
+/**
+ * Calculate thread counts and total RAM for one batch.
+ *
+ * HWGW (formulasAvailable=false): 4 scripts — hack, weaken1, grow, weaken2.
+ *   weaken1 covers hack's security delta; weaken2 covers grow's.
+ * HGW  (formulasAvailable=true):  3 scripts — hack, weaken1, grow.
+ *   weaken1 covers both hack and grow security deltas combined. weaken2T=0.
+ *
+ * @param {NS} ns
+ * @param {string} target
+ * @param {object} server  — ns.getServer(target) result
+ * @param {number} stealPct — fraction of moneyMax to steal (0.10–0.95)
+ * @param {boolean} formulasAvailable
+ * @returns {{ hackT: number, weaken1T: number, growT: number, weaken2T: number, totalRam: number }}
+ */
+function calcBatchPlan(ns, target, server, stealPct, formulasAvailable) {
+  const hackT = Math.max(1, Math.floor(ns.hackAnalyzeThreads(target, server.moneyMax * stealPct)));
+  const growT = Math.max(1, Math.ceil(ns.growthAnalyze(target, 1 / (1 - stealPct))));
 
-  const hackDelay    = Math.max(0, weakenTime - hackTime - BATCH_PADDING_MS);
-  const weaken1Delay = 0;
-  const growDelay    = Math.max(0, weakenTime - growTime + BATCH_PADDING_MS);
-  const weaken2Delay = BATCH_PADDING_MS * 2;
+  const hackSecDelta = hackT * 0.002;
+  const growSecDelta = growT * 0.004;
 
-  const farmRamNeeded = hackThreads    * SCRIPT_RAM["hack.js"]
-                      + weaken1Threads * SCRIPT_RAM["weaken.js"]
-                      + growThreads    * SCRIPT_RAM["grow.js"]
-                      + weaken2Threads * SCRIPT_RAM["weaken.js"];
+  const weaken1T = formulasAvailable
+    ? Math.max(1, Math.ceil((hackSecDelta + growSecDelta) / 0.05))
+    : Math.max(1, Math.ceil(hackSecDelta / 0.05));
+  const weaken2T = formulasAvailable
+    ? 0
+    : Math.max(1, Math.ceil(growSecDelta / 0.05));
+
+  const totalRam = hackT    * SCRIPT_RAM["hack.js"]
+                 + weaken1T * SCRIPT_RAM["weaken.js"]
+                 + growT    * SCRIPT_RAM["grow.js"]
+                 + weaken2T * SCRIPT_RAM["weaken.js"];
+
+  return { hackT, weaken1T, growT, weaken2T, totalRam };
+}
+
+/**
+ * Find the highest steal% where ≥1 complete batch fits in free RAM, then
+ * dispatch N batches with staggered offsets. All-or-nothing: if any script
+ * can't be fully allocated mid-loop, stops before deploying a partial batch.
+ *
+ * Greedy allocation: caller must process targets best-first so the top target
+ * claims RAM at the highest steal% before lower-priority targets search the remainder.
+ *
+ * @param {NS} ns
+ * @param {string} target
+ * @param {object} server
+ * @param {RamManager} ramMgr
+ * @param {number} weakenTime  — ms returned by ns.getWeakenTime(target)
+ * @param {boolean} formulasAvailable
+ * @returns {number} batches dispatched (0 if no steal% fit)
+ */
+function stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable) {
+  const hackTime    = ns.getHackTime(target);
+  const growTime    = ns.getGrowTime(target);
+  const numOps      = formulasAvailable ? 3 : 4;
+  const batchPeriod = BATCH_PADDING_MS * numOps;
+
+  // Find highest steal% where at least 1 complete batch fits
+  let stealPct = 0;
+  let plan     = null;
+  let N        = 0;
+
+  for (let pct = STEAL_PCT_MAX; pct >= STEAL_PCT_MIN - 1e-9; pct -= STEAL_PCT_STEP) {
+    const candidate = calcBatchPlan(ns, target, server, pct, formulasAvailable);
+    const fits      = Math.floor(ramMgr.totalFree() / candidate.totalRam);
+    if (fits >= 1) { stealPct = pct; plan = candidate; N = fits; break; }
+  }
+
+  if (N === 0) {
+    log.warn(`[farm] ${target}: no steal% fits even 1 batch — skipping`);
+    return 0;
+  }
+
   log.info(
-    `[farm] ${target} | ` +
-    `h=${hackThreads}(+${hackDelay}ms) ` +
-    `w1=${weaken1Threads} ` +
-    `g=${growThreads}(+${growDelay}ms) ` +
-    `w2=${weaken2Threads}(+${weaken2Delay}ms) | ` +
-    `RAM needed: ${farmRamNeeded.toFixed(1)}GB`
+    `[farm] ${target} | mode=${formulasAvailable ? "HGW" : "HWGW"} | ` +
+    `steal=${(stealPct * 100).toFixed(0)}% | batches=${N} | ` +
+    `h=${plan.hackT} w1=${plan.weaken1T} g=${plan.growT}` +
+    (plan.weaken2T > 0 ? ` w2=${plan.weaken2T}` : "") +
+    ` | RAM/batch=${plan.totalRam.toFixed(1)}GB`
   );
 
-  const hFit = ramMgr.canFit("hack.js", hackThreads);
-  if (hFit < hackThreads) log.warn(`[farm] ${target}: only ${hFit}/${hackThreads} hack threads fit`);
-  let placed = ramMgr.allocate(ns, "hack.js", hackThreads, [target, hackDelay]);
+  let dispatched = 0;
+  for (let i = 0; i < N; i++) {
+    const offset = i * batchPeriod;
 
-  const w1Fit = ramMgr.canFit("weaken.js", weaken1Threads);
-  if (w1Fit < weaken1Threads) log.warn(`[farm] ${target}: only ${w1Fit}/${weaken1Threads} weaken1 threads fit`);
-  placed += ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, weaken1Delay]);
+    // All-or-nothing gate: verify all scripts still fit before allocating.
+    // RAM may have shifted since N was calculated (previous targets already allocated).
+    const totalWeakenT = plan.weaken1T + plan.weaken2T;
+    if (ramMgr.canFit("hack.js",   plan.hackT)    < plan.hackT    ||
+        ramMgr.canFit("weaken.js", totalWeakenT)  < totalWeakenT  ||
+        ramMgr.canFit("grow.js",   plan.growT)     < plan.growT) {
+      log.warn(`[farm] ${target}: stopped at batch ${i}/${N} — RAM exhausted`);
+      break;
+    }
 
-  const gFit = ramMgr.canFit("grow.js", growThreads);
-  if (gFit < growThreads) log.warn(`[farm] ${target}: only ${gFit}/${growThreads} grow threads fit`);
-  placed += ramMgr.allocate(ns, "grow.js", growThreads, [target, growDelay]);
+    const hackDelay    = Math.max(0, weakenTime - hackTime - BATCH_PADDING_MS + offset);
+    const weaken1Delay = offset;
+    const growDelay    = Math.max(0, weakenTime - growTime + BATCH_PADDING_MS + offset);
+    const weaken2Delay = BATCH_PADDING_MS * 2 + offset;
 
-  const w2Fit = ramMgr.canFit("weaken.js", weaken2Threads);
-  if (w2Fit < weaken2Threads) log.warn(`[farm] ${target}: only ${w2Fit}/${weaken2Threads} weaken2 threads fit`);
-  placed += ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, weaken2Delay]);
+    ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackDelay]);
+    ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weaken1Delay]);
+    ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growDelay]);
+    if (plan.weaken2T > 0) {
+      ramMgr.allocate(ns, "weaken.js", plan.weaken2T, [target, weaken2Delay]);
+    }
+    dispatched++;
+  }
 
-  return placed > 0;
+  return dispatched;
+}
+
+function dispatchFarm(ns, target, server, ramMgr, weakenTime, formulasAvailable) {
+  return stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable);
 }
 
 /** @param {NS} ns */
@@ -417,6 +490,10 @@ export async function main(ns) {
     // ── 2. Discover all servers ───────────────────────────────────────────────
     const allServers = scanNetwork(ns);
 
+    // ── 2b. Detect Formulas.exe ───────────────────────────────────────────────
+    const formulasAvailable = ns.fileExists("Formulas.exe", "home");
+    log.debug(`[cycle] mode=${formulasAvailable ? "HGW" : "HWGW"}`);
+
     // ── 3. Build exec host list; deploy workers to new hosts ─────────────────
     ramMgr.refresh(ns, allServers, deployedHosts);
     log.info(`[hosts] ${ramMgr.hostCount()} exec host(s) | ${ramMgr.totalFree().toFixed(1)}GB total free`);
@@ -431,7 +508,7 @@ export async function main(ns) {
     }
 
     // ── 5. Dispatch batches ───────────────────────────────────────────────────
-    let maxWeakenTime = 0;
+    let maxEndMs = 0;
 
     for (const target of targets) {
       const server     = ns.getServer(target);
@@ -464,18 +541,25 @@ export async function main(ns) {
           // fall through to farm dispatch below
         } else {
           if (dispatchPrep(ns, target, server, ramMgr))
-            maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
+            maxEndMs = Math.max(maxEndMs, weakenTime);
           continue; // don't farm until prep completes next cycle
         }
       }
 
       // Phase is "farm" — either it was already, or just promoted above.
-      if (dispatchFarm(ns, target, server, ramMgr, weakenTime))
-        maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
+      const batches = dispatchFarm(ns, target, server, ramMgr, weakenTime, formulasAvailable);
+      if (batches > 0) {
+        const numOps      = formulasAvailable ? 3 : 4;
+        const batchPeriod = BATCH_PADDING_MS * numOps;
+        // Last operation of the last batch finishes at:
+        //   weakenTime + (numOps-2)*BATCH_PADDING_MS + (batches-1)*batchPeriod
+        const endMs = weakenTime + BATCH_PADDING_MS * (numOps - 2) + (batches - 1) * batchPeriod;
+        maxEndMs = Math.max(maxEndMs, endMs);
+      }
     }
 
     // ── 6. Sleep until all batch workers should be done ──────────────────────
-    const sleepMs = Math.max(CYCLE_SLEEP_MS, maxWeakenTime + 1_000);
+    const sleepMs = Math.max(CYCLE_SLEEP_MS, maxEndMs + 1_000);
     log.info(`[cycle] ${targets.length} target(s) | sleep ${ns.format.time(sleepMs)}`);
     await ns.sleep(sleepMs);
     ns.clearLog();
