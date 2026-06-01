@@ -338,15 +338,15 @@ function dispatchPrep(ns, target, server, ramMgr) {
 
   const w1Fit = ramMgr.canFit("weaken.js", weaken1Threads);
   if (w1Fit < weaken1Threads) log.warn(`[prep] ${target}: only ${w1Fit}/${weaken1Threads} weaken1 threads fit`);
-  let placed = ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, 0, "prep", 0]);
+  let placed = ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, 0]);
 
   const gFit = ramMgr.canFit("grow.js", growThreads);
   if (gFit < growThreads) log.warn(`[prep] ${target}: only ${gFit}/${growThreads} grow threads fit`);
-  placed += ramMgr.allocate(ns, "grow.js", growThreads, [target, 0, "prep", 0]);
+  placed += ramMgr.allocate(ns, "grow.js", growThreads, [target, 0]);
 
   const w2Fit = ramMgr.canFit("weaken.js", weaken2Threads);
   if (w2Fit < weaken2Threads) log.warn(`[prep] ${target}: only ${w2Fit}/${weaken2Threads} weaken2 threads fit`);
-  placed += ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, 0, "prep", 0]);
+  placed += ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, 0]);
 
   return placed > 0;
 }
@@ -409,8 +409,7 @@ function calcBatchPlan(ns, target, server, stealPct, formulasAvailable) {
 function stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable) {
   const hackTime    = ns.getHackTime(target);
   const growTime    = ns.getGrowTime(target);
-  const numOps      = formulasAvailable ? 3 : 4;
-  const batchPeriod = BATCH_PADDING_MS * numOps;
+  const batchPeriod = BATCH_PADDING_MS;
 
   // Find highest steal% where at least 1 complete batch fits
   let stealPct = 0;
@@ -438,8 +437,6 @@ function stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable)
 
   let dispatched = 0;
   for (let i = 0; i < N; i++) {
-    const offset = i * batchPeriod;
-
     // All-or-nothing gate: verify all scripts still fit before allocating.
     // RAM may have shifted since N was calculated (previous targets already allocated).
     const totalWeakenT = plan.weaken1T + plan.weaken2T;
@@ -450,16 +447,22 @@ function stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable)
       break;
     }
 
-    const hackDelay    = Math.max(0, weakenTime - hackTime - BATCH_PADDING_MS + offset);
-    const weaken1Delay = offset;
-    const growDelay    = Math.max(0, weakenTime - growTime + BATCH_PADDING_MS + offset);
-    const weaken2Delay = BATCH_PADDING_MS * 2 + offset;
+    const batchOffset  = i * batchPeriod;
+    const hackAddlMs   = Math.max(0, weakenTime - hackTime) + batchOffset;
+    const growAddlMs   = Math.max(0, weakenTime - growTime) + batchOffset;
+    const weakenAddlMs = batchOffset;
 
-    ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackDelay,    "farm", i]);
-    ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weaken1Delay, "farm", i]);
-    ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growDelay,    "farm", i]);
-    if (plan.weaken2T > 0) {
-      ramMgr.allocate(ns, "weaken.js", plan.weaken2T, [target, weaken2Delay, "farm", i]);
+    if (formulasAvailable) {
+      // HGW: H → G → W1 — single weaken fires last, after both ops raised security
+      ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs]);
+      ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs]);
+      ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs]);
+    } else {
+      // HWGW: H → W1 → G → W2 — each weaken immediately follows its paired op
+      ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs]);
+      ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs]);
+      ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs]);
+      ramMgr.allocate(ns, "weaken.js", plan.weaken2T, [target, weakenAddlMs]);
     }
     dispatched++;
   }
@@ -604,11 +607,7 @@ export async function main(ns) {
       // Phase is "farm" — either it was already, or just promoted above.
       const batches = dispatchFarm(ns, target, server, ramMgr, weakenTime, formulasAvailable);
       if (batches > 0) {
-        const numOps      = formulasAvailable ? 3 : 4;
-        const batchPeriod = BATCH_PADDING_MS * numOps;
-        // Last operation of the last batch finishes at:
-        //   weakenTime + (numOps-2)*BATCH_PADDING_MS + (batches-1)*batchPeriod
-        const endMs = weakenTime + BATCH_PADDING_MS * (numOps - 2) + (batches - 1) * batchPeriod;
+        const endMs = weakenTime + (batches - 1) * BATCH_PADDING_MS;
         maxEndMs = Math.max(maxEndMs, endMs);
       }
     }
