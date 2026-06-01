@@ -9,7 +9,18 @@ The current HWGW batching in `manager.js` spaces batches 800ms apart (`batchPeri
 
 ## Solution: Shotgun Batching
 
-Use `additionalMsec` in `ns.hack()` and `ns.grow()` to pad those operations to exactly `weakenTime`. All four ops in a batch share the same start delay (`i * 200ms`). Since Bitburner's JS event loop is single-threaded, ops dispatched in order resolve in dispatch order (W1 → H → G → W2) within the same tick. This shrinks `batchPeriod` from 800ms to 200ms — 4× more batches per cycle when RAM is not the bottleneck.
+Fold both the batch stagger and the duration padding into a single `additionalMsec` arg on every worker. No sleep is needed. Each operation starts immediately and takes exactly `weakenTime + i*200ms` total:
+
+```
+weaken1 batch i:  additionalMsec = i * 200ms
+hack    batch i:  additionalMsec = (weakenTime - hackTime) + i * 200ms
+grow    batch i:  additionalMsec = (weakenTime - growTime) + i * 200ms
+weaken2 batch i:  additionalMsec = i * 200ms
+```
+
+All four ops complete at `weakenTime + i * 200ms`. Since Bitburner's JS event loop is single-threaded, ops dispatched in order resolve in dispatch order (W1 → H → G → W2) within the same tick. `batchPeriod` shrinks from 800ms to 200ms — 4× more batches per cycle when RAM is not the bottleneck.
+
+All three workers end up with an identical 2-arg interface (`target`, `additionalMsec`).
 
 Early bitnodes remain RAM-limited; the change has no negative effect there. Late game with abundant purchased-server RAM, throughput scales up to 4×.
 
@@ -19,38 +30,19 @@ This approach is also the natural foundation for a future continuous-manager upg
 
 | File | Change |
 |---|---|
-| `hack.js` | Add `additionalMsec = ns.args[2] ?? 0`; pass to `ns.hack(target, { additionalMsec })` |
-| `grow.js` | Add `additionalMsec = ns.args[2] ?? 0`; pass to `ns.grow(target, { additionalMsec })` |
-| `weaken.js` | No change |
-| `manager.js` | Rewrite timing in `stackBatches` |
+| `hack.js` | Replace `sleep(delay); ns.hack(target)` with `ns.hack(target, { additionalMsec })` |
+| `grow.js` | Replace `sleep(delay); ns.grow(target)` with `ns.grow(target, { additionalMsec })` |
+| `weaken.js` | Replace `sleep(delay); ns.weaken(target)` with `ns.weaken(target, { additionalMsec })` |
+| `manager.js` | Rewrite timing in `stackBatches`; update `endMs` in `main()` |
 
-## Worker Interface
+## Worker Interface (all three workers, unified)
 
-### hack.js (new)
 ```
-args[0]  target         string   hostname to hack
-args[1]  delay          number   ms to sleep before acting
-args[2]  additionalMsec number   ms to pad operation (default 0)
-args[3]  label          string   phase label for ps() readability
-args[4]  batchIndex     number   batch index for ps() readability
+args[0]  target         string   hostname to operate on (required)
+args[1]  additionalMsec number   ms to add to the NS operation duration (default 0)
 ```
 
-### grow.js (new)
-```
-args[0]  target         string   hostname to grow
-args[1]  delay          number   ms to sleep before acting
-args[2]  additionalMsec number   ms to pad operation (default 0)
-args[3]  label          string   phase label for ps() readability
-args[4]  batchIndex     number   batch index for ps() readability
-```
-
-### weaken.js (unchanged)
-```
-args[0]  target         string   hostname to weaken
-args[1]  delay          number   ms to sleep before acting
-args[2]  label          string   phase label for ps() readability
-args[3]  batchIndex     number   batch index for ps() readability
-```
+No `delay` arg. No `label` or `batchIndex` — removed since they were unused by worker logic and passing extra args to `ns.exec` is still possible for ps() readability if desired later.
 
 ## Timing Logic (stackBatches)
 
@@ -68,17 +60,20 @@ Completion order: H → W1 → G → W2 (H fires 200ms before W1).
 
 ### After
 ```js
-const batchPeriod   = BATCH_PADDING_MS;                       // 200ms
-const delay         = i * batchPeriod;
-const hackAddlMs    = Math.max(0, weakenTime - hackTime);
-const growAddlMs    = Math.max(0, weakenTime - growTime);
-// allocate weaken1: [target, delay,             label, i]
-// allocate hack:    [target, delay, hackAddlMs, label, i]
-// allocate grow:    [target, delay, growAddlMs, label, i]
-// allocate weaken2: [target, delay,             label, i]
+const batchPeriod    = BATCH_PADDING_MS;                       // 200ms
+const batchOffset    = i * batchPeriod;
+const weaken1AddlMs  = batchOffset;
+const hackAddlMs     = Math.max(0, weakenTime - hackTime) + batchOffset;
+const growAddlMs     = Math.max(0, weakenTime - growTime) + batchOffset;
+const weaken2AddlMs  = batchOffset;
+
+allocate("weaken.js", weaken1T, [target, weaken1AddlMs]);
+allocate("hack.js",   hackT,    [target, hackAddlMs]);
+allocate("grow.js",   growT,    [target, growAddlMs]);
+allocate("weaken.js", weaken2T, [target, weaken2AddlMs]);
 ```
 
-Completion order: W1 → H → G → W2 (all complete at `weakenTime + delay`, ordered by JS event loop).
+Completion order: W1 → H → G → W2 (all complete at `weakenTime + batchOffset`, ordered by JS event loop).
 
 ### maxEndMs calculation
 ```js
@@ -97,8 +92,8 @@ Each batch occupies exactly one 200ms slot at `weakenTime + i * 200ms`. A contin
 
 ## Constraints
 
-- `additionalMsec` is only passed to `hack.js` and `grow.js`, not `weaken.js` (weaken is already the reference duration).
-- `Math.max(0, ...)` guards against `hackAddlMs` / `growAddlMs` going negative if `hackTime > weakenTime` (impossible in practice, but defensive).
-- `batchPeriod` change also affects the `maxEndMs` calculation in `main()` — that inline calculation must be updated alongside `stackBatches`.
+- `Math.max(0, weakenTime - hackTime)` and `Math.max(0, weakenTime - growTime)` guard against negative values if op times exceed weakenTime (impossible in practice, but defensive).
+- `batchPeriod` change also affects the `endMs` calculation in `main()` — that inline calculation must be updated alongside `stackBatches`.
+- `numOps` in both `stackBatches` and the `main()` dispatch loop is only used for `batchPeriod` and `endMs` — both of which change to no longer need it. Remove `numOps` from both sites.
 - `sync.js` does not need updating (no new files).
-- `numOps` in both `stackBatches` and the `main()` dispatch loop is only used for `batchPeriod` and `endMs` — both of which change to no longer need it. Remove `numOps` from both sites to avoid dead code.
+- Prep workers (`dispatchPrep`) pass `delay=0` today and are unaffected — prep calls weaken/grow with no timing constraints, and `additionalMsec=0` is the default.
