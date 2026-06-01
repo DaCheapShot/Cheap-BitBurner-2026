@@ -155,6 +155,44 @@ class RamManager {
   hostCount() {
     return this._hosts.size;
   }
+
+  /**
+   * Distribute `threads` of `script` across exec hosts in snapshot order.
+   * Performs a live RAM check per host as a safety net for RAM consumed after
+   * snapshot time. Mutates freeRam entries. Logs a warning if threads go undeployed.
+   */
+  allocate(ns, script, threads, args) {
+    const ramPerThread = SCRIPT_RAM[script];
+    let remaining = threads;
+
+    for (const [host, entry] of this._hosts) {
+      if (remaining <= 0) break;
+
+      const live        = ns.getServer(host);
+      const liveReserve = host === "home"
+        ? Math.max(this._homeReserveGb, live.maxRam * this._homeReservePct)
+        : 0;
+      const liveFree      = Math.max(0, live.maxRam - live.ramUsed - liveReserve);
+      const effectiveFree = Math.min(entry.freeRam, liveFree);
+      const canFit        = Math.floor(effectiveFree / ramPerThread);
+
+      log.debug(`  [fit] ${host}: tracked=${entry.freeRam.toFixed(1)}GB live=${liveFree.toFixed(1)}GB canFit=${canFit}`);
+      if (canFit <= 0) continue;
+
+      const toPlace = Math.min(canFit, remaining);
+      const pid     = ns.exec(script, host, toPlace, ...args);
+      if (pid > 0) {
+        entry.freeRam -= toPlace * ramPerThread;
+        remaining     -= toPlace;
+      } else {
+        log.warn(`allocate: exec failed ${toPlace}t ${script} on ${host}`);
+      }
+    }
+
+    if (remaining > 0) {
+      log.warn(`allocate: ${remaining}/${threads} threads undeployed for ${script}`);
+    }
+  }
 }
 
 // ─── Utility helpers ─────────────────────────────────────────────────────────
@@ -180,112 +218,6 @@ function scanNetwork(ns) {
   }
   visited.delete("home");
   return [...visited];
-}
-
-/**
- * Split totalThreads of script across available exec hosts, filling each in order.
- * Mutates entry.freeRam so subsequent calls within the same cycle stay accurate.
- *
- * Security constants referenced throughout manager:
- *   ns.hack()   raises target security by 0.002 per thread
- *   ns.grow()   raises target security by 0.004 per thread
- *   ns.weaken() lowers target security by 0.050 per thread
- *
- * @param {NS} ns
- * @param {Array<{host: string, freeRam: number}>} execHosts
- * @param {string} script
- * @param {number} totalThreads
- * @param {(string|number)[]} args   — passed to each exec call (e.g. [target, delay])
- */
-function fitAndExec(ns, execHosts, script, totalThreads, args) {
-  const ramPerThread = SCRIPT_RAM[script];
-  let remaining      = totalThreads;
-
-  for (const entry of execHosts) {
-    if (remaining <= 0) break;
-
-    // Read live RAM — deploy.js scripts launched earlier in this cycle may have
-    // consumed RAM that isn't reflected in the snapshot entry.freeRam was built from.
-    const live = ns.getServer(entry.host);
-    const liveReserve = entry.host === "home"
-      ? Math.max(HOME_RESERVE_GB, live.maxRam * HOME_RESERVE_PCT)
-      : 0;
-    const liveFree = Math.max(0, live.maxRam - live.ramUsed - liveReserve);
-
-    // Use the lower of tracked (committed this cycle) and live — whichever is tighter.
-    const effectiveFree = Math.min(entry.freeRam, liveFree);
-    const canFit = Math.floor(effectiveFree / ramPerThread);
-    log.debug(`  [fit] ${entry.host}: tracked=${entry.freeRam.toFixed(1)}GB live=${liveFree.toFixed(1)}GB canFit=${canFit}`);
-    if (canFit <= 0) continue;
-
-    const threads = Math.min(canFit, remaining);
-    const pid     = ns.exec(script, entry.host, threads, ...args);
-    log.debug(`  [fit] exec ${threads}t ${script} → pid=${pid}`);
-    if (pid > 0) {
-      entry.freeRam -= threads * ramPerThread;
-      remaining     -= threads;
-    } else {
-      log.warn(`fit exec failed: ${threads}t ${script} on ${entry.host} (live RAM too low)`);
-    }
-  }
-
-  if (remaining > 0) {
-    log.warn(`fitAndExec: ${remaining}/${totalThreads} threads undeployed for ${script}`);
-  }
-}
-
-/**
- * Build the list of servers available to run worker scripts this cycle.
- *
- * - Home is always included, with a reserved-RAM slice withheld.
- * - All rooted network servers (including purchased pserv-*) are included.
- * - When a newly rooted host is seen for the first time, deploy.js is launched
- *   for it and it's skipped as an exec host THIS cycle. Next cycle it's ready.
- *   (This one-cycle gap prevents exec calls on a host before files land.)
- * - Mutates deployedHosts to track which hosts are set up.
- *
- * @param {NS} ns
- * @param {string[]} allServers         — full network from scanNetwork()
- * @param {Set<string>} deployedHosts   — hosts that already have worker scripts
- * @returns {Array<{host: string, freeRam: number}>}
- */
-function buildExecHosts(ns, allServers, deployedHosts) {
-  const hosts = [];
-  let deployRamUsed = 0; // RAM consumed on home by deploy.js launches this call
-
-  // Process all rooted servers first — deploy.js launches happen here and consume home RAM.
-  for (const host of allServers) {
-    const server = ns.getServer(host);
-    if (!server.hasAdminRights) { log.debug(`[hosts] SKIP ${host}: no root`); continue; }
-    if (server.maxRam < 2)      { log.debug(`[hosts] SKIP ${host}: maxRam=${server.maxRam}GB < 2`); continue; }
-
-    if (!deployedHosts.has(host)) {
-      // First time seeing this host: launch deploy.js and record it.
-      // Skip it as an exec host this cycle — deploy.js may still be running.
-      if (ns.exec("deploy.js", "home", 1, host) > 0) {
-        deployedHosts.add(host);
-        deployRamUsed += SCRIPT_RAM["deploy.js"]; // track RAM consumed on home
-        log.info(`[deploy] Queuing workers → ${host} (${SCRIPT_RAM["deploy.js"]}GB)`);
-      }
-      continue; // available next cycle
-    }
-
-    const freeRam = server.maxRam - server.ramUsed;
-    log.debug(`[hosts] ${host}: ${server.maxRam}GB max | ${server.ramUsed.toFixed(1)}GB used → ${freeRam.toFixed(1)}GB free`);
-    if (freeRam > 0) hosts.push({ host, freeRam });
-  }
-
-  // Compute home free RAM AFTER all deploy.js launches so deployRamUsed is accurate.
-  const home     = ns.getServer("home");
-  const reserved = Math.max(HOME_RESERVE_GB, home.maxRam * HOME_RESERVE_PCT);
-  const homeFree = Math.max(0, home.maxRam - home.ramUsed - reserved - deployRamUsed);
-  log.debug(
-    `[hosts] home: ${home.maxRam}GB max | ${home.ramUsed.toFixed(1)}GB used | ` +
-    `${reserved.toFixed(1)}GB reserved | ${deployRamUsed.toFixed(1)}GB deploy → ${homeFree.toFixed(1)}GB free`
-  );
-  if (homeFree > 0) hosts.unshift({ host: "home", freeRam: homeFree }); // home first
-
-  return hosts;
 }
 
 /**
@@ -326,35 +258,13 @@ function pickTargets(ns, allServers, maxCount) {
   return scored.slice(0, maxCount).map(s => s.host);
 }
 
-/**
- * Dispatch prep workers to bring target to minDifficulty + moneyMax.
- * Must complete before farm batches start (prep is a prerequisite for accurate HWGW math).
- *
- * Launches all three workers simultaneously with delay=0.
- * This is safe because grow always finishes before weaken (growTime < weakenTime),
- * so weaken2 will still be running when grow completes and will correctly offset
- * the security that grow added.
- *
- * Thread math:
- *   weaken lowers security by 0.05 per thread
- *   grow   raises security by 0.004 per thread → weaken2 compensates for this
- *
- * @param {NS} ns
- * @param {string} target
- * @param {ReturnType<NS["getServer"]>} server  — ns.getServer(target) result
- * @param {Array<{host: string, freeRam: number}>} execHosts
- */
-function dispatchPrep(ns, target, server, execHosts) {
-  // Weaken threads to reach minimum security
+function dispatchPrep(ns, target, server, ramMgr) {
   const secDelta       = server.hackDifficulty - server.minDifficulty;
   const weaken1Threads = Math.max(1, Math.ceil(secDelta / 0.05));
 
-  // Grow threads to reach maximum money.
-  // Clamp moneyAvailable to 1 to avoid division-by-zero on a completely empty server.
   const growMult    = server.moneyMax / Math.max(server.moneyAvailable, 1);
   const growThreads = Math.max(1, Math.ceil(ns.growthAnalyze(target, growMult)));
 
-  // Weaken threads to offset the security raise from grow (0.004 security per grow thread)
   const weaken2Threads = Math.max(1, Math.ceil(growThreads * 0.004 / 0.05));
 
   const prepRamNeeded = weaken1Threads * SCRIPT_RAM["weaken.js"]
@@ -368,62 +278,23 @@ function dispatchPrep(ns, target, server, execHosts) {
     `RAM needed: ${prepRamNeeded.toFixed(1)}GB`
   );
 
-  // delay=0 for all three — timing is not critical for prep, only for farm
-  fitAndExec(ns, execHosts, "weaken.js", weaken1Threads, [target, 0]);
-  fitAndExec(ns, execHosts, "grow.js",   growThreads,    [target, 0]);
-  fitAndExec(ns, execHosts, "weaken.js", weaken2Threads, [target, 0]);
+  ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, 0]);
+  ramMgr.allocate(ns, "grow.js",   growThreads,    [target, 0]);
+  ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, 0]);
 }
 
-/**
- * Dispatch one HWGW batch against a prepped target.
- * All four workers launch at the same real-world time but sleep different delays,
- * so they complete in this order (BATCH_PADDING_MS apart):
- *
- *   Hack    finishes at T                 → steals HACK_STEAL_PCT of moneyMax
- *   Weaken1 finishes at T + 200ms         → offsets hack's security raise
- *   Grow    finishes at T + 400ms         → restores stolen money
- *   Weaken2 finishes at T + 600ms         → offsets grow's security raise
- *
- * This ordering keeps the server at minSec + maxMoney after every batch,
- * so the next batch's thread calculations remain accurate without re-prepping.
- *
- * Delay math (all workers launched simultaneously, then sleep their delay):
- *   W1: delay = 0                           → finishes at T + weakenTime (baseline)
- *   H:  delay = weakenTime - hackTime - 200 → finishes at T + weakenTime - 200ms
- *   G:  delay = weakenTime - growTime + 200 → finishes at T + weakenTime + 200ms
- *   W2: delay = 400                         → finishes at T + weakenTime + 400ms
- *
- * Thread math:
- *   hackAnalyzeThreads takes a dollar amount, not a fraction.
- *   hack   raises security 0.002/thread → weaken1 = ceil(hackThreads × 0.002 / 0.05)
- *   grow   raises security 0.004/thread → weaken2 = ceil(growThreads × 0.004 / 0.05)
- *   After stealing 50%, need 1/(1-0.50) = 2× growth to restore to maxMoney.
- *
- * @param {NS} ns
- * @param {string} target
- * @param {ReturnType<NS["getServer"]>} server  — ns.getServer(target), assumed prepped
- * @param {Array<{host: string, freeRam: number}>} execHosts
- * @param {number} weakenTime — ms for ns.weaken() on this target (pre-computed by caller)
- */
-function dispatchFarm(ns, target, server, execHosts, weakenTime) {
+function dispatchFarm(ns, target, server, ramMgr, weakenTime) {
   const hackTime = ns.getHackTime(target);
   const growTime = ns.getGrowTime(target);
 
-  // --- Thread counts ---
-  // hackAnalyzeThreads(host, dollarAmount) — pass dollar amount, not fraction
-  const hackThreads = Math.max(1, Math.floor(
+  const hackThreads    = Math.max(1, Math.floor(
     ns.hackAnalyzeThreads(target, server.moneyMax * HACK_STEAL_PCT)
   ));
-  // Each hack thread raises security by 0.002; each weaken thread lowers it by 0.05
   const weaken1Threads = Math.max(1, Math.ceil(hackThreads * 0.002 / 0.05));
-  // Restore from (1 - HACK_STEAL_PCT) × moneyMax back to moneyMax
-  const restoreMult    = 1 / (1 - HACK_STEAL_PCT); // = 2.0 at 50% steal
+  const restoreMult    = 1 / (1 - HACK_STEAL_PCT);
   const growThreads    = Math.max(1, Math.ceil(ns.growthAnalyze(target, restoreMult)));
-  // Each grow thread raises security by 0.004
   const weaken2Threads = Math.max(1, Math.ceil(growThreads * 0.004 / 0.05));
 
-  // --- Stagger delays (ms) ---
-  // Math.max(0, ...) guards against negative delays on very fast servers
   const hackDelay    = Math.max(0, weakenTime - hackTime - BATCH_PADDING_MS);
   const weaken1Delay = 0;
   const growDelay    = Math.max(0, weakenTime - growTime + BATCH_PADDING_MS);
@@ -442,10 +313,10 @@ function dispatchFarm(ns, target, server, execHosts, weakenTime) {
     `RAM needed: ${farmRamNeeded.toFixed(1)}GB`
   );
 
-  fitAndExec(ns, execHosts, "hack.js",   hackThreads,    [target, hackDelay]);
-  fitAndExec(ns, execHosts, "weaken.js", weaken1Threads, [target, weaken1Delay]);
-  fitAndExec(ns, execHosts, "grow.js",   growThreads,    [target, growDelay]);
-  fitAndExec(ns, execHosts, "weaken.js", weaken2Threads, [target, weaken2Delay]);
+  ramMgr.allocate(ns, "hack.js",   hackThreads,    [target, hackDelay]);
+  ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, weaken1Delay]);
+  ramMgr.allocate(ns, "grow.js",   growThreads,    [target, growDelay]);
+  ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, weaken2Delay]);
 }
 
 /** @param {NS} ns */
@@ -486,6 +357,7 @@ export async function main(ns) {
 
   // Timestamp of last root.js launch (ms). Initialized to 0 so it fires on first cycle.
   let lastRootTime = 0;
+  const ramMgr = new RamManager({ homeReserveGb: HOME_RESERVE_GB, homeReservePct: HOME_RESERVE_PCT });
 
   while (true) {
     const now = Date.now();
@@ -506,9 +378,8 @@ export async function main(ns) {
     const allServers = scanNetwork(ns);
 
     // ── 3. Build exec host list; deploy workers to new hosts ─────────────────
-    const execHosts    = buildExecHosts(ns, allServers, deployedHosts);
-    const totalFreeRam = execHosts.reduce((sum, e) => sum + e.freeRam, 0);
-    log.info(`[hosts] ${execHosts.length} exec host(s) | ${totalFreeRam.toFixed(1)}GB total free`);
+    ramMgr.refresh(ns, allServers, deployedHosts);
+    log.info(`[hosts] ${ramMgr.hostCount()} exec host(s) | ${ramMgr.totalFree().toFixed(1)}GB total free`);
 
     // ── 4. Score and select top targets ──────────────────────────────────────
     const targets = pickTargets(ns, allServers, TOP_TARGETS);
@@ -552,14 +423,14 @@ export async function main(ns) {
           log.info(`[ready] ${target} is prepped → starting farm`);
           // fall through to farm dispatch below
         } else {
-          dispatchPrep(ns, target, server, execHosts);
+          dispatchPrep(ns, target, server, ramMgr);
           maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
           continue; // don't farm until prep completes next cycle
         }
       }
 
       // Phase is "farm" — either it was already, or just promoted above.
-      dispatchFarm(ns, target, server, execHosts, weakenTime);
+      dispatchFarm(ns, target, server, ramMgr, weakenTime);
       maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
     }
 
