@@ -14,28 +14,31 @@ export async function main(ns) {
     }
   }
 
-  // ── 1. Copy newly discovered contracts to contracts/pending/ ──────────────
+  // ── 1. Register newly discovered contracts as .txt markers ────────────────
+  // ns.scp() cannot transfer .cct files, so we create a .txt marker on home
+  // instead. The solve API still operates on the original server location.
   for (const host of visited) {
     for (const filename of ns.ls(host, ".cct")) {
-      const pendingPath = `contracts/pending/${host}.${filename}`;
-      const solvedPath  = `contracts/solved/${host}.${filename}`;
+      const pendingPath = `contracts/pending/${host}.${filename}.txt`;
+      const solvedPath  = `contracts/solved/${host}.${filename}.txt`;
       if (ns.fileExists(solvedPath,  "home")) continue; // already solved
-      if (ns.fileExists(pendingPath, "home")) continue; // already filed
-      // Copy to home root, then move into pending subfolder
-      ns.scp(filename, "home", host);
-      ns.mv(filename, pendingPath);
+      if (ns.fileExists(pendingPath, "home")) continue; // already registered
+      ns.write(pendingPath, "", "w");
     }
   }
 
   // ── 2. Attempt to solve all pending contracts ─────────────────────────────
   for (const pendingPath of ns.ls("home", "contracts/pending/")) {
-    // Parse host and filename: "contracts/pending/n00dles.contract-001.cct"
-    const base    = pendingPath.replace("contracts/pending/", "");
-    const dot     = base.indexOf(".");
-    const host    = base.slice(0, dot);
+    // Parse host and filename from "contracts/pending/n00dles.contract-001.cct.txt"
+    const base     = pendingPath.replace("contracts/pending/", "").replace(/\.txt$/, "");
+    const dot      = base.indexOf(".");
+    const host     = base.slice(0, dot);
     const filename = base.slice(dot + 1);
 
-    if (!ns.fileExists(filename, host)) continue; // contract expired on source server
+    if (!ns.fileExists(filename, host)) {
+      ns.rm(pendingPath, "home"); // contract expired — clean up marker
+      continue;
+    }
 
     const triesLeft = ns.codingcontract.getNumTriesRemaining(filename, host);
     if (triesLeft < 5) {
@@ -56,7 +59,8 @@ export async function main(ns) {
     const reward = ns.codingcontract.attempt(answer, filename, host);
 
     if (reward) {
-      ns.mv(pendingPath, `contracts/solved/${host}.${filename}`);
+      ns.rm(pendingPath, "home");
+      ns.write(`contracts/solved/${host}.${filename}.txt`, reward, "w");
       ns.tprint(`CONTRACTS: Solved '${type}' on ${host} — ${reward}`);
     } else {
       const remaining = ns.codingcontract.getNumTriesRemaining(filename, host);
