@@ -29,9 +29,11 @@
 
 // ─── Tuning constants ────────────────────────────────────────────────────────
 
-// Fraction of moneyMax to steal per farm batch.
-// 50% is a reliable default: high income, and grow can restore it in one batch.
-const HACK_STEAL_PCT = 0.50;
+// Steal% range for dynamic RAM-driven selection. stackBatches tries from MAX
+// down to MIN in STEP increments, picking the highest that lets ≥1 full batch fit.
+const STEAL_PCT_MAX  = 0.95;
+const STEAL_PCT_MIN  = 0.10;
+const STEAL_PCT_STEP = 0.05;
 
 // Max targets managed in parallel. More targets = higher RAM usage per cycle.
 const TOP_TARGETS = 5;
