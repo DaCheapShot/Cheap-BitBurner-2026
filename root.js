@@ -54,9 +54,4 @@ export async function main(ns) {
       ns.print(`Rooted: ${host}`);
     }
   }
-
-  ns.tprint(
-    `root.js: +${newlyRooted} rooted | ` +
-    `scanned ${visited.size - 1} servers`
-  );
 }

@@ -17,7 +17,7 @@ export async function main(ns) {
   }
   const workers = ["hack.js", "grow.js", "weaken.js"];
   const ok = ns.scp(workers, host, "home");
-  ns.tprint(ok
+  ns.print(ok
     ? `deploy.js: workers deployed to ${host}`
     : `deploy.js: ERROR — scp to ${host} failed`
   );

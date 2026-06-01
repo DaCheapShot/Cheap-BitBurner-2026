@@ -473,5 +473,6 @@ export async function main(ns) {
     const sleepMs = Math.max(CYCLE_SLEEP_MS, maxWeakenTime + 1_000);
     log.info(`[cycle] ${targets.length} target(s) | sleep ${ns.format.time(sleepMs)}`);
     await ns.sleep(sleepMs);
+    ns.clearLog();
   }
 }

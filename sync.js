@@ -4,6 +4,7 @@ export async function main(ns) {
   const BASE = "https://raw.githubusercontent.com/DaCheapShot/Cheap-BitBurner-2026/main";
 
   const FILES = [
+    "sync.js",
     "hack.js",
     "grow.js",
     "weaken.js",
@@ -11,6 +12,7 @@ export async function main(ns) {
     "root.js",
     "manager.js",
     "buy.js",
+    "connnect.js"
   ];
 
   ns.tprint("Syncing files from GitHub...");
