@@ -165,6 +165,7 @@ export const SOLVERS = {
   },
 
   "Merge Overlapping Intervals": (intervals) => {
+    if (!intervals.length) return [];
     intervals.sort((a, b) => a[0] - b[0]);
     const result = [intervals[0].slice()];
     for (let i = 1; i < intervals.length; i++) {
@@ -322,7 +323,7 @@ export const SOLVERS = {
       if (i >= s.length) break;
       const l2 = Number(s[i++]);
       const offset = Number(s[i++]);
-      if (l2 > 0) { for (let j = 0; j < l2; j++) out += out[out.length - offset]; }
+      if (l2 > 0) { for (let j = 0; j < l2; j++) out += out[out.length - offset] ?? ""; }
     }
     return out;
   },
