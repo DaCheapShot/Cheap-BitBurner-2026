@@ -34,7 +34,7 @@
 const HACK_STEAL_PCT = 0.50;
 
 // Max targets managed in parallel. More targets = higher RAM usage per cycle.
-const TOP_TARGETS = 5;
+const TOP_TARGETS = 2;
 
 // Minimum ms between manager cycles (prevents spin-looping on fast servers).
 const CYCLE_SLEEP_MS = 2_000;
@@ -88,6 +88,73 @@ function makeLogger(ns, debug, logFile) {
     debug: (msg) => { write(msg);           if (debug) ns.print(msg); },
     warn:  (msg) => { write(`WARN: ${msg}`); ns.print(`WARN: ${msg}`); },
   };
+}
+
+// ─── RAM Manager ─────────────────────────────────────────────────────────────
+
+class RamManager {
+  constructor({ homeReserveGb, homeReservePct }) {
+    this._homeReserveGb  = homeReserveGb;
+    this._homeReservePct = homeReservePct;
+    this._hosts          = new Map(); // insertion-ordered; home always first
+  }
+
+  /**
+   * Rebuild the per-host free-RAM snapshot from live game state.
+   * Call once per cycle before any allocate() calls.
+   * Handles deploy.js launches for newly rooted hosts and immediately
+   * deducts their RAM from home so subsequent allocate() calls stay accurate.
+   */
+  refresh(ns, allServers, deployedHosts) {
+    this._hosts.clear();
+
+    // Insert home first so allocate() fills it with priority.
+    const home     = ns.getServer("home");
+    const reserved = Math.max(this._homeReserveGb, home.maxRam * this._homeReservePct);
+    const homeFree = Math.max(0, home.maxRam - home.ramUsed - reserved);
+    this._hosts.set("home", { maxRam: home.maxRam, freeRam: homeFree });
+
+    for (const host of allServers) {
+      const server = ns.getServer(host);
+      if (!server.hasAdminRights || server.maxRam < 2) {
+        log.debug(`[hosts] SKIP ${host}: ${!server.hasAdminRights ? "no root" : "maxRam=" + server.maxRam + "GB < 2"}`);
+        continue;
+      }
+
+      if (!deployedHosts.has(host)) {
+        if (ns.exec("deploy.js", "home", 1, host) > 0) {
+          deployedHosts.add(host);
+          const entry = this._hosts.get("home");
+          entry.freeRam = Math.max(0, entry.freeRam - SCRIPT_RAM["deploy.js"]);
+          log.info(`[deploy] Queuing workers → ${host} (${SCRIPT_RAM["deploy.js"]}GB)`);
+        }
+        continue;
+      }
+
+      const freeRam = server.maxRam - server.ramUsed;
+      log.debug(`[hosts] ${host}: ${server.maxRam}GB max | ${server.ramUsed.toFixed(1)}GB used → ${freeRam.toFixed(1)}GB free`);
+      if (freeRam > 0) this._hosts.set(host, { maxRam: server.maxRam, freeRam });
+    }
+
+    const homeEntry = this._hosts.get("home");
+    log.debug(
+      `[hosts] home: ${homeEntry.maxRam}GB max | ` +
+      `${home.ramUsed.toFixed(1)}GB used | ` +
+      `${reserved.toFixed(1)}GB reserved → ${homeEntry.freeRam.toFixed(1)}GB free`
+    );
+  }
+
+  /** Sum of freeRam across all hosts in the current snapshot. */
+  totalFree() {
+    let total = 0;
+    for (const { freeRam } of this._hosts.values()) total += freeRam;
+    return total;
+  }
+
+  /** Number of hosts in the current snapshot. */
+  hostCount() {
+    return this._hosts.size;
+  }
 }
 
 // ─── Utility helpers ─────────────────────────────────────────────────────────
@@ -498,7 +565,7 @@ export async function main(ns) {
 
     // ── 6. Sleep until all batch workers should be done ──────────────────────
     const sleepMs = Math.max(CYCLE_SLEEP_MS, maxWeakenTime + 1_000);
-    log.info(`[cycle] ${targets.length} target(s) | sleep ${(sleepMs / 1_000).toFixed(1)}s`);
+    log.info(`[cycle] ${targets.length} target(s) | sleep ${ns.format.time(sleepMs)}`);
     await ns.sleep(sleepMs);
   }
 }
