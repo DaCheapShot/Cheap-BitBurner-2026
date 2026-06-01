@@ -338,15 +338,15 @@ function dispatchPrep(ns, target, server, ramMgr) {
 
   const w1Fit = ramMgr.canFit("weaken.js", weaken1Threads);
   if (w1Fit < weaken1Threads) log.warn(`[prep] ${target}: only ${w1Fit}/${weaken1Threads} weaken1 threads fit`);
-  let placed = ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, 0]);
+  let placed = ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, 0, "prep", 0]);
 
   const gFit = ramMgr.canFit("grow.js", growThreads);
   if (gFit < growThreads) log.warn(`[prep] ${target}: only ${gFit}/${growThreads} grow threads fit`);
-  placed += ramMgr.allocate(ns, "grow.js", growThreads, [target, 0]);
+  placed += ramMgr.allocate(ns, "grow.js", growThreads, [target, 0, "prep", 0]);
 
   const w2Fit = ramMgr.canFit("weaken.js", weaken2Threads);
   if (w2Fit < weaken2Threads) log.warn(`[prep] ${target}: only ${w2Fit}/${weaken2Threads} weaken2 threads fit`);
-  placed += ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, 0]);
+  placed += ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, 0, "prep", 0]);
 
   return placed > 0;
 }
@@ -454,15 +454,15 @@ function stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable)
 
     if (formulasAvailable) {
       // HGW: H → G → W1 — single weaken fires last, after both ops raised security
-      ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs]);
-      ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs]);
-      ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs]);
+      ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs,   "farm", i]);
+      ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs,   "farm", i]);
+      ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs, "farm", i]);
     } else {
       // HWGW: H → W1 → G → W2 — each weaken immediately follows its paired op
-      ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs]);
-      ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs]);
-      ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs]);
-      ramMgr.allocate(ns, "weaken.js", plan.weaken2T, [target, weakenAddlMs]);
+      ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs,   "farm", i]);
+      ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs, "farm", i]);
+      ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs,   "farm", i]);
+      ramMgr.allocate(ns, "weaken.js", plan.weaken2T, [target, weakenAddlMs, "farm", i]);
     }
     dispatched++;
   }
