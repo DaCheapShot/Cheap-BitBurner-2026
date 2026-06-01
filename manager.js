@@ -309,6 +309,45 @@ function dispatchPrep(ns, target, server, ramMgr) {
   return placed > 0;
 }
 
+// ─── Batch planning ──────────────────────────────────────────────────────────
+
+/**
+ * Calculate thread counts and total RAM for one batch.
+ *
+ * HWGW (formulasAvailable=false): 4 scripts — hack, weaken1, grow, weaken2.
+ *   weaken1 covers hack's security delta; weaken2 covers grow's.
+ * HGW  (formulasAvailable=true):  3 scripts — hack, weaken1, grow.
+ *   weaken1 covers both hack and grow security deltas combined. weaken2T=0.
+ *
+ * @param {NS} ns
+ * @param {string} target
+ * @param {object} server  — ns.getServer(target) result
+ * @param {number} stealPct — fraction of moneyMax to steal (0.10–0.95)
+ * @param {boolean} formulasAvailable
+ * @returns {{ hackT: number, weaken1T: number, growT: number, weaken2T: number, totalRam: number }}
+ */
+function calcBatchPlan(ns, target, server, stealPct, formulasAvailable) {
+  const hackT = Math.max(1, Math.floor(ns.hackAnalyzeThreads(target, server.moneyMax * stealPct)));
+  const growT = Math.max(1, Math.ceil(ns.growthAnalyze(target, 1 / (1 - stealPct))));
+
+  const hackSecDelta = hackT * 0.002;
+  const growSecDelta = growT * 0.004;
+
+  const weaken1T = formulasAvailable
+    ? Math.max(1, Math.ceil((hackSecDelta + growSecDelta) / 0.05))
+    : Math.max(1, Math.ceil(hackSecDelta / 0.05));
+  const weaken2T = formulasAvailable
+    ? 0
+    : Math.max(1, Math.ceil(growSecDelta / 0.05));
+
+  const totalRam = hackT    * SCRIPT_RAM["hack.js"]
+                 + weaken1T * SCRIPT_RAM["weaken.js"]
+                 + growT    * SCRIPT_RAM["grow.js"]
+                 + weaken2T * SCRIPT_RAM["weaken.js"];
+
+  return { hackT, weaken1T, growT, weaken2T, totalRam };
+}
+
 function dispatchFarm(ns, target, server, ramMgr, weakenTime) {
   const hackTime = ns.getHackTime(target);
   const growTime = ns.getGrowTime(target);
