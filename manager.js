@@ -61,8 +61,14 @@ const PREP_READY_MONEY_FLOOR   = 0.99; // min fraction of moneyMax to consider p
 const HOME_RESERVE_GB  = 32;
 const HOME_RESERVE_PCT = 0.10;
 
+// Port number for runtime config (ctrl.js writes; manager.js peeks each cycle).
+const CONFIG_PORT   = 1;
+
+// Fraction of free RAM reserved for ns.share() threads when share mode is on.
+const SHARE_RAM_PCT = 0.20;
+
 // Populated at startup from ns.getScriptRam() — accurate regardless of Bitburner version.
-const SCRIPT_RAM = { "hack.js": 0, "grow.js": 0, "weaken.js": 0, "deploy.js": 0 };
+const SCRIPT_RAM = { "hack.js": 0, "grow.js": 0, "weaken.js": 0, "deploy.js": 0, "share.js": 0 };
 
 // ─── Logger ──────────────────────────────────────────────────────────────────
 
@@ -480,9 +486,10 @@ export async function main(ns) {
   SCRIPT_RAM["grow.js"]   = ns.getScriptRam("grow.js");
   SCRIPT_RAM["weaken.js"] = ns.getScriptRam("weaken.js");
   SCRIPT_RAM["deploy.js"] = ns.getScriptRam("deploy.js");
+  SCRIPT_RAM["share.js"]  = ns.getScriptRam("share.js");
 
   log.info("=== manager.js started ===");
-  log.info(`[init] Script RAM — hack=${SCRIPT_RAM["hack.js"]}GB grow=${SCRIPT_RAM["grow.js"]}GB weaken=${SCRIPT_RAM["weaken.js"]}GB deploy=${SCRIPT_RAM["deploy.js"]}GB`);
+  log.info(`[init] Script RAM — hack=${SCRIPT_RAM["hack.js"]}GB grow=${SCRIPT_RAM["grow.js"]}GB weaken=${SCRIPT_RAM["weaken.js"]}GB deploy=${SCRIPT_RAM["deploy.js"]}GB share=${SCRIPT_RAM["share.js"]}GB`);
   if (debug) log.info("[init] debug mode ON — verbose output in log window");
   else       log.info("[init] debug mode OFF — verbose output in manager.log.txt only");
 
@@ -506,6 +513,11 @@ export async function main(ns) {
 
   while (true) {
     const now = Date.now();
+
+    // ── 0. Read runtime config ────────────────────────────────────────────────
+    const cfgRaw       = ns.getPortHandle(CONFIG_PORT).peek();
+    const cfg          = cfgRaw === "NULL" ? {} : JSON.parse(cfgRaw);
+    const shareEnabled = cfg.share === true;
 
     // ── 1. Periodically re-run root.js ───────────────────────────────────────
     // root.js BFS-scans the network and nukes any newly rootable servers.
@@ -532,6 +544,13 @@ export async function main(ns) {
     // ── 3. Build exec host list; deploy workers to new hosts ─────────────────
     ramMgr.refresh(ns, allServers, deployedHosts);
     log.info(`[hosts] ${ramMgr.hostCount()} exec host(s) | ${ramMgr.totalFree().toFixed(1)}GB total free`);
+
+    // ── 3b. Reserve share RAM before HWGW dispatch ────────────────────────────
+    let shareThreads = 0;
+    if (shareEnabled) {
+      shareThreads = ramMgr.setAsideForShare(SHARE_RAM_PCT, SCRIPT_RAM["share.js"]);
+      log.info(`[share] ON — reserved ${(shareThreads * SCRIPT_RAM["share.js"]).toFixed(1)}GB for ${shareThreads} share threads`);
+    }
 
     // ── 4. Score and select top targets ──────────────────────────────────────
     const targets = pickTargets(ns, allServers, TOP_TARGETS);
@@ -596,6 +615,10 @@ export async function main(ns) {
     // ── 6. Sleep until all batch workers should be done ──────────────────────
     const sleepMs = Math.max(CYCLE_SLEEP_MS, maxEndMs + 1_000);
     log.info(`[cycle] ${targets.length} target(s) | sleep ${ns.format.time(sleepMs)}`);
+    if (shareEnabled && shareThreads > 0) {
+      const placed = ramMgr.allocateLive(ns, "share.js", shareThreads, [sleepMs]);
+      log.debug(`[share] ${placed}/${shareThreads} threads placed for ${ns.format.time(sleepMs)}`);
+    }
     await ns.sleep(sleepMs);
     ns.clearLog();
   }
