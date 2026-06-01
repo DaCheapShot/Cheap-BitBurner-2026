@@ -409,8 +409,7 @@ function calcBatchPlan(ns, target, server, stealPct, formulasAvailable) {
 function stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable) {
   const hackTime    = ns.getHackTime(target);
   const growTime    = ns.getGrowTime(target);
-  const numOps      = formulasAvailable ? 3 : 4;
-  const batchPeriod = BATCH_PADDING_MS * numOps;
+  const batchPeriod = BATCH_PADDING_MS;
 
   // Find highest steal% where at least 1 complete batch fits
   let stealPct = 0;
@@ -438,8 +437,6 @@ function stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable)
 
   let dispatched = 0;
   for (let i = 0; i < N; i++) {
-    const offset = i * batchPeriod;
-
     // All-or-nothing gate: verify all scripts still fit before allocating.
     // RAM may have shifted since N was calculated (previous targets already allocated).
     const totalWeakenT = plan.weaken1T + plan.weaken2T;
@@ -450,16 +447,22 @@ function stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable)
       break;
     }
 
-    const hackDelay    = Math.max(0, weakenTime - hackTime - BATCH_PADDING_MS + offset);
-    const weaken1Delay = offset;
-    const growDelay    = Math.max(0, weakenTime - growTime + BATCH_PADDING_MS + offset);
-    const weaken2Delay = BATCH_PADDING_MS * 2 + offset;
+    const batchOffset  = i * batchPeriod;
+    const hackAddlMs   = Math.max(0, weakenTime - hackTime) + batchOffset;
+    const growAddlMs   = Math.max(0, weakenTime - growTime) + batchOffset;
+    const weakenAddlMs = batchOffset;
 
-    ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackDelay,    "farm", i]);
-    ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weaken1Delay, "farm", i]);
-    ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growDelay,    "farm", i]);
-    if (plan.weaken2T > 0) {
-      ramMgr.allocate(ns, "weaken.js", plan.weaken2T, [target, weaken2Delay, "farm", i]);
+    if (formulasAvailable) {
+      // HGW: H → G → W1 — single weaken fires last, after both ops raised security
+      ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs]);
+      ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs]);
+      ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs]);
+    } else {
+      // HWGW: H → W1 → G → W2 — each weaken immediately follows its paired op
+      ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs]);
+      ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs]);
+      ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs]);
+      ramMgr.allocate(ns, "weaken.js", plan.weaken2T, [target, weakenAddlMs]);
     }
     dispatched++;
   }
