@@ -20,7 +20,7 @@ export async function main(ns) {
   // Cache all .cct files per host (avoids repeated ns.ls calls)
   const contractsByHost = new Map();
   for (const host of visited) {
-    const files = ns.ls(host, ".cct");
+    const files = ns.ls(host, ".cct").filter(f => f.endsWith(".cct"));
     if (files.length) contractsByHost.set(host, files);
   }
 
