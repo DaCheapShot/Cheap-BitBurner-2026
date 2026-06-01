@@ -60,20 +60,33 @@ Completion order: H → W1 → G → W2 (H fires 200ms before W1).
 
 ### After
 ```js
-const batchPeriod    = BATCH_PADDING_MS;                       // 200ms
-const batchOffset    = i * batchPeriod;
-const weaken1AddlMs  = batchOffset;
-const hackAddlMs     = Math.max(0, weakenTime - hackTime) + batchOffset;
-const growAddlMs     = Math.max(0, weakenTime - growTime) + batchOffset;
-const weaken2AddlMs  = batchOffset;
+const batchPeriod   = BATCH_PADDING_MS;                        // 200ms — same for HGW and HWGW
+const batchOffset   = i * batchPeriod;
+const hackAddlMs    = Math.max(0, weakenTime - hackTime) + batchOffset;
+const growAddlMs    = Math.max(0, weakenTime - growTime) + batchOffset;
+const weakenAddlMs  = batchOffset;
 
-allocate("weaken.js", weaken1T, [target, weaken1AddlMs]);
+// HWGW (formulasAvailable = false): dispatch H, W1, G, W2
+allocate("hack.js",   hackT,    [target, hackAddlMs]);
+allocate("weaken.js", weaken1T, [target, weakenAddlMs]);
+allocate("grow.js",   growT,    [target, growAddlMs]);
+if (weaken2T > 0)
+  allocate("weaken.js", weaken2T, [target, weakenAddlMs]);
+
+// HGW (formulasAvailable = true, weaken2T = 0): dispatch H, G, W1
 allocate("hack.js",   hackT,    [target, hackAddlMs]);
 allocate("grow.js",   growT,    [target, growAddlMs]);
-allocate("weaken.js", weaken2T, [target, weaken2AddlMs]);
+allocate("weaken.js", weaken1T, [target, weakenAddlMs]);
 ```
 
-Completion order: W1 → H → G → W2 (all complete at `weakenTime + batchOffset`, ordered by JS event loop).
+All ops complete at `weakenTime + batchOffset`, ordered by JS event loop in dispatch sequence.
+
+**Why dispatch order matters:** since `additionalMsec` makes all ops land simultaneously, JS resolves them in the order they were exec'd. W1 and W2 are sized to counter only their paired operation. If a weaken fires from `minSecurity` (before its paired op has raised it), it gets clamped and its effect is wasted — security ends the batch above min.
+
+| Mode | Dispatch order | Completion order | Why |
+|---|---|---|---|
+| HWGW | H, W1, G, W2 | H → W1 → G → W2 | W1 counters H immediately; W2 counters G immediately |
+| HGW  | H, G, W1     | H → G → W1      | Single W1 handles both deltas; must fire after both H and G |
 
 ### maxEndMs calculation
 ```js
@@ -84,7 +97,7 @@ const endMs = weakenTime + (batches - 1) * batchPeriod;
 
 ## Ordering Improvement
 
-The current approach lands H 200ms before W1 within the same batch. At steady state this works (H sees min security from the previous batch's W2), but it relies on cross-batch state. The shotgun lands W1 first, then H — each batch is self-contained. This is a more robust guarantee and matches standard HWGW guidance.
+The current approach lands H 200ms before W1, which is correct for HWGW (H raises security, W1 counters it). The shotgun preserves this for HWGW (H → W1 → G → W2). For HGW, the current code uses H → W1 → G — which is subtly wrong: W1 fires before G, so it overcorrects from `min + hackDelta` down toward min and gets partially clamped, leaving G's security increase uncountered. Security drifts up by `growDelta` per batch until the drift check triggers a re-prep. The shotgun fixes HGW by using H → G → W1, where the single weaken fires last and correctly neutralizes both increases.
 
 ## Compatibility with Future Option C
 
