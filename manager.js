@@ -24,7 +24,8 @@
  *   ns.getHackingLevel()    0.05 GB  — target eligibility
  *   ns.write()              1.00 GB  — log file output
  *   ns.sleep() / ns.print() 0.00 GB  — free
- *   Total: ~8.70 GB + 1.60 GB base = ~10.30 GB
+ *   ns.getPortHandle()      10.00 GB  — runtime config port peek each cycle
+ *   Total: ~18.70 GB + 1.60 GB base = ~20.30 GB
  */
 
 // ─── Tuning constants ────────────────────────────────────────────────────────
