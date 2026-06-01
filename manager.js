@@ -338,15 +338,15 @@ function dispatchPrep(ns, target, server, ramMgr) {
 
   const w1Fit = ramMgr.canFit("weaken.js", weaken1Threads);
   if (w1Fit < weaken1Threads) log.warn(`[prep] ${target}: only ${w1Fit}/${weaken1Threads} weaken1 threads fit`);
-  let placed = ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, 0]);
+  let placed = ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, 0, "prep", 0]);
 
   const gFit = ramMgr.canFit("grow.js", growThreads);
   if (gFit < growThreads) log.warn(`[prep] ${target}: only ${gFit}/${growThreads} grow threads fit`);
-  placed += ramMgr.allocate(ns, "grow.js", growThreads, [target, 0]);
+  placed += ramMgr.allocate(ns, "grow.js", growThreads, [target, 0, "prep", 0]);
 
   const w2Fit = ramMgr.canFit("weaken.js", weaken2Threads);
   if (w2Fit < weaken2Threads) log.warn(`[prep] ${target}: only ${w2Fit}/${weaken2Threads} weaken2 threads fit`);
-  placed += ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, 0]);
+  placed += ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, 0, "prep", 0]);
 
   return placed > 0;
 }
@@ -455,11 +455,11 @@ function stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable)
     const growDelay    = Math.max(0, weakenTime - growTime + BATCH_PADDING_MS + offset);
     const weaken2Delay = BATCH_PADDING_MS * 2 + offset;
 
-    ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackDelay]);
-    ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weaken1Delay]);
-    ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growDelay]);
+    ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackDelay,    "farm", i]);
+    ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weaken1Delay, "farm", i]);
+    ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growDelay,    "farm", i]);
     if (plan.weaken2T > 0) {
-      ramMgr.allocate(ns, "weaken.js", plan.weaken2T, [target, weaken2Delay]);
+      ramMgr.allocate(ns, "weaken.js", plan.weaken2T, [target, weaken2Delay, "farm", i]);
     }
     dispatched++;
   }
