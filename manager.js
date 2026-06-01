@@ -209,6 +209,41 @@ class RamManager {
     }
     return threads - remaining;
   }
+
+  setAsideForShare(pct, shareRam) {
+    const threads = Math.floor(this.totalFree() * pct / shareRam);
+    let remaining = threads * shareRam;
+    for (const entry of this._hosts.values()) {
+      if (remaining <= 0) break;
+      const take    = Math.min(entry.freeRam, remaining);
+      entry.freeRam -= take;
+      remaining     -= take;
+    }
+    return threads;
+  }
+
+  allocateLive(ns, script, threads, args) {
+    const ramPerThread = SCRIPT_RAM[script];
+    let remaining      = threads;
+
+    for (const [host] of this._hosts) {
+      if (remaining <= 0) break;
+      const live        = ns.getServer(host);
+      const liveReserve = host === "home"
+        ? Math.max(this._homeReserveGb, live.maxRam * this._homeReservePct)
+        : 0;
+      const liveFree = Math.max(0, live.maxRam - live.ramUsed - liveReserve);
+      const canFit   = Math.floor(liveFree / ramPerThread);
+      if (canFit <= 0) continue;
+      const toPlace = Math.min(canFit, remaining);
+      const pid     = ns.exec(script, host, toPlace, ...args);
+      if (pid > 0) remaining -= toPlace;
+      else log.warn(`allocateLive: exec failed ${toPlace}t ${script} on ${host}`);
+    }
+
+    if (remaining > 0) log.warn(`allocateLive: ${remaining}/${threads} threads undeployed for ${script}`);
+    return threads - remaining;
+  }
 }
 
 // ─── Utility helpers ─────────────────────────────────────────────────────────
