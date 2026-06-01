@@ -425,53 +425,8 @@ function stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable)
   return dispatched;
 }
 
-function dispatchFarm(ns, target, server, ramMgr, weakenTime) {
-  const hackTime = ns.getHackTime(target);
-  const growTime = ns.getGrowTime(target);
-
-  const hackThreads    = Math.max(1, Math.floor(
-    ns.hackAnalyzeThreads(target, server.moneyMax * HACK_STEAL_PCT)
-  ));
-  const weaken1Threads = Math.max(1, Math.ceil(hackThreads * 0.002 / 0.05));
-  const restoreMult    = 1 / (1 - HACK_STEAL_PCT);
-  const growThreads    = Math.max(1, Math.ceil(ns.growthAnalyze(target, restoreMult)));
-  const weaken2Threads = Math.max(1, Math.ceil(growThreads * 0.004 / 0.05));
-
-  const hackDelay    = Math.max(0, weakenTime - hackTime - BATCH_PADDING_MS);
-  const weaken1Delay = 0;
-  const growDelay    = Math.max(0, weakenTime - growTime + BATCH_PADDING_MS);
-  const weaken2Delay = BATCH_PADDING_MS * 2;
-
-  const farmRamNeeded = hackThreads    * SCRIPT_RAM["hack.js"]
-                      + weaken1Threads * SCRIPT_RAM["weaken.js"]
-                      + growThreads    * SCRIPT_RAM["grow.js"]
-                      + weaken2Threads * SCRIPT_RAM["weaken.js"];
-  log.info(
-    `[farm] ${target} | ` +
-    `h=${hackThreads}(+${hackDelay}ms) ` +
-    `w1=${weaken1Threads} ` +
-    `g=${growThreads}(+${growDelay}ms) ` +
-    `w2=${weaken2Threads}(+${weaken2Delay}ms) | ` +
-    `RAM needed: ${farmRamNeeded.toFixed(1)}GB`
-  );
-
-  const hFit = ramMgr.canFit("hack.js", hackThreads);
-  if (hFit < hackThreads) log.warn(`[farm] ${target}: only ${hFit}/${hackThreads} hack threads fit`);
-  let placed = ramMgr.allocate(ns, "hack.js", hackThreads, [target, hackDelay]);
-
-  const w1Fit = ramMgr.canFit("weaken.js", weaken1Threads);
-  if (w1Fit < weaken1Threads) log.warn(`[farm] ${target}: only ${w1Fit}/${weaken1Threads} weaken1 threads fit`);
-  placed += ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, weaken1Delay]);
-
-  const gFit = ramMgr.canFit("grow.js", growThreads);
-  if (gFit < growThreads) log.warn(`[farm] ${target}: only ${gFit}/${growThreads} grow threads fit`);
-  placed += ramMgr.allocate(ns, "grow.js", growThreads, [target, growDelay]);
-
-  const w2Fit = ramMgr.canFit("weaken.js", weaken2Threads);
-  if (w2Fit < weaken2Threads) log.warn(`[farm] ${target}: only ${w2Fit}/${weaken2Threads} weaken2 threads fit`);
-  placed += ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, weaken2Delay]);
-
-  return placed > 0;
+function dispatchFarm(ns, target, server, ramMgr, weakenTime, formulasAvailable) {
+  return stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable);
 }
 
 /** @param {NS} ns */
@@ -535,6 +490,10 @@ export async function main(ns) {
     // ── 2. Discover all servers ───────────────────────────────────────────────
     const allServers = scanNetwork(ns);
 
+    // ── 2b. Detect Formulas.exe ───────────────────────────────────────────────
+    const formulasAvailable = ns.fileExists("Formulas.exe", "home");
+    log.debug(`[cycle] mode=${formulasAvailable ? "HGW" : "HWGW"}`);
+
     // ── 3. Build exec host list; deploy workers to new hosts ─────────────────
     ramMgr.refresh(ns, allServers, deployedHosts);
     log.info(`[hosts] ${ramMgr.hostCount()} exec host(s) | ${ramMgr.totalFree().toFixed(1)}GB total free`);
@@ -549,7 +508,7 @@ export async function main(ns) {
     }
 
     // ── 5. Dispatch batches ───────────────────────────────────────────────────
-    let maxWeakenTime = 0;
+    let maxEndMs = 0;
 
     for (const target of targets) {
       const server     = ns.getServer(target);
@@ -582,18 +541,25 @@ export async function main(ns) {
           // fall through to farm dispatch below
         } else {
           if (dispatchPrep(ns, target, server, ramMgr))
-            maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
+            maxEndMs = Math.max(maxEndMs, weakenTime);
           continue; // don't farm until prep completes next cycle
         }
       }
 
       // Phase is "farm" — either it was already, or just promoted above.
-      if (dispatchFarm(ns, target, server, ramMgr, weakenTime))
-        maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
+      const batches = dispatchFarm(ns, target, server, ramMgr, weakenTime, formulasAvailable);
+      if (batches > 0) {
+        const numOps      = formulasAvailable ? 3 : 4;
+        const batchPeriod = BATCH_PADDING_MS * numOps;
+        // Last operation of the last batch finishes at:
+        //   weakenTime + (numOps-2)*BATCH_PADDING_MS + (batches-1)*batchPeriod
+        const endMs = weakenTime + BATCH_PADDING_MS * (numOps - 2) + (batches - 1) * batchPeriod;
+        maxEndMs = Math.max(maxEndMs, endMs);
+      }
     }
 
     // ── 6. Sleep until all batch workers should be done ──────────────────────
-    const sleepMs = Math.max(CYCLE_SLEEP_MS, maxWeakenTime + 1_000);
+    const sleepMs = Math.max(CYCLE_SLEEP_MS, maxEndMs + 1_000);
     log.info(`[cycle] ${targets.length} target(s) | sleep ${ns.format.time(sleepMs)}`);
     await ns.sleep(sleepMs);
     ns.clearLog();
