@@ -16,6 +16,7 @@ export async function main(ns) {
     const budget = money * BUDGET_PCT;
     const owned  = ns.cloud.getServerNames();
     const limit  = ns.cloud.getServerLimit();
+    let didSomething = false;
 
     if (owned.length < limit) {
       // Open slot — buy the highest-RAM server we can afford within budget.
@@ -25,6 +26,7 @@ export async function main(ns) {
         const hostname = ns.cloud.purchaseServer(PREFIX, ram);
         if (hostname !== "") {
           ns.print(`BOUGHT ${hostname} (${ns.format.ram(ram)}) for ${ns.format.number(cost)}`);
+          didSomething = true;
         }
       } else {
         ns.print(`Waiting — cheapest server > budget (${ns.format.number(budget)})`);
@@ -47,6 +49,7 @@ export async function main(ns) {
           const ok = ns.cloud.upgradeServer(target, nextRam);
           if (ok) {
             ns.print(`UPGRADED ${target}: ${ns.format.ram(curRam)} → ${ns.format.ram(nextRam)} for ${ns.format.number(cost)}`);
+            didSomething = true;
           }
         } else {
           ns.print(`Waiting — upgrade ${target} → ${ns.format.ram(nextRam)} costs ${ns.format.number(cost)} (budget: ${ns.format.number(budget)})`);
@@ -54,7 +57,7 @@ export async function main(ns) {
       }
     }
 
-    await ns.sleep(SLEEP_MS);
+    if (!didSomething) await ns.sleep(SLEEP_MS);
   }
 }
 
