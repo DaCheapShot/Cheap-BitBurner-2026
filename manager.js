@@ -205,6 +205,7 @@ class RamManager {
     if (remaining > 0) {
       log.warn(`allocate: ${remaining}/${threads} threads undeployed for ${script}`);
     }
+    return threads - remaining;
   }
 }
 
@@ -293,15 +294,17 @@ function dispatchPrep(ns, target, server, ramMgr) {
 
   const w1Fit = ramMgr.canFit("weaken.js", weaken1Threads);
   if (w1Fit < weaken1Threads) log.warn(`[prep] ${target}: only ${w1Fit}/${weaken1Threads} weaken1 threads fit`);
-  ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, 0]);
+  let placed = ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, 0]);
 
   const gFit = ramMgr.canFit("grow.js", growThreads);
   if (gFit < growThreads) log.warn(`[prep] ${target}: only ${gFit}/${growThreads} grow threads fit`);
-  ramMgr.allocate(ns, "grow.js", growThreads, [target, 0]);
+  placed += ramMgr.allocate(ns, "grow.js", growThreads, [target, 0]);
 
   const w2Fit = ramMgr.canFit("weaken.js", weaken2Threads);
   if (w2Fit < weaken2Threads) log.warn(`[prep] ${target}: only ${w2Fit}/${weaken2Threads} weaken2 threads fit`);
-  ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, 0]);
+  placed += ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, 0]);
+
+  return placed > 0;
 }
 
 function dispatchFarm(ns, target, server, ramMgr, weakenTime) {
@@ -336,19 +339,21 @@ function dispatchFarm(ns, target, server, ramMgr, weakenTime) {
 
   const hFit = ramMgr.canFit("hack.js", hackThreads);
   if (hFit < hackThreads) log.warn(`[farm] ${target}: only ${hFit}/${hackThreads} hack threads fit`);
-  ramMgr.allocate(ns, "hack.js", hackThreads, [target, hackDelay]);
+  let placed = ramMgr.allocate(ns, "hack.js", hackThreads, [target, hackDelay]);
 
   const w1Fit = ramMgr.canFit("weaken.js", weaken1Threads);
   if (w1Fit < weaken1Threads) log.warn(`[farm] ${target}: only ${w1Fit}/${weaken1Threads} weaken1 threads fit`);
-  ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, weaken1Delay]);
+  placed += ramMgr.allocate(ns, "weaken.js", weaken1Threads, [target, weaken1Delay]);
 
   const gFit = ramMgr.canFit("grow.js", growThreads);
   if (gFit < growThreads) log.warn(`[farm] ${target}: only ${gFit}/${growThreads} grow threads fit`);
-  ramMgr.allocate(ns, "grow.js", growThreads, [target, growDelay]);
+  placed += ramMgr.allocate(ns, "grow.js", growThreads, [target, growDelay]);
 
   const w2Fit = ramMgr.canFit("weaken.js", weaken2Threads);
   if (w2Fit < weaken2Threads) log.warn(`[farm] ${target}: only ${w2Fit}/${weaken2Threads} weaken2 threads fit`);
-  ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, weaken2Delay]);
+  placed += ramMgr.allocate(ns, "weaken.js", weaken2Threads, [target, weaken2Delay]);
+
+  return placed > 0;
 }
 
 /** @param {NS} ns */
@@ -458,15 +463,15 @@ export async function main(ns) {
           log.info(`[ready] ${target} is prepped → starting farm`);
           // fall through to farm dispatch below
         } else {
-          dispatchPrep(ns, target, server, ramMgr);
-          maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
+          if (dispatchPrep(ns, target, server, ramMgr))
+            maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
           continue; // don't farm until prep completes next cycle
         }
       }
 
       // Phase is "farm" — either it was already, or just promoted above.
-      dispatchFarm(ns, target, server, ramMgr, weakenTime);
-      maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
+      if (dispatchFarm(ns, target, server, ramMgr, weakenTime))
+        maxWeakenTime = Math.max(maxWeakenTime, weakenTime);
     }
 
     // ── 6. Sleep until all batch workers should be done ──────────────────────
