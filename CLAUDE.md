@@ -16,6 +16,8 @@ run sync.js
 ```
 `sync.js` fetches all scripts from the GitHub repo (`DaCheapShot/Cheap-BitBurner-2026`, `main` branch) via `ns.wget` and overwrites local game files. After syncing, restart any running scripts to pick up the changes.
 
+**When creating a new script:** always add it to the `FILES` array in `sync.js`, or it will never be downloadable by the game.
+
 ## Running the system
 
 Full automation stack startup (in-game terminal):

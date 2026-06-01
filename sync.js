@@ -15,7 +15,8 @@ export async function main(ns) {
     "connect.js",
     "contracts.js",
     "solvers.js",
-    "ctrl.js"
+    "ctrl.js",
+    "share.js"
   ];
 
   ns.tprint("Syncing files from GitHub...");
