@@ -516,8 +516,8 @@ export async function main(ns) {
     const now = Date.now();
 
     // ── 0. Read runtime config ────────────────────────────────────────────────
-    const cfgRaw       = ns.getPortHandle(CONFIG_PORT).peek();
-    const cfg          = cfgRaw === "NULL" ? {} : JSON.parse(cfgRaw);
+    const _cfgPort     = ns.getPortHandle(CONFIG_PORT);
+    const cfg          = _cfgPort.empty() ? {} : JSON.parse(_cfgPort.peek());
     const shareEnabled = cfg.share === true;
 
     // ── 1. Periodically re-run root.js ───────────────────────────────────────
