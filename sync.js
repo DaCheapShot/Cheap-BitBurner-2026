@@ -12,7 +12,9 @@ export async function main(ns) {
     "root.js",
     "manager.js",
     "buy.js",
-    "connnect.js"
+    "connnect.js",
+    "contracts.js",
+    "solvers.js"
   ];
 
   ns.tprint("Syncing files from GitHub...");
