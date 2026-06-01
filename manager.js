@@ -34,7 +34,7 @@
 const HACK_STEAL_PCT = 0.50;
 
 // Max targets managed in parallel. More targets = higher RAM usage per cycle.
-const TOP_TARGETS = 2;
+const TOP_TARGETS = 5;
 
 // Minimum ms between manager cycles (prevents spin-looping on fast servers).
 const CYCLE_SLEEP_MS = 2_000;

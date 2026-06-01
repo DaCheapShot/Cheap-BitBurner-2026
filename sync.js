@@ -12,7 +12,7 @@ export async function main(ns) {
     "root.js",
     "manager.js",
     "buy.js",
-    "connnect.js",
+    "connect.js",
     "contracts.js",
     "solvers.js"
   ];
