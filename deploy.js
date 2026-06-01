@@ -15,7 +15,7 @@ export async function main(ns) {
     ns.tprint("ERROR deploy.js: hostname argument required");
     return;
   }
-  const workers = ["hack.js", "grow.js", "weaken.js"];
+  const workers = ["hack.js", "grow.js", "weaken.js", "share.js"];
   const ok = ns.scp(workers, host, "home");
   ns.print(ok
     ? `deploy.js: workers deployed to ${host}`
