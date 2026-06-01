@@ -4,7 +4,10 @@ import { SOLVERS } from "/solvers.js";
 export async function main(ns) {
   ns.disableLog("ALL");
 
-  // BFS scan — same pattern as root.js, finds every server including home
+  // Remove legacy pending markers from old file-based approach
+  for (const p of ns.ls("home", "contracts/pending/")) ns.rm(p, "home");
+
+  // BFS scan
   const visited = new Set(["home"]);
   const queue   = ["home"];
   while (queue.length > 0) {
@@ -14,58 +17,53 @@ export async function main(ns) {
     }
   }
 
-  // ── 1. Register newly discovered contracts as .txt markers ────────────────
-  // ns.scp() cannot transfer .cct files, so we create a .txt marker on home
-  // instead. The solve API still operates on the original server location.
+  // Cache all .cct files per host (avoids repeated ns.ls calls)
+  const contractsByHost = new Map();
   for (const host of visited) {
-    for (const filename of ns.ls(host, ".cct")) {
-      const pendingPath = `contracts/pending/${host}@${filename}.txt`;
-      const solvedPath  = `contracts/solved/${host}@${filename}.txt`;
-      if (ns.fileExists(solvedPath,  "home")) continue; // already solved
-      if (ns.fileExists(pendingPath, "home")) continue; // already registered
-      ns.write(pendingPath, "", "w");
+    const files = ns.ls(host, ".cct");
+    if (files.length) contractsByHost.set(host, files);
+  }
+
+  // Purge skip markers for contracts that no longer exist on their server
+  for (const path of ns.ls("home", "contracts/failed/")) {
+    const m = path.match(/([^/@]+)@(.+)\.txt$/);
+    if (!m || !(contractsByHost.get(m[1]) ?? []).includes(m[2])) {
+      ns.rm(path, "home");
     }
   }
 
-  // ── 2. Attempt to solve all pending contracts ─────────────────────────────
-  for (const pendingPath of ns.ls("home", "contracts/pending/")) {
-    // Parse host and filename from "contracts/pending/I.I.I.I@contract-001.cct.txt"
-    const base     = pendingPath.replace("contracts/pending/", "").replace(/\.txt$/, "");
-    const at       = base.indexOf("@");
-    if (at === -1) { ns.rm(pendingPath, "home"); continue; } // stale pre-fix marker
-    const host     = base.slice(0, at);
-    const filename = base.slice(at + 1);
+  // Attempt all live contracts
+  for (const [host, files] of contractsByHost) {
+    for (const filename of files) {
+      const skipPath = `contracts/failed/${host}@${filename}.txt`;
+      if (ns.fileExists(skipPath, "home")) continue;
 
-    if (!ns.fileExists(filename, host)) {
-      ns.rm(pendingPath, "home"); // contract expired — clean up marker
-      continue;
-    }
+      const triesLeft = ns.codingcontract.getNumTriesRemaining(filename, host);
+      if (triesLeft < 5) {
+        ns.tprint(`CONTRACTS: Skipping — only ${triesLeft} tries left: ${host}/${filename}`);
+        continue;
+      }
 
-    const triesLeft = ns.codingcontract.getNumTriesRemaining(filename, host);
-    if (triesLeft < 5) {
-      ns.tprint(`CONTRACTS: Skipping — only ${triesLeft} tries left: ${host}/${filename}`);
-      continue;
-    }
+      const type   = ns.codingcontract.getContractType(filename, host);
+      const solver = SOLVERS[type];
+      if (!solver) {
+        ns.write(skipPath, `unknown:${type}`, "w");
+        ns.tprint(`CONTRACTS: Unknown type '${type}' at ${host}/${filename} — ${triesLeft} tries remaining`);
+        continue;
+      }
 
-    const type   = ns.codingcontract.getContractType(filename, host);
-    const solver = SOLVERS[type];
+      const data   = ns.codingcontract.getData(filename, host);
+      const answer = solver(data);
+      const reward = ns.codingcontract.attempt(answer, filename, host);
 
-    if (!solver) {
-      ns.tprint(`CONTRACTS: Unknown type '${type}' at ${host}/${filename} — ${triesLeft} tries remaining`);
-      continue;
-    }
-
-    const data   = ns.codingcontract.getData(filename, host);
-    const answer = solver(data);
-    const reward = ns.codingcontract.attempt(answer, filename, host);
-
-    if (reward) {
-      ns.rm(pendingPath, "home");
-      ns.write(`contracts/solved/${host}@${filename}.txt`, reward, "w");
-      ns.tprint(`CONTRACTS: Solved '${type}' on ${host} — ${reward}`);
-    } else {
-      const remaining = ns.codingcontract.getNumTriesRemaining(filename, host);
-      ns.tprint(`CONTRACTS: Failed '${type}' on ${host}/${filename} — ${remaining} tries remaining`);
+      if (reward) {
+        ns.write(`contracts/solved/${host}@${filename}.txt`, reward, "w");
+        ns.tprint(`CONTRACTS: Solved '${type}' on ${host} — ${reward}`);
+      } else {
+        const remaining = ns.codingcontract.getNumTriesRemaining(filename, host);
+        ns.write(skipPath, type, "w");
+        ns.tprint(`CONTRACTS: Failed '${type}' on ${host}/${filename} — ${remaining} tries remaining`);
+      }
     }
   }
 }
