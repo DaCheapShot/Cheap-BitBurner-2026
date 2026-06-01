@@ -84,9 +84,9 @@ function makeLogger(ns, debug, logFile) {
   const ts    = () => new Date().toLocaleTimeString();
   const write = (msg) => ns.write(logFile, `${ts()} ${msg}\n`, "a");
   return {
-    info:  (msg) => { write(msg);           ns.print(msg); },
-    debug: (msg) => { write(msg);           if (debug) ns.print(msg); },
-    warn:  (msg) => { write(`WARN: ${msg}`); ns.print(`WARN: ${msg}`); },
+    info:  (msg) => { write(msg);            ns.print(`${ts()} ${msg}`); },
+    debug: (msg) => { write(msg);            if (debug) ns.print(`${ts()} ${msg}`); },
+    warn:  (msg) => { write(`WARN: ${msg}`); if (debug) ns.print(`${ts()} WARN: ${msg}`); },
   };
 }
 
@@ -406,6 +406,9 @@ export async function main(ns) {
       }
     }
 
+    // ── 1b. Scan for and solve contracts ─────────────────────────────────────
+    ns.exec("contracts.js", "home", 1);
+
     // ── 2. Discover all servers ───────────────────────────────────────────────
     const allServers = scanNetwork(ns);
 
@@ -470,5 +473,6 @@ export async function main(ns) {
     const sleepMs = Math.max(CYCLE_SLEEP_MS, maxWeakenTime + 1_000);
     log.info(`[cycle] ${targets.length} target(s) | sleep ${ns.format.time(sleepMs)}`);
     await ns.sleep(sleepMs);
+    ns.clearLog();
   }
 }
