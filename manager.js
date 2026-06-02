@@ -402,87 +402,84 @@ function calcBatchPlan(ns, target, server, stealPct, formulasAvailable) {
 }
 
 /**
- * Find the highest steal% where ≥1 complete batch fits in free RAM, then
- * dispatch N batches with staggered offsets. All-or-nothing: if any script
- * can't be fully allocated mid-loop, stops before deploying a partial batch.
+ * Find the highest steal% where 1 complete batch fits in free RAM and dispatch it.
+ * Returns 1 if a batch was dispatched, 0 if no steal% fit.
  *
- * Greedy allocation: caller must process targets best-first so the top target
- * claims RAM at the highest steal% before lower-priority targets search the remainder.
+ * Dispatch timing provides the 200ms stagger between consecutive batches —
+ * no batchOffset is needed here. Worker delays are fixed per target:
+ *   hack:   max(0, weakenTime - hackTime)
+ *   grow:   max(0, weakenTime - growTime)
+ *   weaken: 0
  *
  * @param {NS} ns
  * @param {string} target
  * @param {object} server
  * @param {RamManager} ramMgr
- * @param {number} weakenTime  — ms returned by ns.getWeakenTime(target)
+ * @param {number} weakenTime
  * @param {boolean} formulasAvailable
- * @returns {number} batches dispatched (0 if no steal% fit)
+ * @param {number} batchIdx  — per-target counter for ps() visibility
+ * @returns {number} 1 if dispatched, 0 if skipped
  */
-function stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable) {
-  const hackTime    = ns.getHackTime(target);
-  const growTime    = ns.getGrowTime(target);
-  const batchPeriod = BATCH_PADDING_MS;
+function dispatchOneBatch(ns, target, server, ramMgr, weakenTime, formulasAvailable, batchIdx) {
+  const hackTime = ns.getHackTime(target);
+  const growTime = ns.getGrowTime(target);
 
-  // Find highest steal% where at least 1 complete batch fits
+  // Find highest steal% where every script type can be fully placed
   let stealPct = 0;
   let plan     = null;
-  let N        = 0;
 
   for (let pct = STEAL_PCT_MAX; pct >= STEAL_PCT_MIN - 1e-9; pct -= STEAL_PCT_STEP) {
-    const candidate = calcBatchPlan(ns, target, server, pct, formulasAvailable);
-    const fits      = Math.floor(ramMgr.totalFree() / candidate.totalRam);
-    if (fits >= 1) { stealPct = pct; plan = candidate; N = fits; break; }
+    const candidate    = calcBatchPlan(ns, target, server, pct, formulasAvailable);
+    const totalWeakenT = candidate.weaken1T + candidate.weaken2T;
+    if (ramMgr.canFit("hack.js",   candidate.hackT)   >= candidate.hackT   &&
+        ramMgr.canFit("weaken.js", totalWeakenT)       >= totalWeakenT      &&
+        ramMgr.canFit("grow.js",   candidate.growT)    >= candidate.growT) {
+      stealPct = pct;
+      plan     = candidate;
+      break;
+    }
   }
 
-  if (N === 0) {
-    log.warn(`[farm] ${target}: no steal% fits even 1 batch — skipping`);
+  if (!plan) {
+    log.debug(`[farm] ${target}: no steal% fits — skipping`);
     return 0;
   }
 
-  log.info(
+  // All-or-nothing gate: re-verify fit before allocating (RAM shifts between targets)
+  const totalWeakenT = plan.weaken1T + plan.weaken2T;
+  if (ramMgr.canFit("hack.js",   plan.hackT)   < plan.hackT   ||
+      ramMgr.canFit("weaken.js", totalWeakenT) < totalWeakenT ||
+      ramMgr.canFit("grow.js",   plan.growT)   < plan.growT) {
+    log.warn(`[farm] ${target}: RAM check failed before dispatch — skipping`);
+    return 0;
+  }
+
+  const hackAddlMs   = Math.max(0, weakenTime - hackTime);
+  const growAddlMs   = Math.max(0, weakenTime - growTime);
+  const weakenAddlMs = 0;
+
+  log.debug(
     `[farm] ${target} | mode=${formulasAvailable ? "HGW" : "HWGW"} | ` +
-    `steal=${(stealPct * 100).toFixed(0)}% | batches=${N} | ` +
+    `steal=${(stealPct * 100).toFixed(0)}% | batch#${batchIdx} | ` +
     `h=${plan.hackT} w1=${plan.weaken1T} g=${plan.growT}` +
     (plan.weaken2T > 0 ? ` w2=${plan.weaken2T}` : "") +
     ` | RAM/batch=${plan.totalRam.toFixed(1)}GB`
   );
 
-  let dispatched = 0;
-  for (let i = 0; i < N; i++) {
-    // All-or-nothing gate: verify all scripts still fit before allocating.
-    // RAM may have shifted since N was calculated (previous targets already allocated).
-    const totalWeakenT = plan.weaken1T + plan.weaken2T;
-    if (ramMgr.canFit("hack.js",   plan.hackT)    < plan.hackT    ||
-        ramMgr.canFit("weaken.js", totalWeakenT)  < totalWeakenT  ||
-        ramMgr.canFit("grow.js",   plan.growT)     < plan.growT) {
-      log.warn(`[farm] ${target}: stopped at batch ${i}/${N} — RAM exhausted`);
-      break;
-    }
-
-    const batchOffset  = i * batchPeriod;
-    const hackAddlMs   = Math.max(0, weakenTime - hackTime) + batchOffset;
-    const growAddlMs   = Math.max(0, weakenTime - growTime) + batchOffset;
-    const weakenAddlMs = batchOffset;
-
-    if (formulasAvailable) {
-      // HGW: H → G → W1 — single weaken fires last, after both ops raised security
-      ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs,   "farm", i]);
-      ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs,   "farm", i]);
-      ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs, "farm", i]);
-    } else {
-      // HWGW: H → W1 → G → W2 — each weaken immediately follows its paired op
-      ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs,   "farm", i]);
-      ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs, "farm", i]);
-      ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs,   "farm", i]);
-      ramMgr.allocate(ns, "weaken.js", plan.weaken2T, [target, weakenAddlMs, "farm", i]);
-    }
-    dispatched++;
+  if (formulasAvailable) {
+    // HGW: H → G → W1
+    ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs,   "farm", batchIdx]);
+    ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs,   "farm", batchIdx]);
+    ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs, "farm", batchIdx]);
+  } else {
+    // HWGW: H → W1 → G → W2
+    ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs,   "farm", batchIdx]);
+    ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs, "farm", batchIdx]);
+    ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs,   "farm", batchIdx]);
+    ramMgr.allocate(ns, "weaken.js", plan.weaken2T, [target, weakenAddlMs, "farm", batchIdx]);
   }
 
-  return dispatched;
-}
-
-function dispatchFarm(ns, target, server, ramMgr, weakenTime, formulasAvailable) {
-  return stackBatches(ns, target, server, ramMgr, weakenTime, formulasAvailable);
+  return 1;
 }
 
 /** @param {NS} ns */
@@ -630,11 +627,7 @@ export async function main(ns) {
       }
 
       // Phase is "farm" — either it was already, or just promoted above.
-      const batches = dispatchFarm(ns, target, server, ramMgr, weakenTime, formulasAvailable);
-      if (batches > 0) {
-        const endMs = weakenTime + (batches - 1) * BATCH_PADDING_MS;
-        maxEndMs = Math.max(maxEndMs, endMs);
-      }
+      dispatchOneBatch(ns, target, server, ramMgr, weakenTime, formulasAvailable, 0);
     }
 
     // ── 6. Sleep until all batch workers should be done ──────────────────────
