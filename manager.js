@@ -603,6 +603,7 @@ export async function main(ns) {
         if (moneyDrifted || secDrifted) {
           phase = "prep";
           targetPhase.set(target, "prep");
+          prepEndMs.delete(target);
           log.info(
             `[drift] ${target} → re-prep | ` +
             `money=${(server.moneyAvailable / server.moneyMax * 100).toFixed(0)}% | ` +
@@ -617,12 +618,17 @@ export async function main(ns) {
                         server.moneyAvailable >= server.moneyMax * PREP_READY_MONEY_FLOOR;
         if (isReady) {
           targetPhase.set(target, "farm");
+          prepEndMs.delete(target);
           log.info(`[ready] ${target} is prepped → starting farm`);
           // fall through to farm dispatch below
         } else {
-          if (dispatchPrep(ns, target, server, ramMgr))
-            maxEndMs = Math.max(maxEndMs, weakenTime);
-          continue; // don't farm until prep completes next cycle
+          // Guard: skip if prep workers are still expected to be in flight
+          if (now < (prepEndMs.get(target) ?? 0)) continue;
+
+          if (dispatchPrep(ns, target, server, ramMgr)) {
+            prepEndMs.set(target, now + weakenTime + 5_000);
+          }
+          continue;
         }
       }
 
