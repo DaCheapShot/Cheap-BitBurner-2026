@@ -593,7 +593,7 @@ export async function main(ns) {
       const shareThreads = ramMgr.setAsideForShare(SHARE_RAM_PCT, SCRIPT_RAM["share.js"]);
       if (shareThreads > 0) {
         const placed = ramMgr.allocateLive(ns, "share.js", shareThreads, [ROOT_INTERVAL_MS + SHARE_MS]);
-        log.info(`[share] ON — ${placed}/${shareThreads} threads placed for ${ns.tFormat(ROOT_INTERVAL_MS + SHARE_MS)}`);
+        log.info(`[share] ON — ${placed}/${shareThreads} threads placed for ${ns.format.time(ROOT_INTERVAL_MS + SHARE_MS)}`);
       }
     }
 
