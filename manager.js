@@ -30,8 +30,8 @@
 
 // ─── Tuning constants ────────────────────────────────────────────────────────
 
-// Steal% range for dynamic RAM-driven selection. stackBatches tries from MAX
-// down to MIN in STEP increments, picking the highest that lets ≥1 full batch fit.
+// Steal% range for dynamic RAM-driven selection. dispatchOneBatch tries from MAX
+// down to MIN in STEP increments, picking the highest that lets 1 full batch fit.
 const STEAL_PCT_MAX  = 0.95;
 const STEAL_PCT_MIN  = 0.10;
 const STEAL_PCT_STEP = 0.05;
@@ -588,7 +588,7 @@ export async function main(ns) {
     log.debug(`[hosts] ${ramMgr.hostCount()} exec host(s) | ${ramMgr.totalFree().toFixed(1)}GB total free`);
 
     // ── 3b. 60s: Share dispatch — fires in same tick as root.js, after fresh RAM snapshot
-    // Gated by lastRootTime < BATCH_PADDING_MS: true only in the tick root.js just fired.
+    // Gated by now - lastRootTime < BATCH_PADDING_MS: true only in the tick root.js just fired.
     if (shareEnabled && now - lastRootTime < BATCH_PADDING_MS) {
       const shareThreads = ramMgr.setAsideForShare(SHARE_RAM_PCT, SCRIPT_RAM["share.js"]);
       if (shareThreads > 0) {
