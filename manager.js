@@ -553,35 +553,36 @@ export async function main(ns) {
       }
     }
 
-    // ── 1b. Scan for and solve contracts ─────────────────────────────────────
-    ns.exec("contracts.js", "home", 1);
+    // ── 2. 5s: Scan network, re-score targets, prune stale state ─────────────
+    if (now - lastScanTime >= SCAN_INTERVAL_MS) {
+      allServers        = scanNetwork(ns);
+      formulasAvailable = ns.fileExists("Formulas.exe", "home");
+      targets           = pickTargets(ns, allServers, TOP_TARGETS);
+      log.debug(`[scan] ${allServers.length} servers | ${targets.length} target(s) | mode=${formulasAvailable ? "HGW" : "HWGW"}`);
 
-    // ── 2. Discover all servers ───────────────────────────────────────────────
-    const allServers = scanNetwork(ns);
+      // Prune state maps for targets that dropped out of the top list
+      for (const t of [...targetPhase.keys()]) {
+        if (!targets.includes(t)) {
+          targetPhase.delete(t);
+          prepEndMs.delete(t);
+          batchCounter.delete(t);
+          log.debug(`[scan] dropped target ${t}`);
+        }
+      }
 
-    // ── 2b. Detect Formulas.exe ───────────────────────────────────────────────
-    const formulasAvailable = ns.fileExists("Formulas.exe", "home");
-    log.debug(`[cycle] mode=${formulasAvailable ? "HGW" : "HWGW"}`);
-
-    // ── 3. Build exec host list; deploy workers to new hosts ─────────────────
-    ramMgr.refresh(ns, allServers, deployedHosts);
-    log.info(`[hosts] ${ramMgr.hostCount()} exec host(s) | ${ramMgr.totalFree().toFixed(1)}GB total free`);
-
-    // ── 3b. Reserve share RAM before HWGW dispatch ────────────────────────────
-    let shareThreads = 0;
-    if (shareEnabled) {
-      shareThreads = ramMgr.setAsideForShare(SHARE_RAM_PCT, SCRIPT_RAM["share.js"]);
-      log.info(`[share] ON — reserved ${(shareThreads * SCRIPT_RAM["share.js"]).toFixed(1)}GB for ${shareThreads} share threads`);
+      ns.clearLog();
+      lastScanTime = now;
     }
-
-    // ── 4. Score and select top targets ──────────────────────────────────────
-    const targets = pickTargets(ns, allServers, TOP_TARGETS);
 
     if (targets.length === 0) {
       log.warn("no eligible targets yet — retrying in 10s");
       await ns.sleep(10_000);
       continue;
     }
+
+    // ── 3. Refresh RAM snapshot (every tick) ─────────────────────────────────
+    ramMgr.refresh(ns, allServers, deployedHosts);
+    log.debug(`[hosts] ${ramMgr.hostCount()} exec host(s) | ${ramMgr.totalFree().toFixed(1)}GB total free`);
 
     // ── 5. Dispatch batches ───────────────────────────────────────────────────
     let maxEndMs = 0;
@@ -633,11 +634,6 @@ export async function main(ns) {
     // ── 6. Sleep until all batch workers should be done ──────────────────────
     const sleepMs = Math.max(CYCLE_SLEEP_MS, maxEndMs + 1_000);
     log.info(`[cycle] ${targets.length} target(s) | sleep ${ns.format.time(sleepMs)}`);
-    if (shareEnabled && shareThreads > 0) {
-      const placed = ramMgr.allocateLive(ns, "share.js", shareThreads, [sleepMs]);
-      log.debug(`[share] ${placed}/${shareThreads} threads placed for ${ns.format.time(sleepMs)}`);
-    }
     await ns.sleep(sleepMs);
-    ns.clearLog();
   }
 }
