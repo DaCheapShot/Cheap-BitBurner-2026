@@ -587,6 +587,16 @@ export async function main(ns) {
     ramMgr.refresh(ns, allServers, deployedHosts);
     log.debug(`[hosts] ${ramMgr.hostCount()} exec host(s) | ${ramMgr.totalFree().toFixed(1)}GB total free`);
 
+    // ── 3b. 60s: Share dispatch — fires in same tick as root.js, after fresh RAM snapshot
+    // Gated by lastRootTime < BATCH_PADDING_MS: true only in the tick root.js just fired.
+    if (shareEnabled && now - lastRootTime < BATCH_PADDING_MS) {
+      const shareThreads = ramMgr.setAsideForShare(SHARE_RAM_PCT, SCRIPT_RAM["share.js"]);
+      if (shareThreads > 0) {
+        const placed = ramMgr.allocateLive(ns, "share.js", shareThreads, [ROOT_INTERVAL_MS + SHARE_MS]);
+        log.info(`[share] ON — ${placed}/${shareThreads} threads placed for ${ns.tFormat(ROOT_INTERVAL_MS + SHARE_MS)}`);
+      }
+    }
+
     // ── 5. Dispatch batches ───────────────────────────────────────────────────
     let maxEndMs = 0;
 
