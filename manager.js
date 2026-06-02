@@ -71,6 +71,17 @@ const SHARE_RAM_PCT = 0.20;
 // Populated at startup from ns.getScriptRam() — accurate regardless of Bitburner version.
 const SCRIPT_RAM = { "hack.js": 0, "grow.js": 0, "weaken.js": 0, "deploy.js": 0, "share.js": 0 };
 
+// ─── Continuous batcher intervals ────────────────────────────────────────────
+
+// How often to re-scan the network, re-score targets, and prune stale state.
+const SCAN_INTERVAL_MS = 5_000;
+
+// How often to re-run contracts.js (same cadence as root.js is fine).
+const CONTRACTS_INTERVAL_MS = 60_000;
+
+// Fixed duration of one ns.share() call — used to calculate share thread deadline.
+const SHARE_MS = 10_000;
+
 // ─── Logger ──────────────────────────────────────────────────────────────────
 
 // Module-level logger so all helper functions share it without extra parameters.
@@ -507,12 +518,19 @@ export async function main(ns) {
   // Hosts that already have hack/grow/weaken deployed. Home always has its own files.
   const deployedHosts = new Set(["home"]);
 
-  // Current phase for each target: "prep" (getting ready) or "farm" (earning money).
-  // New targets default to "prep" — they must reach minSec+maxMoney before farming.
-  const targetPhase = new Map();
+  const targetPhase  = new Map(); // "prep" | "farm" per target
+  const prepEndMs    = new Map(); // estimated prep completion time — guards re-dispatch
+  const batchCounter = new Map(); // per-target batch index for ps() visibility
 
-  // Timestamp of last root.js launch (ms). Initialized to 0 so it fires on first cycle.
-  let lastRootTime = 0;
+  let lastRootTime      = 0; // initialized to 0 so root.js fires on first tick
+  let lastScanTime      = 0; // initialized to 0 so scan fires on first tick
+  let lastContractsTime = 0;
+
+  // Cached between 5s scans — updated in the scan block each tick
+  let allServers        = [];
+  let targets           = [];
+  let formulasAvailable = false;
+
   const ramMgr = new RamManager({ homeReserveGb: HOME_RESERVE_GB, homeReservePct: HOME_RESERVE_PCT });
 
   while (true) {
