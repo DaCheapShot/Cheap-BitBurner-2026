@@ -633,7 +633,11 @@ export async function main(ns) {
       }
 
       // Phase is "farm" — either it was already, or just promoted above.
-      dispatchOneBatch(ns, target, server, ramMgr, weakenTime, formulasAvailable, 0);
+      const batchIdx   = batchCounter.get(target) ?? 0;
+      const dispatched = dispatchOneBatch(ns, target, server, ramMgr, weakenTime, formulasAvailable, batchIdx);
+      if (dispatched) {
+        batchCounter.set(target, (batchIdx + 1) % 10_000);
+      }
     }
 
     // ── 6. Sleep until all batch workers should be done ──────────────────────
