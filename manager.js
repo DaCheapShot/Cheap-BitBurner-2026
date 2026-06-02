@@ -598,7 +598,6 @@ export async function main(ns) {
     }
 
     // ── 5. Dispatch batches ───────────────────────────────────────────────────
-    let maxEndMs = 0;
 
     for (const target of targets) {
       const server     = ns.getServer(target);
@@ -650,9 +649,7 @@ export async function main(ns) {
       }
     }
 
-    // ── 6. Sleep until all batch workers should be done ──────────────────────
-    const sleepMs = Math.max(CYCLE_SLEEP_MS, maxEndMs + 1_000);
-    log.info(`[cycle] ${targets.length} target(s) | sleep ${ns.format.time(sleepMs)}`);
-    await ns.sleep(sleepMs);
+    // ── 6. Tick sleep — 200ms between batch dispatches ───────────────────────
+    await ns.sleep(BATCH_PADDING_MS);
   }
 }
