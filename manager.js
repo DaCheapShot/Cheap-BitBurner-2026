@@ -553,6 +553,12 @@ export async function main(ns) {
       }
     }
 
+    // ── 1b. 60s: Solve contracts ─────────────────────────────────────────────
+    if (now - lastContractsTime >= CONTRACTS_INTERVAL_MS) {
+      ns.exec("contracts.js", "home", 1);
+      lastContractsTime = now;
+    }
+
     // ── 2. 5s: Scan network, re-score targets, prune stale state ─────────────
     if (now - lastScanTime >= SCAN_INTERVAL_MS) {
       allServers        = scanNetwork(ns);
