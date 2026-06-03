@@ -90,6 +90,86 @@ function printHeader(ns, servers) {
   ns.print("");
 }
 
+function getPhase(server, stateMap = null) {
+  if (stateMap?.has(server.hostname)) return stateMap.get(server.hostname).phase;
+  if (!server.hasAdminRights || server.moneyMax <= 0) return null;
+  if (server.hackDifficulty <= server.minDifficulty + 5 &&
+      server.moneyAvailable >= server.moneyMax * 0.90) return "FARM";
+  return "PREP";
+}
+
+function rowColor(server, phase) {
+  if (!server.hasAdminRights)                                     return C.grey;
+  if (phase === "FARM")                                           return C.green;
+  if (server.hackDifficulty > server.minDifficulty + 10 ||
+      server.moneyAvailable === 0)                               return C.red;
+  return C.yellow; // PREP
+}
+
+function printTargets(ns, targets) {
+  if (targets.length === 0) return;
+
+  const hostW = Math.max(16, ...targets.map(s => s.hostname.length)) + 1;
+  const sep   = `  ${"─".repeat(hostW)}` +
+    `┼${"─".repeat(13)}` +
+    `┼${"─".repeat(10)}` +
+    `┼${"─".repeat(13)}` +
+    `┼${"─".repeat(6)}` +
+    `┼${"─".repeat(6)}` +
+    `┼${"─".repeat(6)}` +
+    `┼${"─".repeat(6)}`;
+
+  ns.print(`${C.yellow}▶ HACKABLE TARGETS (${targets.length}) ${"─".repeat(48)}${C.reset}`);
+  ns.print(
+    `${C.grey}  ${pad("HOST", hostW)}` +
+    `| ${pad("SEC / MIN", 13)}` +
+    `| ${pad("MONEY %", 8)}` +
+    `| ${pad("MONEY MAX", 9)} ` +
+    `| ${pad("WKN", 4)} ` +
+    `| ${pad("GRW", 4)} ` +
+    `| ${pad("HCK", 4)} ` +
+    `| PHASE${C.reset}`
+  );
+  ns.print(sep);
+
+  for (const s of targets) {
+    const phase = getPhase(s);
+    const color = rowColor(s, phase);
+
+    if (!s.hasAdminRights) {
+      ns.print(
+        `${color}  ${pad(s.hostname, hostW)}` +
+        `|  ${pad("✗", 13)}` +
+        `|  ${pad("—", 8)}` +
+        `| ${pad(fmtMoney(s.moneyMax), 9)} ` +
+        `|     — ` +
+        `|     — ` +
+        `|     — ` +
+        `|     —${C.reset}`
+      );
+      continue;
+    }
+
+    const secStr   = `${s.hackDifficulty.toFixed(1)} / ${s.minDifficulty.toFixed(1)}`;
+    const moneyPct = `${Math.min(100, Math.round(s.moneyAvailable / s.moneyMax * 100))}%`;
+    const wkn      = fmtTime(ns.getWeakenTime(s.hostname));
+    const grw      = fmtTime(ns.getGrowTime(s.hostname));
+    const hck      = fmtTime(ns.getHackTime(s.hostname));
+
+    ns.print(
+      `${color}  ${pad(s.hostname, hostW)}` +
+      `| ${pad(secStr, 13)} ` +
+      `| ${pad(moneyPct, 8)} ` +
+      `| ${pad(fmtMoney(s.moneyMax), 9)} ` +
+      `| ${pad(wkn, 4)} ` +
+      `| ${pad(grw, 4)} ` +
+      `| ${pad(hck, 4)} ` +
+      `| ${phase ?? "—"}${C.reset}`
+    );
+  }
+  ns.print("");
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 /** @param {NS} ns */
@@ -105,7 +185,8 @@ export async function main(ns) {
     const { targets, purchased, other } = classifyServers(servers);
 
     printHeader(ns, servers);
-    ns.print(`Targets: ${targets.length} | Purchased: ${purchased.length} | Other: ${other.length}`);
+    printTargets(ns, targets);
+    ns.print(`[purchased: ${purchased.length} | other: ${other.length} — coming soon]`);
 
     await ns.sleep(REFRESH_MS);
   }
