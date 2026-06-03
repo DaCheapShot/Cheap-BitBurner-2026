@@ -106,26 +106,32 @@ function rowColor(server, phase) {
   return C.yellow; // PREP
 }
 
-function printTargets(ns, targets) {
-  const usable = targets.filter(s => s.hasAdminRights);
-  if (usable.length === 0) return;
+function printTargets(ns, managerTargets) {
+  if (!managerTargets || managerTargets.length === 0) {
+    ns.print(`${C.yellow}▶ MANAGER TARGETS ${"─".repeat(55)}${C.reset}`);
+    ns.print(`${C.grey}  manager not running${C.reset}`);
+    ns.print("");
+    return;
+  }
 
-  const hostW = Math.max(16, ...usable.map(s => s.hostname.length)) + 1;
+  const hostW = Math.max(16, ...managerTargets.map(e => e.host.length)) + 1;
   const sep   = `  ${"─".repeat(hostW)}` +
     `┼${"─".repeat(13)}` +
     `┼${"─".repeat(10)}` +
     `┼${"─".repeat(13)}` +
+    `┼${"─".repeat(11)}` +
     `┼${"─".repeat(6)}` +
     `┼${"─".repeat(6)}` +
     `┼${"─".repeat(6)}` +
     `┼${"─".repeat(6)}`;
 
-  ns.print(`${C.yellow}▶ HACKABLE TARGETS (${usable.length}) ${"─".repeat(48)}${C.reset}`);
+  ns.print(`${C.yellow}▶ MANAGER TARGETS (${managerTargets.length}) ${"─".repeat(50)}${C.reset}`);
   ns.print(
     `${C.grey}  ${pad("HOST", hostW)}` +
     `| ${pad("SEC / MIN", 13)}` +
     `| ${pad("MONEY %", 8)}` +
     `| ${pad("MONEY MAX", 9)} ` +
+    `| ${pad("EST $/S", 9)} ` +
     `| ${pad("WKN", 4)} ` +
     `| ${pad("GRW", 4)} ` +
     `| ${pad("HCK", 4)} ` +
@@ -133,24 +139,28 @@ function printTargets(ns, targets) {
   );
   ns.print(sep);
 
-  for (const s of usable) {
-    const phase    = getPhase(s);
+  for (const entry of managerTargets) {
+    const s        = ns.getServer(entry.host);
+    const phase    = entry.phase.toUpperCase();
     const color    = rowColor(s, phase);
     const secStr   = `${s.hackDifficulty.toFixed(1)} / ${s.minDifficulty.toFixed(1)}`;
-    const moneyPct = `${Math.min(100, Math.round(s.moneyAvailable / s.moneyMax * 100))}%`;
-    const wkn      = fmtTime(ns.getWeakenTime(s.hostname));
-    const grw      = fmtTime(ns.getGrowTime(s.hostname));
-    const hck      = fmtTime(ns.getHackTime(s.hostname));
+    const moneyPct = s.moneyMax > 0
+      ? `${Math.min(100, Math.round(s.moneyAvailable / s.moneyMax * 100))}%`
+      : "0%";
+    const wkn      = fmtTime(ns.getWeakenTime(entry.host));
+    const grw      = fmtTime(ns.getGrowTime(entry.host));
+    const hck      = fmtTime(ns.getHackTime(entry.host));
 
     ns.print(
-      `${color}  ${pad(s.hostname, hostW)}` +
+      `${color}  ${pad(entry.host, hostW)}` +
       `| ${pad(secStr, 13)} ` +
       `| ${pad(moneyPct, 8)} ` +
       `| ${pad(fmtMoney(s.moneyMax), 9)} ` +
+      `| ${pad(fmtMoney(entry.estPerSec), 9)} ` +
       `| ${pad(wkn, 4)} ` +
       `| ${pad(grw, 4)} ` +
       `| ${pad(hck, 4)} ` +
-      `| ${phase ?? "—"}${C.reset}`
+      `| ${phase}${C.reset}`
     );
   }
   ns.print("");
@@ -220,17 +230,24 @@ function printOther(ns, servers) {
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-  ns.tail();
+  ns.ui.openTail();
 
   while (true) {
     ns.clearLog();
 
     const allHostnames = scanNetwork(ns);
     const servers      = allHostnames.map(h => ns.getServer(h));
-    const { targets, purchased, other } = classifyServers(servers);
+    const { purchased, other } = classifyServers(servers);
+
+    let dashData = null;
+    try {
+      const raw = ns.read("data/dashboard.json");
+      if (raw) dashData = JSON.parse(raw);
+    } catch (_) {}
+    const stale = !dashData || (Date.now() - dashData.updatedAt > 15_000);
 
     printHeader(ns, servers);
-    printTargets(ns, targets);
+    printTargets(ns, stale ? null : dashData.targets);
     printPurchased(ns, purchased);
     printOther(ns, other);
 
