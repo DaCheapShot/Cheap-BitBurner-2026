@@ -283,7 +283,7 @@ function scanNetwork(ns) {
  * @param {NS} ns
  * @param {string[]} allServers
  * @param {number} maxCount
- * @returns {string[]} hostnames sorted best-first, up to maxCount
+ * @returns {Array<{host: string, score: number}>} scored targets best-first, up to maxCount
  */
 function pickTargets(ns, allServers, maxCount) {
   const hackLevel = ns.getHackingLevel();
@@ -302,7 +302,7 @@ function pickTargets(ns, allServers, maxCount) {
   }
 
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, maxCount).map(s => s.host);
+  return scored.slice(0, maxCount);
 }
 
 function dispatchPrep(ns, target, server, ramMgr) {
@@ -533,8 +533,18 @@ export async function main(ns) {
     if (now - lastScanTime >= SCAN_INTERVAL_MS) {
       allServers        = scanNetwork(ns);
       formulasAvailable = ns.fileExists("Formulas.exe", "home");
-      targets           = pickTargets(ns, allServers, TOP_TARGETS);
+      const scoredTargets = pickTargets(ns, allServers, TOP_TARGETS);
+      targets             = scoredTargets.map(s => s.host);
       log.debug(`[scan] ${allServers.length} servers | ${targets.length} target(s) | mode=${formulasAvailable ? "HGW" : "HWGW"}`);
+
+      ns.write("data/dashboard.json", JSON.stringify({
+        updatedAt: now,
+        targets: scoredTargets.map(s => ({
+          host:      s.host,
+          phase:     targetPhase.get(s.host) ?? "prep",
+          estPerSec: Math.round(s.score * 1000),
+        })),
+      }), "w");
 
       // Deploy workers to newly rooted servers. Doing this at 5s cadence rather than every 200ms
       // tick cuts per-tick ns.getServer calls from O(allServers) down to O(deployedHosts).
