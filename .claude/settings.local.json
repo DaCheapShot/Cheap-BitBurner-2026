@@ -8,7 +8,9 @@
       "Bash(git *)",
       "Bash(findstr -i \"purchas\\\\|player\\\\|upgrade\")",
       "Bash(awk 'NR>=30 && NR<=40' manager.js)",
-      "Bash(awk 'NR>=305 && NR<=360' manager.js)"
+      "Bash(awk 'NR>=305 && NR<=360' manager.js)",
+      "Bash(grep -v \"^[[:space:]]*//.*\")",
+      "Bash(gh pr create --title 'feat: continuous batcher — 200ms tick replaces cycle-and-wait' --body ' *)"
     ]
   }
 }

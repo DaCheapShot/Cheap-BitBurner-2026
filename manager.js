@@ -122,10 +122,9 @@ class RamManager {
   /**
    * Rebuild the per-host free-RAM snapshot from live game state.
    * Call once per cycle before any allocate() calls.
-   * Handles deploy.js launches for newly rooted hosts and immediately
-   * deducts their RAM from home so subsequent allocate() calls stay accurate.
+   * Only iterates deployedHosts (known exec hosts) — not all network servers.
    */
-  refresh(ns, allServers, deployedHosts) {
+  refresh(ns, deployedHosts) {
     this._hosts.clear();
 
     // Insert home first so allocate() fills it with priority.
@@ -134,23 +133,10 @@ class RamManager {
     const homeFree = Math.max(0, home.maxRam - home.ramUsed - reserved);
     this._hosts.set("home", { maxRam: home.maxRam, freeRam: homeFree });
 
-    for (const host of allServers) {
-      const server = ns.getServer(host);
-      if (!server.hasAdminRights || server.maxRam < 2) {
-        log.debug(`[hosts] SKIP ${host}: ${!server.hasAdminRights ? "no root" : "maxRam=" + server.maxRam + "GB < 2"}`);
-        continue;
-      }
-
-      if (!deployedHosts.has(host)) {
-        if (ns.exec("deploy.js", "home", 1, host) > 0) {
-          deployedHosts.add(host);
-          const entry = this._hosts.get("home");
-          entry.freeRam = Math.max(0, entry.freeRam - SCRIPT_RAM["deploy.js"]);
-          log.info(`[deploy] Queuing workers → ${host} (${SCRIPT_RAM["deploy.js"]}GB)`);
-        }
-        continue;
-      }
-
+    // Only iterate known exec hosts — avoids calling ns.getServer for every un-rooted server each tick.
+    for (const host of deployedHosts) {
+      if (host === "home") continue;
+      const server  = ns.getServer(host);
       const freeRam = server.maxRam - server.ramUsed;
       log.debug(`[hosts] ${host}: ${server.maxRam}GB max | ${server.ramUsed.toFixed(1)}GB used → ${freeRam.toFixed(1)}GB free`);
       if (freeRam > 0) this._hosts.set(host, { maxRam: server.maxRam, freeRam });
@@ -191,8 +177,7 @@ class RamManager {
 
   /**
    * Distribute `threads` of `script` across exec hosts in snapshot order.
-   * Performs a live RAM check per host as a safety net for RAM consumed after
-   * snapshot time. Mutates freeRam entries. Logs a warning if threads go undeployed.
+   * Trusts the snapshot (built fresh each tick by refresh()). Mutates freeRam entries.
    */
   allocate(ns, script, threads, args) {
     const ramPerThread = SCRIPT_RAM[script];
@@ -201,15 +186,8 @@ class RamManager {
     for (const [host, entry] of this._hosts) {
       if (remaining <= 0) break;
 
-      const live        = ns.getServer(host);
-      const liveReserve = host === "home"
-        ? Math.max(this._homeReserveGb, live.maxRam * this._homeReservePct)
-        : 0;
-      const liveFree      = Math.max(0, live.maxRam - live.ramUsed - liveReserve);
-      const effectiveFree = Math.min(entry.freeRam, liveFree);
-      const canFit        = Math.floor(effectiveFree / ramPerThread);
-
-      log.debug(`  [fit] ${host}: tracked=${entry.freeRam.toFixed(1)}GB live=${liveFree.toFixed(1)}GB canFit=${canFit}`);
+      const canFit = Math.floor(entry.freeRam / ramPerThread);
+      log.debug(`  [fit] ${host}: tracked=${entry.freeRam.toFixed(1)}GB canFit=${canFit}`);
       if (canFit <= 0) continue;
 
       const toPlace = Math.min(canFit, remaining);
@@ -402,55 +380,49 @@ function calcBatchPlan(ns, target, server, stealPct, formulasAvailable) {
 }
 
 /**
- * Find the highest steal% where 1 complete batch fits in free RAM and dispatch it.
- * Returns 1 if a batch was dispatched, 0 if no steal% fit.
- *
- * Dispatch timing provides the 200ms stagger between consecutive batches —
- * no batchOffset is needed here. Worker delays are fixed per target:
- *   hack:   max(0, weakenTime - hackTime)
- *   grow:   max(0, weakenTime - growTime)
- *   weaken: 0
- *
- * @param {NS} ns
- * @param {string} target
- * @param {object} server
- * @param {RamManager} ramMgr
- * @param {number} weakenTime
- * @param {boolean} formulasAvailable
- * @param {number} batchIdx  — per-target counter for ps() visibility
- * @returns {number} 1 if dispatched, 0 if skipped
+ * Pre-compute batch plans for all steal% values for a target at its current state.
+ * Returns array sorted highest steal% first. Call once when target enters farm phase;
+ * reuse every tick to avoid per-tick NS calls (hackAnalyzeThreads, growthAnalyze).
  */
-function dispatchOneBatch(ns, target, server, ramMgr, weakenTime, formulasAvailable, batchIdx) {
+function computeBatchPlans(ns, target, server, formulasAvailable) {
+  const plans = [];
+  for (let pct = STEAL_PCT_MAX; pct >= STEAL_PCT_MIN - 1e-9; pct -= STEAL_PCT_STEP) {
+    plans.push({ stealPct: pct, ...calcBatchPlan(ns, target, server, pct, formulasAvailable) });
+  }
+  return plans;
+}
+
+/**
+ * Find the highest steal% where 1 complete batch fits in free RAM and dispatch it.
+ * Uses pre-computed plans (no NS calls for plan selection). Returns 1 if dispatched.
+ *
+ * Worker delays synchronise all four operations to finish at T + weakenTime:
+ *   hack:   additionalMsec = max(0, weakenTime - hackTime)
+ *   grow:   additionalMsec = max(0, weakenTime - growTime)
+ *   weaken: additionalMsec = 0
+ */
+function dispatchOneBatch(ns, target, ramMgr, weakenTime, formulasAvailable, batchIdx, minBatchRam, cachedPlans) {
+  if (ramMgr.totalFree() < minBatchRam) return 0;
+
   const hackTime = ns.getHackTime(target);
   const growTime = ns.getGrowTime(target);
 
-  // Find highest steal% where every script type can be fully placed
+  // canFit is pure snapshot math — no NS calls.
   let stealPct = 0;
   let plan     = null;
-
-  for (let pct = STEAL_PCT_MAX; pct >= STEAL_PCT_MIN - 1e-9; pct -= STEAL_PCT_STEP) {
-    const candidate    = calcBatchPlan(ns, target, server, pct, formulasAvailable);
-    const totalWeakenT = candidate.weaken1T + candidate.weaken2T;
-    if (ramMgr.canFit("hack.js",   candidate.hackT)   >= candidate.hackT   &&
-        ramMgr.canFit("weaken.js", totalWeakenT)       >= totalWeakenT      &&
-        ramMgr.canFit("grow.js",   candidate.growT)    >= candidate.growT) {
-      stealPct = pct;
-      plan     = candidate;
+  for (const p of cachedPlans) {
+    const totalWeakenT = p.weaken1T + p.weaken2T;
+    if (ramMgr.canFit("hack.js",   p.hackT)     >= p.hackT     &&
+        ramMgr.canFit("weaken.js", totalWeakenT) >= totalWeakenT &&
+        ramMgr.canFit("grow.js",   p.growT)      >= p.growT) {
+      stealPct = p.stealPct;
+      plan     = p;
       break;
     }
   }
 
   if (!plan) {
     log.debug(`[farm] ${target}: no steal% fits — skipping`);
-    return 0;
-  }
-
-  // All-or-nothing gate: re-verify fit before allocating (RAM shifts between targets)
-  const totalWeakenT = plan.weaken1T + plan.weaken2T;
-  if (ramMgr.canFit("hack.js",   plan.hackT)   < plan.hackT   ||
-      ramMgr.canFit("weaken.js", totalWeakenT) < totalWeakenT ||
-      ramMgr.canFit("grow.js",   plan.growT)   < plan.growT) {
-    log.warn(`[farm] ${target}: RAM check failed before dispatch — skipping`);
     return 0;
   }
 
@@ -467,12 +439,10 @@ function dispatchOneBatch(ns, target, server, ramMgr, weakenTime, formulasAvaila
   );
 
   if (formulasAvailable) {
-    // HGW: H → G → W1
     ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs,   "farm", batchIdx]);
     ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs,   "farm", batchIdx]);
     ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs, "farm", batchIdx]);
   } else {
-    // HWGW: H → W1 → G → W2
     ramMgr.allocate(ns, "hack.js",   plan.hackT,    [target, hackAddlMs,   "farm", batchIdx]);
     ramMgr.allocate(ns, "weaken.js", plan.weaken1T, [target, weakenAddlMs, "farm", batchIdx]);
     ramMgr.allocate(ns, "grow.js",   plan.growT,    [target, growAddlMs,   "farm", batchIdx]);
@@ -499,6 +469,8 @@ export async function main(ns) {
   SCRIPT_RAM["weaken.js"] = ns.getScriptRam("weaken.js");
   SCRIPT_RAM["deploy.js"] = ns.getScriptRam("deploy.js");
   SCRIPT_RAM["share.js"]  = ns.getScriptRam("share.js");
+  // Absolute lower bound for any HWGW batch (1 thread each). Used to skip the steal% search fast.
+  const minBatchRam = SCRIPT_RAM["hack.js"] + SCRIPT_RAM["weaken.js"] * 2 + SCRIPT_RAM["grow.js"];
 
   log.info("=== manager.js started ===");
   log.info(`[init] Script RAM — hack=${SCRIPT_RAM["hack.js"]}GB grow=${SCRIPT_RAM["grow.js"]}GB weaken=${SCRIPT_RAM["weaken.js"]}GB deploy=${SCRIPT_RAM["deploy.js"]}GB share=${SCRIPT_RAM["share.js"]}GB`);
@@ -515,9 +487,10 @@ export async function main(ns) {
   // Hosts that already have hack/grow/weaken deployed. Home always has its own files.
   const deployedHosts = new Set(["home"]);
 
-  const targetPhase  = new Map(); // "prep" | "farm" per target
-  const prepEndMs    = new Map(); // estimated prep completion time — guards re-dispatch
-  const batchCounter = new Map(); // per-target batch index for ps() visibility
+  const targetPhase     = new Map(); // "prep" | "farm" per target
+  const prepEndMs       = new Map(); // estimated prep completion time — guards re-dispatch
+  const batchCounter    = new Map(); // per-target batch index for ps() visibility
+  const batchPlanCache  = new Map(); // target → precomputed plans array (avoids per-tick NS calls)
 
   let lastRootTime      = 0; // initialized to 0 so root.js fires on first tick
   let lastScanTime      = 0; // initialized to 0 so scan fires on first tick
@@ -556,12 +529,32 @@ export async function main(ns) {
       lastContractsTime = now;
     }
 
-    // ── 2. 5s: Scan network, re-score targets, prune stale state ─────────────
+    // ── 2. 5s: Scan network, re-score targets, deploy to new hosts, prune stale state ─────────────
     if (now - lastScanTime >= SCAN_INTERVAL_MS) {
       allServers        = scanNetwork(ns);
       formulasAvailable = ns.fileExists("Formulas.exe", "home");
       targets           = pickTargets(ns, allServers, TOP_TARGETS);
       log.debug(`[scan] ${allServers.length} servers | ${targets.length} target(s) | mode=${formulasAvailable ? "HGW" : "HWGW"}`);
+
+      // Deploy workers to newly rooted servers. Doing this at 5s cadence rather than every 200ms
+      // tick cuts per-tick ns.getServer calls from O(allServers) down to O(deployedHosts).
+      for (const host of allServers) {
+        if (deployedHosts.has(host)) continue;
+        const server = ns.getServer(host);
+        if (!server.hasAdminRights || server.maxRam < 2) continue;
+        if (ns.exec("deploy.js", "home", 1, host) > 0) {
+          deployedHosts.add(host);
+          log.info(`[deploy] Queuing workers → ${host} (${SCRIPT_RAM["deploy.js"]}GB)`);
+        }
+      }
+
+      // Refresh batch plan cache for all farm targets (picks up formulasAvailable changes
+      // and hacking-level drift without adding per-tick NS calls).
+      for (const t of targets) {
+        if (targetPhase.get(t) !== "farm") continue;
+        const srv = ns.getServer(t);
+        batchPlanCache.set(t, computeBatchPlans(ns, t, srv, formulasAvailable));
+      }
 
       // Prune state maps for targets that dropped out of the top list
       for (const t of [...targetPhase.keys()]) {
@@ -569,6 +562,7 @@ export async function main(ns) {
           targetPhase.delete(t);
           prepEndMs.delete(t);
           batchCounter.delete(t);
+          batchPlanCache.delete(t);
           log.debug(`[scan] dropped target ${t}`);
         }
       }
@@ -584,7 +578,7 @@ export async function main(ns) {
     }
 
     // ── 3. Refresh RAM snapshot (every tick) ─────────────────────────────────
-    ramMgr.refresh(ns, allServers, deployedHosts);
+    ramMgr.refresh(ns, deployedHosts);
     log.debug(`[hosts] ${ramMgr.hostCount()} exec host(s) | ${ramMgr.totalFree().toFixed(1)}GB total free`);
 
     // ── 3b. 60s: Share dispatch — fires in same tick as root.js, after fresh RAM snapshot
@@ -613,6 +607,7 @@ export async function main(ns) {
           phase = "prep";
           targetPhase.set(target, "prep");
           prepEndMs.delete(target);
+          batchPlanCache.delete(target);
           log.info(
             `[drift] ${target} → re-prep | ` +
             `money=${(server.moneyAvailable / server.moneyMax * 100).toFixed(0)}% | ` +
@@ -628,6 +623,7 @@ export async function main(ns) {
         if (isReady) {
           targetPhase.set(target, "farm");
           prepEndMs.delete(target);
+          batchPlanCache.set(target, computeBatchPlans(ns, target, server, formulasAvailable));
           log.info(`[ready] ${target} is prepped → starting farm`);
           // fall through to farm dispatch below
         } else {
@@ -642,8 +638,9 @@ export async function main(ns) {
       }
 
       // Phase is "farm" — either it was already, or just promoted above.
-      const batchIdx   = batchCounter.get(target) ?? 0;
-      const dispatched = dispatchOneBatch(ns, target, server, ramMgr, weakenTime, formulasAvailable, batchIdx);
+      const cachedPlans = batchPlanCache.get(target) ?? [];
+      const batchIdx    = batchCounter.get(target) ?? 0;
+      const dispatched  = dispatchOneBatch(ns, target, ramMgr, weakenTime, formulasAvailable, batchIdx, minBatchRam, cachedPlans);
       if (dispatched) {
         batchCounter.set(target, (batchIdx + 1) % 10_000);
       }
