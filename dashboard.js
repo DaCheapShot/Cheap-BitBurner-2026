@@ -198,33 +198,6 @@ function printPurchased(ns, servers) {
   ns.print("");
 }
 
-function printOther(ns, servers) {
-  if (servers.length === 0) return;
-
-  const hostW = Math.max(16, ...servers.map(s => s.hostname.length)) + 1;
-  const sep   = `  ${"─".repeat(hostW)}┼──────┼────────┼────────`;
-
-  ns.print(`${C.yellow}▶ OTHER SERVERS (${servers.length}) ${"─".repeat(48)}${C.reset}`);
-  ns.print(
-    `${C.grey}  ${pad("HOST", hostW)}` +
-    `| ROOT ` +
-    `| HK REQ ` +
-    `| RAM MAX${C.reset}`
-  );
-  ns.print(sep);
-
-  for (const s of servers) {
-    const color = s.hasAdminRights ? "" : C.grey;
-    const root  = s.hasAdminRights ? "  ✓   " : "  ✗   ";
-    ns.print(
-      `${color}  ${pad(s.hostname, hostW)}` +
-      `|${root}` +
-      `| ${pad(s.requiredHackingSkill, 6)} ` +
-      `| ${s.maxRam} GB${C.reset}`
-    );
-  }
-}
-
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 /** @param {NS} ns */
@@ -237,7 +210,7 @@ export async function main(ns) {
 
     const allHostnames = scanNetwork(ns);
     const servers      = allHostnames.map(h => ns.getServer(h));
-    const { purchased, other } = classifyServers(servers);
+    const { purchased } = classifyServers(servers);
 
     let dashData = null;
     try {
@@ -249,7 +222,6 @@ export async function main(ns) {
     printHeader(ns, servers);
     printTargets(ns, stale ? null : dashData.targets);
     printPurchased(ns, purchased);
-    printOther(ns, other);
 
     await ns.sleep(REFRESH_MS);
   }
