@@ -35,6 +35,38 @@ function pad(str, width, right = false) {
   return right ? str.padStart(width) : str.padEnd(width);
 }
 
+// ─── Network ─────────────────────────────────────────────────────────────────
+
+function scanNetwork(ns) {
+  const visited = new Set(["home"]);
+  const queue   = ["home"];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    for (const neighbor of ns.scan(current)) {
+      if (!visited.has(neighbor)) {
+        visited.add(neighbor);
+        queue.push(neighbor);
+      }
+    }
+  }
+  visited.delete("home");
+  return [...visited];
+}
+
+function classifyServers(servers) {
+  const targets = [], purchased = [], other = [];
+  for (const s of servers) {
+    if (s.hostname.startsWith("cheap-"))  purchased.push(s);
+    else if (s.moneyMax > 0)              targets.push(s);
+    else                                  other.push(s);
+  }
+  const byName = (a, b) => a.hostname.localeCompare(b.hostname);
+  targets.sort(byName);
+  purchased.sort(byName);
+  other.sort(byName);
+  return { targets, purchased, other };
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 /** @param {NS} ns */
@@ -44,7 +76,13 @@ export async function main(ns) {
 
   while (true) {
     ns.clearLog();
-    ns.print("Dashboard initializing...");
+
+    const allHostnames = scanNetwork(ns);
+    const servers      = allHostnames.map(h => ns.getServer(h));
+    const { targets, purchased, other } = classifyServers(servers);
+
+    ns.print(`Targets: ${targets.length} | Purchased: ${purchased.length} | Other: ${other.length}`);
+
     await ns.sleep(REFRESH_MS);
   }
 }
