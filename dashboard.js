@@ -107,9 +107,10 @@ function rowColor(server, phase) {
 }
 
 function printTargets(ns, targets) {
-  if (targets.length === 0) return;
+  const usable = targets.filter(s => s.hasAdminRights);
+  if (usable.length === 0) return;
 
-  const hostW = Math.max(16, ...targets.map(s => s.hostname.length)) + 1;
+  const hostW = Math.max(16, ...usable.map(s => s.hostname.length)) + 1;
   const sep   = `  ${"─".repeat(hostW)}` +
     `┼${"─".repeat(13)}` +
     `┼${"─".repeat(10)}` +
@@ -119,7 +120,7 @@ function printTargets(ns, targets) {
     `┼${"─".repeat(6)}` +
     `┼${"─".repeat(6)}`;
 
-  ns.print(`${C.yellow}▶ HACKABLE TARGETS (${targets.length}) ${"─".repeat(48)}${C.reset}`);
+  ns.print(`${C.yellow}▶ HACKABLE TARGETS (${usable.length}) ${"─".repeat(48)}${C.reset}`);
   ns.print(
     `${C.grey}  ${pad("HOST", hostW)}` +
     `| ${pad("SEC / MIN", 13)}` +
@@ -132,24 +133,9 @@ function printTargets(ns, targets) {
   );
   ns.print(sep);
 
-  for (const s of targets) {
-    const phase = getPhase(s);
-    const color = rowColor(s, phase);
-
-    if (!s.hasAdminRights) {
-      ns.print(
-        `${color}  ${pad(s.hostname, hostW)}` +
-        `|  ${pad("✗", 13)}` +
-        `|  ${pad("—", 8)}` +
-        `| ${pad(fmtMoney(s.moneyMax), 9)} ` +
-        `|     — ` +
-        `|     — ` +
-        `|     — ` +
-        `|     —${C.reset}`
-      );
-      continue;
-    }
-
+  for (const s of usable) {
+    const phase    = getPhase(s);
+    const color    = rowColor(s, phase);
     const secStr   = `${s.hackDifficulty.toFixed(1)} / ${s.minDifficulty.toFixed(1)}`;
     const moneyPct = `${Math.min(100, Math.round(s.moneyAvailable / s.moneyMax * 100))}%`;
     const wkn      = fmtTime(ns.getWeakenTime(s.hostname));
@@ -173,7 +159,11 @@ function printTargets(ns, targets) {
 function printPurchased(ns, servers) {
   if (servers.length === 0) return;
 
-  const hostW = Math.max(16, ...servers.map(s => s.hostname.length)) + 1;
+  const mostRam  = servers.reduce((a, b) => a.maxRam >= b.maxRam ? a : b);
+  const leastRam = servers.reduce((a, b) => a.maxRam <= b.maxRam ? a : b);
+  const rows     = servers.length === 1 ? [mostRam] : [mostRam, leastRam];
+
+  const hostW = Math.max(16, ...rows.map(s => s.hostname.length)) + 1;
   const sep   = `  ${"─".repeat(hostW)}┼──────────┼──────────┼────────`;
 
   ns.print(`${C.yellow}▶ PURCHASED SERVERS (${servers.length}) ${"─".repeat(48)}${C.reset}`);
@@ -185,9 +175,9 @@ function printPurchased(ns, servers) {
   );
   ns.print(sep);
 
-  for (const s of servers) {
-    const freeRam  = s.maxRam - s.ramUsed;
-    const freePct  = s.maxRam > 0 ? Math.round(freeRam / s.maxRam * 100) : 0;
+  for (const s of rows) {
+    const freeRam = s.maxRam - s.ramUsed;
+    const freePct = s.maxRam > 0 ? Math.round(freeRam / s.maxRam * 100) : 0;
     ns.print(
       `  ${pad(s.hostname, hostW)}` +
       `| ${pad(s.ramUsed.toFixed(1) + " GB", 8)} ` +

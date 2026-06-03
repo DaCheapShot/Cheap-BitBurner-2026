@@ -10,7 +10,10 @@
       "Bash(awk 'NR>=30 && NR<=40' manager.js)",
       "Bash(awk 'NR>=305 && NR<=360' manager.js)",
       "Bash(grep -v \"^[[:space:]]*//.*\")",
-      "Bash(gh pr create --title 'feat: continuous batcher — 200ms tick replaces cycle-and-wait' --body ' *)"
+      "Bash(gh pr create --title 'feat: continuous batcher — 200ms tick replaces cycle-and-wait' --body ' *)",
+      "Bash(\"C:\\\\Users\\\\cheap\\\\.claude\\\\plugins\\\\cache\\\\claude-plugins-official\\\\superpowers\\\\5.1.0\\\\skills\\\\brainstorming\\\\scripts\\\\start-server.sh\" --project-dir \"e:/Games/BitBurner\")",
+      "PowerShell(\\(Get-Command node -ErrorAction SilentlyContinue\\).Source)",
+      "PowerShell(Get-ChildItem \"C:\\\\Program Files\\\\nodejs\\\\node.exe\" -ErrorAction SilentlyContinue; Get-ChildItem \"$env:APPDATA\\\\nvm\" -ErrorAction SilentlyContinue | Select-Object -First 5; Get-ChildItem \"$env:LOCALAPPDATA\\\\Programs\\\\nodejs\\\\node.exe\" -ErrorAction SilentlyContinue)"
     ]
   }
 }
