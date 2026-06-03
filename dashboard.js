@@ -67,6 +67,29 @@ function classifyServers(servers) {
   return { targets, purchased, other };
 }
 
+// ─── Display ─────────────────────────────────────────────────────────────────
+
+function printHeader(ns, servers) {
+  const home = ns.getServer("home");
+  let totalRam = home.maxRam;
+  let freeRam  = home.maxRam - home.ramUsed;
+  let rooted   = 1; // home is always rooted
+
+  for (const s of servers) {
+    if (s.hasAdminRights) {
+      rooted++;
+      totalRam += s.maxRam;
+      freeRam  += s.maxRam - s.ramUsed;
+    }
+  }
+
+  const total = servers.length + 1; // +1 for home
+  const ts    = new Date().toLocaleTimeString();
+  ns.print(`${C.cyan}NETWORK DASHBOARD                        [${ts} | ${REFRESH_MS / 1000}s]${C.reset}`);
+  ns.print(`${C.cyan}Hosts: ${total} | Rooted: ${rooted} | Free RAM: ${freeRam.toFixed(0)} / ${totalRam.toFixed(0)} GB${C.reset}`);
+  ns.print("");
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 /** @param {NS} ns */
@@ -81,6 +104,7 @@ export async function main(ns) {
     const servers      = allHostnames.map(h => ns.getServer(h));
     const { targets, purchased, other } = classifyServers(servers);
 
+    printHeader(ns, servers);
     ns.print(`Targets: ${targets.length} | Purchased: ${purchased.length} | Other: ${other.length}`);
 
     await ns.sleep(REFRESH_MS);
