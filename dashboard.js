@@ -170,6 +170,61 @@ function printTargets(ns, targets) {
   ns.print("");
 }
 
+function printPurchased(ns, servers) {
+  if (servers.length === 0) return;
+
+  const hostW = Math.max(16, ...servers.map(s => s.hostname.length)) + 1;
+  const sep   = `  ${"─".repeat(hostW)}┼──────────┼──────────┼────────`;
+
+  ns.print(`${C.yellow}▶ PURCHASED SERVERS (${servers.length}) ${"─".repeat(48)}${C.reset}`);
+  ns.print(
+    `${C.grey}  ${pad("HOST", hostW)}` +
+    `| ${pad("RAM USED", 8)} ` +
+    `| ${pad("RAM MAX", 8)} ` +
+    `| FREE %${C.reset}`
+  );
+  ns.print(sep);
+
+  for (const s of servers) {
+    const freeRam  = s.maxRam - s.ramUsed;
+    const freePct  = s.maxRam > 0 ? Math.round(freeRam / s.maxRam * 100) : 0;
+    ns.print(
+      `  ${pad(s.hostname, hostW)}` +
+      `| ${pad(s.ramUsed.toFixed(1) + " GB", 8)} ` +
+      `| ${pad(s.maxRam.toFixed(1) + " GB", 8)} ` +
+      `| ${freePct}%`
+    );
+  }
+  ns.print("");
+}
+
+function printOther(ns, servers) {
+  if (servers.length === 0) return;
+
+  const hostW = Math.max(16, ...servers.map(s => s.hostname.length)) + 1;
+  const sep   = `  ${"─".repeat(hostW)}┼──────┼────────┼────────`;
+
+  ns.print(`${C.yellow}▶ OTHER SERVERS (${servers.length}) ${"─".repeat(48)}${C.reset}`);
+  ns.print(
+    `${C.grey}  ${pad("HOST", hostW)}` +
+    `| ROOT ` +
+    `| HK REQ ` +
+    `| RAM MAX${C.reset}`
+  );
+  ns.print(sep);
+
+  for (const s of servers) {
+    const color = s.hasAdminRights ? "" : C.grey;
+    const root  = s.hasAdminRights ? "  ✓   " : "  ✗   ";
+    ns.print(
+      `${color}  ${pad(s.hostname, hostW)}` +
+      `|${root}` +
+      `| ${pad(s.requiredHackingSkill, 6)} ` +
+      `| ${s.maxRam} GB${C.reset}`
+    );
+  }
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 /** @param {NS} ns */
@@ -186,7 +241,8 @@ export async function main(ns) {
 
     printHeader(ns, servers);
     printTargets(ns, targets);
-    ns.print(`[purchased: ${purchased.length} | other: ${other.length} — coming soon]`);
+    printPurchased(ns, purchased);
+    printOther(ns, other);
 
     await ns.sleep(REFRESH_MS);
   }
