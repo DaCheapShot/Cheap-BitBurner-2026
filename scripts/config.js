@@ -165,6 +165,19 @@ export const DESYNC_STRIKES = 2;
  */
 export const VOLLEY_OK_FRACTION = 0.9;
 
+/**
+ * How much richer a new target must be before the manager switches to it.
+ *
+ * Switching is not free: the new server has to be prepped from scratch, which
+ * costs whole weaken windows during which nothing is earned, and the old
+ * server's prepped state is abandoned. A margin stops the manager chasing a
+ * marginally better host every time hacking level ticks up - and stops it
+ * oscillating between two servers of near-equal worth.
+ *
+ * Only consulted when no --target is pinned.
+ */
+export const TARGET_SWITCH_MARGIN = 1.25;
+
 // --------------------------------------------------------------- workers ----
 
 /**

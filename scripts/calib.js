@@ -92,6 +92,21 @@ export function growThreadsFor(calib, host, mult, sec) {
 }
 
 /**
+ * The cached per-thread growth multiplier for a host, or null if unusable.
+ *
+ * Same drift guard as growThreadsFor: the base was measured at minimum security
+ * and overstates growth anywhere else. Callers that get null must derive the
+ * base live (ns.growthAnalyze) or refuse to plan - never fall back to a stale
+ * number, which silently under-refills every batch.
+ */
+export function growBaseFor(calib, host, sec) {
+  const entry = calib?.hosts?.[host];
+  if (!entry || !(entry.growBase > 1)) return null;
+  if (!Number.isFinite(sec) || sec > entry.minSec + SEC_TOLERANCE) return null;
+  return entry.growBase;
+}
+
+/**
  * True if a cached growth base exists AND the host is still at the security it
  * was measured at. Both halves matter - see growThreadsFor.
  */

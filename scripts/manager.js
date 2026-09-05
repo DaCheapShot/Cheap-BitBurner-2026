@@ -12,12 +12,13 @@ import {
   VOLLEY_GRACE_MS,
   DESYNC_STRIKES,
   VOLLEY_OK_FRACTION,
+  TARGET_SWITCH_MARGIN,
   WORKER_FILES,
   WORKER_RAM_FALLBACK,
   BATCH_OPS,
   OP_WORKER,
 } from "./config.js";
-import { loadCalibration, growThreadsFor } from "./calib.js";
+import { loadCalibration, growBaseFor } from "./calib.js";
 import { analyzeBatch, batchOk } from "./verify.js";
 import { prep, measure, isPrepped, pickTarget, buildWorkerPool } from "./prepper.js";
 
@@ -84,9 +85,36 @@ function workerRam(ns) {
  * hackAnalyze stays live deliberately - it moves with hacking level, and
  * reacting to that is the whole reason for recomputing each cycle.
  */
-function planThreads(host, calib, steal, sec, perThread, maxMoney) {
+function planThreads(calib, steal, perThread, maxMoney, growBase) {
   const hack = Math.max(1, Math.ceil(steal / perThread));
-  return planThreadsForHack(host, calib, hack, sec, perThread, maxMoney);
+  return planThreadsForHack(calib, hack, perThread, maxMoney, growBase);
+}
+
+/**
+ * The per-thread growth multiplier to plan against, from the cache when it is
+ * valid and from the live API when it isn't.
+ *
+ * The live path is what lets the manager follow a newly rooted target. A server
+ * calibrate.js has never seen at minimum security has no cached base, and
+ * refusing to plan there would pin the manager to whatever it picked at launch
+ * - which is exactly the bug this exists to fix. ns.growthAnalyze is already
+ * charged to this script through prepper.js, so the fallback costs nothing.
+ *
+ * Called ONCE per cycle: growthAnalyze(host, 2) gives threads-to-double, and
+ * base = 2^(1/threads) turns that into the same constant the cache stores.
+ * Keeping it out of the steal search matters - that search runs hundreds of
+ * candidates and must stay free of ns calls.
+ *
+ * Only valid at minimum security, which the prep gate guarantees before this
+ * runs: growthAnalyze reads security at call time.
+ */
+function growthBasis(ns, calib, host, sec) {
+  const cached = growBaseFor(calib, host, sec);
+  if (cached) return { base: cached, source: "cached" };
+
+  const toDouble = ns.growthAnalyze(host, 2);
+  if (!(toDouble > 0)) return null;
+  return { base: Math.pow(2, 1 / toDouble), source: "live" };
 }
 
 /**
@@ -99,7 +127,7 @@ function planThreads(host, calib, steal, sec, perThread, maxMoney) {
  * No ns calls: perThread and maxMoney are passed in, so the search can try
  * hundreds of candidates without touching the API.
  */
-function planThreadsForHack(host, calib, hack, sec, perThread, maxMoney) {
+function planThreadsForHack(calib, hack, perThread, maxMoney, growBase) {
   const steal = hack * perThread;
   if (!(steal < 1)) return { error: `hack ${hack}t would take ${steal} of the server` };
 
@@ -107,15 +135,8 @@ function planThreadsForHack(host, calib, hack, sec, perThread, maxMoney) {
   const weaken1 = Math.max(1, Math.ceil(secFromHack / calib.weakenPerThread));
 
   const growMult = 1 / (1 - steal);
-  const growRaw = growThreadsFor(calib, host, growMult, sec);
-  if (growRaw === null) {
-    return {
-      error:
-        `no usable growth base for ${host} at security ${sec.toFixed(2)}. ` +
-        `Prep it to minimum security, then re-run scripts/calibrate.js.`,
-    };
-  }
-  const grow = Math.max(1, Math.ceil(growRaw * GROW_MARGIN));
+  // Invert the per-thread growth multiplier: t = log(mult) / log(base).
+  const grow = Math.max(1, Math.ceil((Math.log(growMult) / Math.log(growBase)) * GROW_MARGIN));
 
   const secFromGrow = calib.growSecPerThread * grow;
   const weaken2 = Math.max(1, Math.ceil(secFromGrow / calib.weakenPerThread));
@@ -159,14 +180,14 @@ function batchRamOf(th, ram) {
 const SCREEN_KEEP = 8;
 const TIE_BAND = 0.02;
 
-function chooseSteal(pool, ram, calib, host, sec, perThread, maxMoney, cap) {
+function chooseSteal(pool, ram, calib, perThread, maxMoney, growBase, cap) {
   const free = pool.freeRam;
   const screened = [];
 
   for (let hack = 1; ; hack++) {
     const steal = hack * perThread;
     if (steal >= 0.99) break;
-    const th = planThreadsForHack(host, calib, hack, sec, perThread, maxMoney);
+    const th = planThreadsForHack(calib, hack, perThread, maxMoney, growBase);
     if (th.error) break;
 
     const br = batchRamOf(th, ram);
@@ -477,7 +498,11 @@ export async function main(ns) {
     manualSteal = STEAL_FRACTION;
   }
 
-  const target = tIdx >= 0 ? args[tIdx + 1] : pickTarget(ns);
+  // Pinned targets never move. An auto-picked one is re-evaluated every cycle:
+  // rooting new servers and levelling up both change what is reachable, and a
+  // target chosen at launch goes stale within minutes.
+  const pinnedTarget = tIdx >= 0 ? args[tIdx + 1] : null;
+  let target = pinnedTarget ?? pickTarget(ns);
   if (!target) {
     ns.tprint("ERROR: no rooted, money-bearing target found. Pass --target <host>.");
     return;
@@ -535,6 +560,30 @@ export async function main(ns) {
   while (true) {
     cycle++;
 
+    // -- retarget -----------------------------------------------------------
+    // Before anything else, because prepping is the expensive part and there is
+    // no sense prepping a server we are about to abandon. Safe here and nowhere
+    // else in the cycle: the previous volley has fully resolved and its RAM is
+    // released, so nothing is in flight against the old target.
+    if (!pinnedTarget) {
+      const best = pickTarget(ns);
+      if (best && best !== target) {
+        const bestMoney = ns.getServerMaxMoney(best);
+        const currentMoney = ns.getServerMaxMoney(target);
+        if (bestMoney > currentMoney * TARGET_SWITCH_MARGIN) {
+          ns.print(
+            `retargeting ${target} (${fmtMoney(currentMoney)}) -> ${best} ` +
+              `(${fmtMoney(bestMoney)}), ${(bestMoney / currentMoney).toFixed(1)}x richer`,
+          );
+          target = best;
+          // The new server is unprepped and its timings differ; carrying either
+          // over would judge it by the old target's behaviour.
+          strikes = 0;
+          capScale = 1;
+        }
+      }
+    }
+
     // -- prep gate ----------------------------------------------------------
     // Never volley an unprepped target: every thread count above assumes max
     // money and minimum security, and firing at a drifted server compounds the
@@ -589,13 +638,21 @@ export async function main(ns) {
       return;
     }
 
+    // One call per cycle, taken now that prep has put the target at minimum
+    // security - growthAnalyze reads security at call time.
+    const basis = growthBasis(ns, calib, target, m.sec);
+    if (!basis) {
+      ns.tprint(`ERROR: growthAnalyze("${target}", 2) returned no usable growth rate.`);
+      return;
+    }
+
     let th;
     let note = "";
     if (manualSteal !== null) {
-      th = planThreads(target, calib, manualSteal, m.sec, perThread, maxMoney);
+      th = planThreads(calib, manualSteal, perThread, maxMoney, basis.base);
       note = `steal ${(manualSteal * 100).toFixed(2)}% (fixed)`;
     } else {
-      const pick = chooseSteal(pool, ram, calib, target, m.sec, perThread, maxMoney, cap);
+      const pick = chooseSteal(pool, ram, calib, perThread, maxMoney, basis.base, cap);
       if (!pick) {
         ns.tprint(
           `ERROR: no steal fraction fits - not even one hack thread's batch ` +
