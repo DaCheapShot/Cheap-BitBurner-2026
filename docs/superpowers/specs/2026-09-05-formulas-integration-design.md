@@ -77,7 +77,13 @@ securityPerGrowThread(snap)
 securityPerWeakenThread(snap)
 growThreadsToRestore(snap, fromMoney, toMoney, atSecurity)
 opTimes(snap)                   -> { hack, grow, weaken }
+maxMoneyOf(ns, host)            -> cheap single-field read for scanning candidates
 ```
+
+`maxMoneyOf` was added while writing the implementation plan, after checking the
+RAM arithmetic: `pickTarget` and the retarget check called `getServerMaxMoney`
+directly, which is the formulas build's only remaining use for it and would have
+cost that build 0.10 GB for nothing (6.20 rather than 6.10).
 
 Two decisions carry the design:
 
