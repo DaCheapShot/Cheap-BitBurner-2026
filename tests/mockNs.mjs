@@ -1,11 +1,16 @@
 /**
  * A mock ns that reproduces the game's real semantics where they matter.
  *
- * The three that have caused false confidence before, all reproduced here:
+ * Reproduced here, because both have previously made a passing simulation
+ * disagree with the live game:
  *   - ports hold 50 entries and discard the OLDEST on overflow
- *   - file paths are stored WITHOUT a leading slash, so ns.run("/scripts/x.js")
- *     works but ns.ps() reports "scripts/x.js"
- *   - port crackers THROW when the program is not owned
+ *   - script paths are stored WITHOUT a leading slash, so ns.run("/scripts/x.js")
+ *     works while ns.ps() reports "scripts/x.js"
+ *
+ * Deliberately NOT reproduced: port crackers throwing when the program is not
+ * owned. Nothing in this plan tests root.js, and an unused mock of a throwing
+ * API is a liability - it would drift from the real behaviour unnoticed. Add it
+ * with the test that needs it.
  */
 export const PORT_CAPACITY = 50;
 
@@ -16,6 +21,8 @@ export function makeNs(o = {}) {
   const files = o.files ?? {};
   let queue = [];
   let dropped = 0;
+  let processes = [];
+  let nextPid = 1;
 
   const port = {
     empty: () => queue.length === 0,
@@ -41,6 +48,7 @@ export function makeNs(o = {}) {
 
     read: (f) => files[f] ?? "",
     write: (f, data, mode) => { files[f] = mode === "a" ? (files[f] ?? "") + data : data; },
+    // Files may be keyed either bare or host-prefixed; fileExists checks both since that's what callers use
     fileExists: (f, host = "home") => Boolean(files[`${host}:${f}`] ?? files[f]),
     getPortHandle: () => port,
 
@@ -65,10 +73,24 @@ export function makeNs(o = {}) {
     growthAnalyze: (h, mult) => Math.log(mult) / Math.log(srv(h).growBase ?? 1.0018),
     weakenAnalyze: (t) => 0.05 * t,
 
-    exec: () => 1,
-    run: () => 1,
-    ps: () => [],
-    kill: () => true,
+    exec: (file, host, threads, ...args) => {
+      const filename = file.replace(/^\/+/, "");
+      const pid = nextPid++;
+      processes.push({ filename, pid, args, threads });
+      return pid;
+    },
+    run: (file, threads, ...args) => {
+      const filename = file.replace(/^\/+/, "");
+      const pid = nextPid++;
+      processes.push({ filename, pid, args, threads });
+      return pid;
+    },
+    ps: (host) => processes.filter(p => true).map(p => ({ ...p })),
+    kill: (pid) => {
+      const idx = processes.findIndex(p => p.pid === pid);
+      if (idx !== -1) processes.splice(idx, 1);
+      return true;
+    },
     scp: () => true,
 
     ...o.extra,
