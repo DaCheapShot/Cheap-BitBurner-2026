@@ -1,5 +1,5 @@
 import { loadCalibration, calibAgeMs } from "./calib.js";
-import { ROOT_MARKER } from "./config.js";
+import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS } from "./config.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -8,7 +8,8 @@ import { ROOT_MARKER } from "./config.js";
  *   1. root.js      - open ports and NUKE anything new
  *   2. deploy.js    - push workers, but only if root.js actually rooted something
  *   3. calibrate.js - only when the cache is missing or stale
- *   4. cloud.js     - kept alive as a service (buys and upgrades servers)
+ *   4. cloud.js     - kept alive as a service (buys and upgrades servers), but
+ *                     only until the fleet is maxed; see CLOUD_DONE_MARKER
  *   5. manager.js   - kept alive as a service (the volley loop)
  *
  * TRANSIENTS RUN ONE AT A TIME, and the tick waits for each to exit before
@@ -152,6 +153,9 @@ export async function main(ns) {
 
   let lastRootStamp = ns.read(ROOT_MARKER);
   let firstPass = true;
+  // Say "fleet is maxed" once, not every tick - the whole point of this change
+  // is to stop boot from producing a line a minute about nothing happening.
+  let cloudMaxedLogged = false;
 
   do {
     // -- 0. did the manager die? -------------------------------------------
@@ -194,7 +198,22 @@ export async function main(ns) {
     // extras running, they are cleaned up before anything else is decided.
     if (!noCloud) {
       killDuplicates(ns, CLOUD, log);
-      ensureService(ns, CLOUD, ["--loop"], log);
+      // cloud.js EXITS once the fleet is fully maxed - it is a service with a
+      // finish line, unlike the manager. Without this check, ensureService sees
+      // it missing every tick and relaunches it forever just to watch it exit.
+      // The marker is re-checked periodically in case the limits move.
+      const maxedAt = Number(ns.read(CLOUD_DONE_MARKER).split("\n")[0]);
+      const maxedFor = Number.isFinite(maxedAt) && maxedAt > 0 ? Date.now() - maxedAt : Infinity;
+      // A fresh boot re-evaluates everything, so ignore the marker on pass one.
+      if (!firstPass && maxedFor < CLOUD_RECHECK_MS) {
+        if (!cloudMaxedLogged) {
+          log(`cloud fleet is maxed - not relaunching (re-checking in ${fmtAge(CLOUD_RECHECK_MS - maxedFor)})`);
+          cloudMaxedLogged = true;
+        }
+      } else {
+        cloudMaxedLogged = false;
+        ensureService(ns, CLOUD, ["--loop"], log);
+      }
     }
     if (!noManager) {
       killDuplicates(ns, MANAGER, log);

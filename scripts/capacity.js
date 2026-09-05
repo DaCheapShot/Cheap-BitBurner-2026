@@ -42,8 +42,9 @@ import {
  *   weakenAnalyze                    1.00
  *   ------------------------------------
  *   ~7.75 GB
- * The five analyze functions are 1 GB EACH and dominate. The cloud probe lives
- * in scripts/cloudprobe.js so its extra 1.05 GB isn't charged here.
+ * The five analyze functions are 1 GB EACH and dominate. Nothing here touches
+ * the ns.cloud namespace, which would add 1.05 GB for information this report
+ * does not need.
  */
 
 // ---------------------------------------------------------------- config ----

@@ -1,4 +1,4 @@
-import { ROOT_MARKER } from "./config.js";
+import { ROOT_MARKER, CLOUD_DONE_MARKER } from "./config.js";
 
 /**
  * Cloud server purchaser / upgrader.
@@ -242,8 +242,15 @@ export async function main(ns) {
     budgetFraction = v;
   }
 
+  // Any run of this script re-evaluates from scratch, so a marker left by an
+  // earlier run is worthless from here on. Clear it first and re-stamp only if
+  // we actually reach the terminal state - never leave a stale "maxed" claim
+  // behind after buying or upgrading something.
+  if (!dryRun) ns.write(CLOUD_DONE_MARKER, "", "w");
+
   if (!loop) {
     const r = step(ns, budgetFraction, dryRun);
+    if (r.done && !dryRun) ns.write(CLOUD_DONE_MARKER, `${Date.now()}\n${r.msg}`, "w");
     ns.tprint(`cloud: ${r.msg}`);
     return;
   }
@@ -266,6 +273,9 @@ export async function main(ns) {
     }
 
     if (r.done) {
+      // Nothing left to buy or upgrade. Stamp it so boot.js stops relaunching
+      // this every tick just to watch it exit again.
+      if (!dryRun) ns.write(CLOUD_DONE_MARKER, `${Date.now()}\n${r.msg}`, "w");
       ns.tprint(`cloud: ${r.msg}`);
       return;
     }

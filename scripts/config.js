@@ -211,6 +211,26 @@ export const WORKER_LIST = Object.values(WORKER_FILES);
  */
 export const ROOT_MARKER = "/data/rooted.txt";
 
+/**
+ * Stamped by cloud.js when the fleet is fully maxed - every slot filled and
+ * every server at getRamLimit(). Read by boot.js, which then stops relaunching
+ * a service that has nothing left to do.
+ *
+ * cloud.js clears this at startup and writes it only on the terminal state, so
+ * a run that merely could not AFFORD anything never stamps it.
+ */
+export const CLOUD_DONE_MARKER = "/data/cloud-maxed.txt";
+
+/**
+ * How long boot.js trusts CLOUD_DONE_MARKER before re-running cloud.js anyway.
+ *
+ * "Maxed" is terminal for a given BitNode, but the limits themselves can change
+ * underneath us - a new BitNode, or a server deleted by hand - and boot cannot
+ * check that itself without importing the cloud API and paying for it. A slow
+ * re-check costs one short-lived script per interval and self-heals.
+ */
+export const CLOUD_RECHECK_MS = 30 * 60 * 1000;
+
 // ---------------------------------------------------------------- report ----
 
 /**

@@ -39,8 +39,9 @@ import { prep, measure, isPrepped, pickTarget, buildWorkerPool } from "./prepper
  *
  * THIS PROCESS OWNS THE POOL AND THE PORT. Both are single-owner by nature -
  * port.read() removes the message, and Server.pending is per-process memory, so
- * a second allocator believes the same RAM is free. Do not run prep.js,
- * batch.js or listen.js beside it. Prep runs in-process via prepper.js.
+ * a second allocator believes the same RAM is free. Do not run prep.js beside
+ * it, nor anything else that reads REPORT_PORT. Prep runs in-process via
+ * prepper.js.
  *
  * The steal fraction is chosen per cycle by default - see chooseSteal for why a
  * fixed one leaves money on the table.
@@ -77,8 +78,8 @@ function workerRam(ns) {
 }
 
 /**
- * Thread counts for one batch. Identical math to scripts/batch.js: cached
- * constants for everything linear, one live hackAnalyze for the part that isn't.
+ * Thread counts for one batch: cached constants for everything linear, one live
+ * hackAnalyze for the part that isn't.
  *
  * hackAnalyze stays live deliberately - it moves with hacking level, and
  * reacting to that is the whole reason for recomputing each cycle.

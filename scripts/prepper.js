@@ -434,10 +434,11 @@ export async function prep(ns, host, opts = {}) {
     );
     if (res.reports < res.launched) {
       // Harmless on its own - prep trusts the measurement above, not the port.
-      // Near-always caused by another script (listen.js) draining the same port.
+      // Near-always a second process reading the same port and consuming the
+      // reports before we see them.
       log(
         `         WARN: ${res.launched - res.reports} report(s) never arrived - ` +
-          `is scripts/listen.js running? It drains the same port. ` +
+          `is something else reading port ${port}? ` +
           `(prep uses the measurement, not the reports, so this is cosmetic)`,
       );
     }

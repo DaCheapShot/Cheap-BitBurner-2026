@@ -50,15 +50,15 @@ run scripts/deploy.js                   # scp workers home -> every rooted host
 run scripts/calibrate.js                # write /data/calib.json (needs target at min security)
 run scripts/capacity.js --steal 0.05    # RAM/target/batch-size analysis, launches nothing
 run scripts/manager.js --dry-run        # plan a volley and print it
-run scripts/batch.js --target <host>    # fire ONE batch and verify its landing order
-run scripts/listen.js                   # dump the report port
+run scripts/prep.js --target <host>     # prep one target without the manager
 ```
 
 **Only one process may own the RAM pool and the report port.** `port.read()` removes the
 message and `Server.pending` is per-process memory, so a second owner steals reports and
-over-commits the same RAM. Do not run `prep.js`, `batch.js` or `listen.js` alongside
-`manager.js` — prep runs *inside* the manager via `prepper.js`. `boot.js` enforces this by
-killing duplicate services (lowest PID wins).
+over-commits the same RAM. Do not run `prep.js` alongside `manager.js` — prep runs *inside*
+the manager via `prepper.js`. `boot.js` enforces this by killing duplicate services (lowest
+PID wins). `capacity.js` is safe to run beside the manager: it allocates and releases only
+within its own process and never touches the port.
 
 ## Getting code into the game
 
@@ -123,7 +123,7 @@ Layers, bottom up:
 |---|---|---|
 | `config.js` | every tunable, shared so nothing drifts | 0 |
 | `calib.js` | reads `/data/calib.json` | 0 |
-| `verify.js` | landing analysis, shared by `manager` and `batch` | 0 |
+| `verify.js` | landing analysis — the definition of "landed correctly" | 0 |
 | `ram.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
 | `prepper.js` | prep as a module (manager runs it in-process) | 3.50 |
 | `manager.js` | the volley loop | 6.15 |
@@ -131,8 +131,10 @@ Layers, bottom up:
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
 
-`capacity.js` (~7.75), `batch.js` (4.90) and `listen.js` (1.60) are diagnostics built during
-development; they show things the manager can't and are kept deliberately.
+`capacity.js` (~7.75) is the surviving diagnostic. It ranks targets by real throughput, which
+the manager does not do — `pickTarget` chooses the richest *hackable* server, not the most
+profitable one. `prep.js` (5.10) and `calibrate.js` are manual entry points to logic the
+supervisor otherwise drives. `scan.js` predates the batcher.
 
 ### The volley loop
 
