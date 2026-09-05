@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Netscript 2 (ES modules) scripts for **Bitburner**, running against a personal fork:
 `DaCheapShot/bitburner-src`. Everything in `scripts/` executes inside the game, not on Node.
 
-There is no build, no linter, no test framework, and no `package.json`. Do not add one
-expecting it to run the scripts.
+There is no build, no linter, and no `package.json`. Do not add one expecting it to run the
+scripts. A test suite exists — run it with `node tests/run.mjs`.
 
 ## Verify the NS API before using it — always
 
@@ -88,7 +88,6 @@ game's real semantics or they give false confidence:
 - ports hold 50 entries and **discard the oldest** on overflow
 - file paths are stored **without a leading slash**, so `ns.run("/scripts/x.js")` works but
   `ns.ps()` reports `scripts/x.js`
-- port crackers **throw** when you don't own the program; they don't return `false`
 
 Several fixes in this repo's history exist because a live run disagreed with a passing
 simulation. Tests check syntax, isolation (the two math backends never reach each other),
@@ -134,20 +133,22 @@ Layers, bottom up:
 | `calib.js` | reads `/data/calib.json` | 0 |
 | `verify.js` | landing analysis — the definition of "landed correctly" | 0 |
 | `ram.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
-| `prepper.js` | prep as a module (manager runs it in-process) | 3.50 |
+| `prepper.js` | prep as a module (manager runs it in-process) | 2.00 |
 | `mathAnalyze.js` | math interface via *Analyze + calibration cache | 2.55 |
 | `mathFormulas.js` | math interface via `ns.formulas` | 2.50 |
 | `managerCore.js` | the volley loop, math-free | 2.00 |
 | `manager.js` | entry: core + mathAnalyze (always works) | 6.15 |
 | `manager-formulas.js` | entry: core + mathFormulas | 6.10 |
-| `boot.js` | supervisor | 3.30 |
+| `prep.js` | entry: prepper + mathAnalyze | 6.15 |
+| `prep-formulas.js` | entry: prepper + mathFormulas | 6.10 |
+| `boot.js` | supervisor | 3.40 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
 
 `capacity.js` (~7.75) is the surviving diagnostic. It ranks targets by real throughput, which
 the manager does not do — `pickTarget` chooses the richest *hackable* server, not the most
-profitable one. `prep.js` (5.10) and `calibrate.js` are manual entry points to logic the
-supervisor otherwise drives. `scan.js` predates the batcher.
+profitable one. `prep.js` / `prep-formulas.js` and `calibrate.js` are manual entry points to
+logic the supervisor otherwise drives. `scan.js` predates the batcher.
 
 ### The volley loop
 
