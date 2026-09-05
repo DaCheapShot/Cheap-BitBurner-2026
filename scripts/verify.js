@@ -2,7 +2,7 @@
  * Landing analysis for a set of worker reports. Pure functions, no ns calls -
  * 0 GB to import.
  *
- * Kept separate from scripts/manager.js because it is the definition of "landed
+ * Kept separate from scripts/managerCore.js because it is the definition of "landed
  * correctly" - the rules below are subtle enough to be worth stating in one
  * place, and any second consumer must judge a batch identically.
  */

@@ -248,10 +248,12 @@ export const CLOUD_RECHECK_MS = 30 * 60 * 1000;
 export const FORMULAS_PROGRAM = "Formulas.exe";
 
 /**
- * Written by boot.js so other scripts can learn whether Formulas is owned
- * without paying 0.10 GB for fileExists. Advisory only - boot re-checks every
- * tick, so a stale value corrects itself within one tick and nothing that
- * matters is decided from it.
+ * Written by boot.js so other scripts can learn which build boot is currently
+ * running without paying 0.10 GB for fileExists. This is the EFFECTIVE build
+ * choice, not raw ownership: with --no-formulas it records 0 even though the
+ * program is owned. Advisory only - boot re-checks every tick, so a stale
+ * value corrects itself within one tick and nothing that matters is decided
+ * from it.
  */
 export const FORMULAS_MARKER = "/data/formulas.txt";
 

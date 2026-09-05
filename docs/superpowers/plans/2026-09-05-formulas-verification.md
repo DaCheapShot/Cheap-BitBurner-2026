@@ -52,7 +52,7 @@ and that `ps` lists exactly one manager.
 | Weaken-2 threads | | |
 | Batch RAM (GB) | | |
 | Batch count | | |
-| Yield per volley ($/ms) | | |
+| Yield per volley ($) | | |
 
 ## What to expect
 

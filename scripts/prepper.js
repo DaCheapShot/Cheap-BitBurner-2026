@@ -446,3 +446,61 @@ export async function prep(ns, host, opts = {}) {
 
   return { ok: false, cycles: maxCycles, reason: "hit max cycles", m: math.snapshot(ns, host) };
 }
+
+/**
+ * CLI body shared by scripts/prep.js and scripts/prep-formulas.js.
+ *
+ * The two entry scripts are identical apart from which math module they inject
+ * - the same shape managerCore.run() already shares between manager.js and
+ * manager-formulas.js. Pulling the body out here stops the two prep CLIs
+ * drifting apart the way they had.
+ *
+ * @param {NS} ns
+ * @param {object} math injected math implementation
+ */
+export async function prepCli(ns, math) {
+  ns.disableLog("ALL");
+  ns.ui.openTail();
+
+  const args = ns.args.map(String);
+  const tIdx = args.indexOf("--target");
+  const cIdx = args.indexOf("--max-cycles");
+  const maxCycles = cIdx >= 0 ? Number(args[cIdx + 1]) : DEFAULT_MAX_CYCLES;
+
+  const ready = math.prepare(ns);
+  if (!ready.ok) {
+    ns.tprint(`ERROR: ${ready.error}`);
+    return;
+  }
+
+  const host = tIdx >= 0 ? args[tIdx + 1] : pickTarget(ns, math);
+  if (!host) {
+    ns.tprint("ERROR: no rooted, money-bearing target found. Pass --target <host>.");
+    return;
+  }
+
+  // Drop anything stale so old batch ids can't be counted as this run's reports.
+  // Safe here because this process owns the port; the manager clears its own.
+  ns.getPortHandle(REPORT_PORT).clear();
+
+  const start = measure(ns, host, math);
+  ns.print(
+    `prep ${host}: money ${fmtMoney(start.money)}/${fmtMoney(start.maxMoney)}  ` +
+      `sec ${start.sec.toFixed(2)}/${start.minSec.toFixed(2)}`,
+  );
+
+  const res = await prep(ns, host, { math, maxCycles });
+
+  if (res.ok) {
+    ns.tprint(
+      `SUCCESS: ${host} prepped in ${res.cycles} cycle(s) - ` +
+        `${fmtMoney(res.m.money)} at security ${res.m.sec.toFixed(2)}`,
+    );
+  } else {
+    ns.tprint(
+      `WARN: ${host} not prepped after ${res.cycles} cycle(s) - ${res.reason}. ` +
+        `${fmtMoney(res.m.money)}/${fmtMoney(res.m.maxMoney)}, ` +
+        `sec ${res.m.sec.toFixed(2)}/${res.m.minSec.toFixed(2)}`,
+    );
+  }
+}

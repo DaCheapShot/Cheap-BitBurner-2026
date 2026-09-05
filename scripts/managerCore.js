@@ -14,12 +14,11 @@ import {
   VOLLEY_OK_FRACTION,
   TARGET_SWITCH_MARGIN,
   WORKER_FILES,
-  WORKER_RAM_FALLBACK,
   BATCH_OPS,
   OP_WORKER,
 } from "./config.js";
 import { analyzeBatch, batchOk } from "./verify.js";
-import { prep, isPrepped, pickTarget, buildWorkerPool } from "./prepper.js";
+import { prep, isPrepped, pickTarget, buildWorkerPool, workerRam } from "./prepper.js";
 
 /**
  * The shotgun volley loop (math-agnostic core).
@@ -74,15 +73,6 @@ function fmtMoney(m) {
   return `$${(m ?? 0).toFixed(0)}`;
 }
 
-function workerRam(ns) {
-  const out = {};
-  for (const [kind, file] of Object.entries(WORKER_FILES)) {
-    const real = ns.getScriptRam(file, "home");
-    out[kind] = real > 0 ? real : WORKER_RAM_FALLBACK[kind];
-  }
-  return out;
-}
-
 /**
  * Thread counts for one batch: cached constants for everything linear, one live
  * hackAnalyze (via math.hackFractionPerThread) for the part that isn't.
@@ -97,7 +87,7 @@ function workerRam(ns) {
  * planThreadsForHack's security math. Fixed here so the manual-steal path
  * (--steal / --fixed) doesn't silently NaN its thread counts.
  */
-function planThreads(math, snap, steal, consts) {
+export function planThreads(math, snap, steal, consts) {
   const perThread = math.hackFractionPerThread(snap);
   const hack = Math.max(1, Math.ceil(steal / perThread));
   return planThreadsForHack(math, snap, hack, perThread, consts);
@@ -113,7 +103,7 @@ function planThreads(math, snap, steal, consts) {
  * passed in, so this stays free of ns calls: the steal search runs hundreds of
  * candidates and must not touch the API.
  */
-function planThreadsForHack(math, snap, hack, perThread, consts) {
+export function planThreadsForHack(math, snap, hack, perThread, consts) {
   const steal = hack * perThread;
   if (!(steal < 1)) return { error: `hack ${hack}t would take ${steal} of the server` };
 

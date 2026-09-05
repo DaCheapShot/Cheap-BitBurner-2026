@@ -32,8 +32,8 @@ export function prepare(ns) {
     return {
       ok: false,
       error:
-        "Formulas.exe is not available on home. Run scripts/manager.js instead - " +
-        "it uses the *Analyze API and works without the program.",
+        "Formulas.exe is not available on home. Run the *Analyze build instead - " +
+        "scripts/manager.js or scripts/prep.js - which works without the program.",
     };
   }
 }
