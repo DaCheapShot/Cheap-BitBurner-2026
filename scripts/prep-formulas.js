@@ -1,6 +1,6 @@
 import { REPORT_PORT } from "./config.js";
 import { prep, measure, pickTarget, DEFAULT_MAX_CYCLES } from "./prepper.js";
-import * as math from "./mathAnalyze.js";
+import * as math from "./mathFormulas.js";
 
 /**
  * Phase 3 CLI: bring one target to max money and minimum security.
@@ -9,12 +9,15 @@ import * as math from "./mathAnalyze.js";
  * - only one process may own the ServerPool and the report port at a time. This
  * file is just argument parsing and the tail window.
  *
- * Usage:  run scripts/prep.js --target foodnstuff
- *         run scripts/prep.js                      (auto: richest server you can hack)
- *         run scripts/prep.js --target n00dles --max-cycles 5
+ * Identical to prep.js except for which math module it injects - this one uses
+ * ns.formulas.hacking, which is exact but requires Formulas.exe on home.
  *
- * RAM: 1.60 base + prepper.js 2.00 + mathAnalyze 2.55 = 6.15 GB
- * Requires /data/calib.json: run scripts/calibrate.js first.
+ * Usage:  run scripts/prep-formulas.js --target foodnstuff
+ *         run scripts/prep-formulas.js                      (auto: richest server you can hack)
+ *         run scripts/prep-formulas.js --target n00dles --max-cycles 5
+ *
+ * RAM: 1.60 base + prepper.js 2.00 + mathFormulas 2.50 = 6.10 GB
+ * Requires Formulas.exe on home.
  */
 
 function fmtMoney(m) {
