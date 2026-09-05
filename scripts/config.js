@@ -244,6 +244,17 @@ export const CLOUD_DONE_MARKER = "/data/cloud-maxed.txt";
  */
 export const CLOUD_RECHECK_MS = 30 * 60 * 1000;
 
+/** The program that unlocks ns.formulas. */
+export const FORMULAS_PROGRAM = "Formulas.exe";
+
+/**
+ * Written by boot.js so other scripts can learn whether Formulas is owned
+ * without paying 0.10 GB for fileExists. Advisory only - boot re-checks every
+ * tick, so a stale value corrects itself within one tick and nothing that
+ * matters is decided from it.
+ */
+export const FORMULAS_MARKER = "/data/formulas.txt";
+
 // ---------------------------------------------------------------- report ----
 
 /**
