@@ -6,6 +6,8 @@ import {
   REPORT_PORT,
   WORKER_FILES,
   WORKER_RAM_FALLBACK,
+  MONEY_TOLERANCE,
+  SEC_TOLERANCE,
 } from "./config.js";
 import { growSecurity, weakenThreadsFor } from "./calib.js";
 
@@ -52,10 +54,11 @@ import { growSecurity, weakenThreadsFor } from "./calib.js";
  * cache refuses to answer growth questions there.
  */
 
-// Re-exported from config.js so both math implementations and every consumer
-// agree on what "prepped" means. Defining them here again would let the two
-// drift apart silently.
-export { MONEY_TOLERANCE, SEC_TOLERANCE } from "./config.js";
+// Single source of truth: both math implementations and every consumer must
+// agree on what "prepped" means, so the values live in config.js. Imported AND
+// re-exported deliberately - a bare `export ... from` would forward the names to
+// importers without binding them here, and measure() below uses them directly.
+export { MONEY_TOLERANCE, SEC_TOLERANCE };
 
 // How long past the expected landing to wait for reports before giving up on
 // them and re-measuring anyway. A missing report must not wedge prep.
