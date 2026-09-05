@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "bitburner-src Docs": {
+      "type": "sse",
+      "url": "https://gitmcp.io/DaCheapShot/bitburner-src"
+    }
+  }
+}
