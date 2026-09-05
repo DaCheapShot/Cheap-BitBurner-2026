@@ -274,3 +274,17 @@ export const CLOUD_RECHECK_MS = 30 * 60 * 1000;
  *   [6] thread count
  */
 export const WORKER_ARGV = ["target", "delay", "batch", "port", "planned", "op", "threads"];
+
+// ------------------------------------------------------------ tolerances ----
+
+/**
+ * How close to max money counts as "prepped".
+ *
+ * Lives here rather than in prepper.js because both math implementations
+ * compute snapshot().moneyOk, and a difference between them would mean
+ * "prepped" silently meant two different things depending on which one loaded.
+ */
+export const MONEY_TOLERANCE = 0.999;
+
+/** How far above minimum security still counts as "at minimum". */
+export const SEC_TOLERANCE = 0.01;

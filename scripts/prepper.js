@@ -52,10 +52,10 @@ import { growSecurity, weakenThreadsFor } from "./calib.js";
  * cache refuses to answer growth questions there.
  */
 
-// Stop declaring "prepped" at exact equality - money asymptotes toward max and
-// security carries float noise.
-export const MONEY_TOLERANCE = 0.999;
-export const SEC_TOLERANCE = 0.01;
+// Re-exported from config.js so both math implementations and every consumer
+// agree on what "prepped" means. Defining them here again would let the two
+// drift apart silently.
+export { MONEY_TOLERANCE, SEC_TOLERANCE } from "./config.js";
 
 // How long past the expected landing to wait for reports before giving up on
 // them and re-measuring anyway. A missing report must not wedge prep.
