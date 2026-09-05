@@ -40,6 +40,7 @@ Everything runs from the in-game terminal. `boot.js` is the entry point and supe
 run scripts/boot.js                     # root -> deploy -> calibrate -> cloud -> manager
 run scripts/boot.js --target omega-net  # pin the manager's target instead of auto-picking
 run scripts/boot.js --once --no-cloud
+run scripts/boot.js --no-formulas       # force the analyze build
 ```
 
 Individual pieces, useful when diagnosing:
@@ -51,14 +52,16 @@ run scripts/calibrate.js                # write /data/calib.json (needs target a
 run scripts/capacity.js --steal 0.05    # RAM/target/batch-size analysis, launches nothing
 run scripts/manager.js --dry-run        # plan a volley and print it
 run scripts/prep.js --target <host>     # prep one target without the manager
+node tests/run.mjs                      # run the test suite
 ```
 
 **Only one process may own the RAM pool and the report port.** `port.read()` removes the
 message and `Server.pending` is per-process memory, so a second owner steals reports and
-over-commits the same RAM. Do not run `prep.js` alongside `manager.js` — prep runs *inside*
-the manager via `prepper.js`. `boot.js` enforces this by killing duplicate services (lowest
-PID wins). `capacity.js` is safe to run beside the manager: it allocates and releases only
-within its own process and never touches the port.
+over-commits the same RAM. `manager.js` and `manager-formulas.js` are alternatives — only one
+may run. Do not run `prep.js` alongside either — prep runs *inside* the manager via
+`prepper.js`. `boot.js` enforces this by killing duplicate services (lowest PID wins).
+`capacity.js` is safe to run beside the manager: it allocates and releases only within its own
+process and never touches the port.
 
 ## Getting code into the game
 
@@ -74,19 +77,13 @@ A symptom of hop 1 failing is code that "obviously" ran but behaved like an olde
 `deploy.js` guards hop 2 by refusing to broadcast home's workers unless they carry result
 reporting.
 
-## Verification without a test runner
+## Verification
 
-Scripts can't run outside the game, so changes are checked two ways before handing them over:
+Run the test suite with `node tests/run.mjs`. Filter by name: `node tests/run.mjs boot`, or list
+all tests with no argument.
 
-```bash
-# syntax: copy to a scratch dir as .mjs, rewrite ./x.js imports to ./x.mjs, then
-node --check <file>.mjs
-```
-
-`node --check` only *parses*. It cannot see an undefined identifier, which has shipped a
-`ReferenceError` before (a call site changed without its import). For behaviour, write a mock
-`ns` object and call the module's exported functions or `main(ns)` directly. Mocks must
-reproduce the game's real semantics or they give false confidence:
+Scripts can't run outside the game, so the test suite uses mocks. Mocks must reproduce the
+game's real semantics or they give false confidence:
 
 - ports hold 50 entries and **discard the oldest** on overflow
 - file paths are stored **without a leading slash**, so `ns.run("/scripts/x.js")` works but
@@ -94,7 +91,8 @@ reproduce the game's real semantics or they give false confidence:
 - port crackers **throw** when you don't own the program; they don't return `false`
 
 Several fixes in this repo's history exist because a live run disagreed with a passing
-simulation. Treat mock results as necessary, not sufficient.
+simulation. Tests check syntax, isolation (the two math backends never reach each other),
+RAM accounting, and contract equivalence — but in-game runs are the real gate.
 
 ## RAM is the design constraint
 
@@ -115,6 +113,17 @@ called or not. Consequences that shape the whole codebase:
 Worker scripts pay their cost **per thread**, so `hack.js` / `grow.js` / `weaken.js` contain
 nothing beyond one op and one port write.
 
+### Two math backends
+
+`mathAnalyze.js` and `mathFormulas.js` implement the same interface. They must never be
+reachable from the same entry point — Bitburner charges for every `ns` function reachable
+through imports, so a script touching both pays ~2.5 GB it cannot use. `tests/isolation.test.mjs`
+enforces this by walking the import closure; `tests/ram.test.mjs` asserts the resulting totals.
+
+`growThreadsToRestore(snap, from, to, atSecurity)` is where they differ. Formulas honours
+`atSecurity` by cloning the server object; analyze cannot, and always evaluates at current
+security. That asymmetry is deliberate and tested — do not "fix" it into an equivalence.
+
 ## Architecture
 
 Layers, bottom up:
@@ -126,7 +135,11 @@ Layers, bottom up:
 | `verify.js` | landing analysis — the definition of "landed correctly" | 0 |
 | `ram.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
 | `prepper.js` | prep as a module (manager runs it in-process) | 3.50 |
-| `manager.js` | the volley loop | 6.15 |
+| `mathAnalyze.js` | math interface via *Analyze + calibration cache | 2.55 |
+| `mathFormulas.js` | math interface via `ns.formulas` | 2.50 |
+| `managerCore.js` | the volley loop, math-free | 2.00 |
+| `manager.js` | entry: core + mathAnalyze (always works) | 6.15 |
+| `manager-formulas.js` | entry: core + mathFormulas | 6.10 |
 | `boot.js` | supervisor | 3.30 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
