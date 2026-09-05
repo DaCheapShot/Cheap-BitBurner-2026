@@ -28,18 +28,19 @@ import { growSecurity, weakenThreadsFor } from "./calib.js";
  *
  * Each cycle does ONE of two things:
  *
- *   security > min   -> spend the whole wave on weaken.
- *                       Grow is deliberately excluded: growthAnalyze sizes
- *                       threads at CURRENT security, so growing while security
- *                       is high burns threads for little money.
- *   security == min  -> grow, paired with exactly enough weaken to cancel the
- *                       security grow will add, so it never drifts back up.
+ *   money < max  -> grow AND weaken in the same wave. Grow lands one spacer
+ *                   before the weaken, so a single weaken cancels both the
+ *                   security the server already carries and the security the
+ *                   grow adds. Costs some extra grow threads at high security;
+ *                   saves a whole ~50s window per cycle.
+ *   money == max -> nothing left to grow, so the wave is all weaken.
  *
  * RAM charged to whoever imports this (verified against the fork's docs):
  *   ram.js 0.35 + exec 1.30 + getScriptRam 0.10
  *   + getServerMaxMoney/MoneyAvailable/SecurityLevel/MinSecurityLevel 0.40
  *   + getWeakenTime/getGrowTime 0.10 + growthAnalyze 1.00
- *   = 3.25 GB   (ports, sleep, print are all 0)
+ *   + getServerRequiredHackingLevel 0.10 + getHackingLevel 0.05 + fileExists 0.10
+ *   = 3.50 GB   (ports, sleep, print are all 0)
  *
  * Two functions that used to be here are now cache reads, saving 2.00 GB:
  *   weakenAnalyze         -> calib.weakenPerThread
@@ -74,6 +75,25 @@ function fmtMoney(m) {
 
 const fmtTime = (ms) => (ms >= 60000 ? `${(ms / 60000).toFixed(2)}m` : `${(ms / 1000).toFixed(1)}s`);
 
+/**
+ * Build a pool containing only hosts that actually hold the worker scripts.
+ *
+ * exec requires the script to already exist on the target and returns a bare 0
+ * otherwise, so a host without workers is not merely useless - it silently
+ * breaks whatever batch was placed on it, and a batch that hacks without
+ * growing is worse than no batch at all.
+ *
+ * This is load-bearing now that cloud.js no longer scp's on purchase: a freshly
+ * bought server exists, is rooted, and has RAM, but stays empty until boot.js
+ * notices the marker and runs deploy.js. Filtering here makes that window
+ * merely idle instead of destructive.
+ */
+export function buildWorkerPool(ns, opts = {}) {
+  const pool = ServerPool.build(ns, { homeReserve: HOME_RESERVE_GB, ...opts });
+  pool.servers = pool.servers.filter((s) => ns.fileExists(WORKER_FILES.hack, s.hostname));
+  return pool;
+}
+
 /** Per-thread worker RAM, real if deployed, expected otherwise. */
 export function workerRam(ns) {
   const out = {};
@@ -100,13 +120,24 @@ export function measure(ns, host) {
 /** True if a measure() result is at max money AND minimum security. */
 export const isPrepped = (m) => m.moneyOk && m.secOk;
 
-/** Richest rooted server we're allowed to hack. Only used without an explicit target. */
+/**
+ * Richest server we can actually hack. Only used without an explicit target.
+ *
+ * The hacking-level check is load-bearing, not a nicety. NUKE ignores hacking
+ * level entirely - scripts/root.js roots every server whose ports it can open -
+ * so "rooted" says nothing about whether hacking it will work. Picking the
+ * richest rooted server would hand back something far above your level, where
+ * hackAnalyze returns 0 and the manager exits immediately; a supervisor would
+ * then restart it into the same failure forever.
+ */
 export function pickTarget(ns) {
+  const level = ns.getHackingLevel();
   let best = null;
   for (const host of ServerPool.scanAll(ns)) {
     if (host === "home" || !ns.hasRootAccess(host)) continue;
     const maxMoney = ns.getServerMaxMoney(host);
     if (maxMoney <= 0) continue;
+    if (ns.getServerRequiredHackingLevel(host) > level) continue;
     if (!best || maxMoney > best.maxMoney) best = { host, maxMoney };
   }
   return best?.host ?? null;
@@ -125,7 +156,7 @@ export function pickTarget(ns) {
  * sizes compete, even maxThreadsFor is only exact for one of them at a time.
  * A real allocate/release pair is the only honest test.
  */
-export function sizeGrowWave(pool, ram, calib, growWanted) {
+export function sizeGrowWave(pool, ram, calib, growWanted, extraWeaken = 0) {
   let grow = Math.min(growWanted, pool.maxThreadsFor(ram.grow));
 
   while (grow > 0) {
@@ -135,7 +166,9 @@ export function sizeGrowWave(pool, ram, calib, growWanted) {
     // paired weaken gets sized at 1 thread, and security creeps back up exactly
     // when prep is trying to finish. The uncapped per-thread figure is honest at
     // any money level, which is what makes it cacheable.
-    const weaken = Math.max(1, weakenThreadsFor(calib, growSecurity(calib, grow)));
+    // extraWeaken covers security the server is ALREADY carrying, on top of
+    // what this grow will add. Both are cancelled by the same weaken landing.
+    const weaken = Math.max(1, weakenThreadsFor(calib, growSecurity(calib, grow)) + extraWeaken);
 
     const g = pool.allocate(ram.grow, grow);
     if (g) {
@@ -153,7 +186,9 @@ export function sizeGrowWave(pool, ram, calib, growWanted) {
     grow = Math.min(scaled, grow - 1);
   }
 
-  return { grow: 0, weaken: 0 };
+  // No room for any grow at all - still spend the wave weakening, so the cycle
+  // is not wasted entirely.
+  return { grow: 0, weaken: Math.min(extraWeaken, pool.maxThreadsFor(ram.weaken)) };
 }
 
 /**
@@ -162,9 +197,14 @@ export function sizeGrowWave(pool, ram, calib, growWanted) {
  * @returns {{grow: number, weaken: number, mode: string}}
  */
 export function planPrepWave(ns, host, pool, ram, calib, m) {
-  if (!m.secOk) {
-    // Security first. Cap at what's actually needed, then at what fits.
-    const needed = weakenThreadsFor(calib, m.sec - m.minSec);
+  // Threads needed purely to undo the security the server is already carrying.
+  const excess = Math.max(0, m.sec - m.minSec);
+  const fixSec = weakenThreadsFor(calib, excess);
+
+  if (m.moneyOk) {
+    // Money is already at max, so there is nothing to grow - spend the whole
+    // wave on weaken.
+    //
     // maxThreadsFor, NOT freeRam / ramPerThread. Free RAM is spread across hosts
     // and each host floors its own thread count, so the total is not divisible:
     // 78.85GB free can be under 45 placeable threads at 1.75GB. maxThreadsFor
@@ -172,18 +212,40 @@ export function planPrepWave(ns, host, pool, ram, calib, m) {
     const fits = pool.maxThreadsFor(ram.weaken);
     return {
       grow: 0,
-      weaken: Math.min(needed, fits),
-      mode: `weaken (need ${needed}t for ${(m.sec - m.minSec).toFixed(2)} sec)`,
+      weaken: Math.min(fixSec, fits),
+      mode: `weaken (need ${fixSec}t for ${excess.toFixed(2)} sec)`,
     };
   }
 
-  // At min security - now grow is efficient. Ratio is capped: at very low money
-  // growthAnalyze's multiplier explodes, and the +$1/thread additive growth it
-  // ignores means fewer threads are really needed anyway.
+  // Money is low, so grow AND weaken in the same wave, whatever the security.
+  //
+  // These used to be sequential - weaken to minimum first, then grow - on the
+  // reasoning that grow is inefficient at high security. That reasoning is
+  // sound but the conclusion was wrong: each phase costs a full weaken window
+  // (~50s), and the wave already lands grow one spacer BEFORE weaken, so the
+  // same weaken that fixes the existing drift also cancels what the grow adds.
+  // Running them together spends extra grow threads to save whole cycles, and
+  // threads are the cheap resource once the pool is large.
+  //
+  // growthAnalyze is evaluated at CURRENT security, which is exactly right
+  // here: grow lands before the weaken, so it really does execute at this
+  // security level.
+  //
+  // The ratio is capped at current money: at very low money growthAnalyze's
+  // multiplier explodes, and the +$1/thread additive growth it ignores means
+  // fewer threads are really needed anyway.
   const ratio = m.maxMoney / Math.max(m.money, 1);
   const wanted = Math.ceil(ns.growthAnalyze(host, ratio) * GROW_MARGIN);
-  const plan = sizeGrowWave(pool, ram, calib, wanted);
-  return { ...plan, mode: `grow (want ${wanted}t for x${ratio.toFixed(2)})` };
+  const plan = sizeGrowWave(pool, ram, calib, wanted, fixSec);
+  // When the drift alone needs more threads than the pool holds, grow is
+  // squeezed out entirely and the wave is pure weaken - say so rather than
+  // labelling a 0-thread grow as a grow.
+  const mode =
+    plan.grow === 0
+      ? `weaken only (${excess.toFixed(2)} sec drift needs ${fixSec}t; no room left to grow)`
+      : `grow (want ${wanted}t for x${ratio.toFixed(2)})` +
+        (fixSec > 0 ? ` + ${fixSec}t weaken for ${excess.toFixed(2)} sec drift` : "");
+  return { ...plan, mode };
 }
 
 /**
@@ -293,7 +355,7 @@ export async function runPrepWave(ns, host, pool, ram, plan, batch, port, log) {
  * @param {string} [opts.idPrefix] batch id prefix, so a manager can tell prep
  *                                 waves apart from volley batches on the port
  * @param {() => ServerPool} [opts.buildPool] called once per cycle. Defaults to
- *        a fresh ServerPool.build - pass your own if you already own a pool.
+ *        a fresh buildWorkerPool - pass your own if you already own a pool.
  * @param {(s: string) => void} [opts.log]
  * @returns {Promise<{ok: boolean, cycles: number, reason: string, m: object}>}
  */
@@ -304,7 +366,7 @@ export async function prep(ns, host, opts = {}) {
     port = REPORT_PORT,
     maxCycles = DEFAULT_MAX_CYCLES,
     idPrefix = "prep",
-    buildPool = () => ServerPool.build(ns, { homeReserve: HOME_RESERVE_GB }),
+    buildPool = () => buildWorkerPool(ns),
     log = (s) => ns.print(s),
   } = opts;
 

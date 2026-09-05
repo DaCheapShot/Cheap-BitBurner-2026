@@ -198,6 +198,19 @@ export const OP_WORKER = { H: "hack", W1: "weaken", G: "grow", W2: "weaken" };
 /** Every worker path, for scp. */
 export const WORKER_LIST = Object.values(WORKER_FILES);
 
+// ------------------------------------------------------------ supervisor ----
+
+/**
+ * Stamped by root.js whenever a pass roots something new; polled by boot.js to
+ * decide whether deploy.js needs to run.
+ *
+ * It lives here rather than in root.js so boot.js can read it without importing
+ * root.js - an import would charge boot.js for every ns function root.js can
+ * reach (scan, nuke, hasRootAccess and five crackers, 0.55 GB) to obtain one
+ * string. config.js has no ns calls at all, so importing it stays free.
+ */
+export const ROOT_MARKER = "/data/rooted.txt";
+
 // ---------------------------------------------------------------- report ----
 
 /**

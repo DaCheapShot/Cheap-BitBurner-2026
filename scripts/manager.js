@@ -52,8 +52,8 @@ import { prep, measure, isPrepped, pickTarget } from "./prepper.js";
  *         run scripts/manager.js --fixed               (use STEAL_FRACTION)
  *         run scripts/manager.js --dry-run        (plan and print, launch nothing)
  *
- * RAM: 1.60 base + ram.js/prepper.js union 3.25 + hackAnalyze 1.00
- *      + getHackTime 0.05 = 5.90 GB
+ * RAM: 1.60 base + ram.js/prepper.js union 3.50 + hackAnalyze 1.00
+ *      + getHackTime 0.05 = 6.15 GB
  * (config.js, calib.js and verify.js are all 0 GB.)
  */
 
@@ -491,7 +491,7 @@ export async function main(ns) {
 
   const ram = workerRam(ns);
   const log = (s) => ns.print(s);
-  const buildPool = () => ServerPool.build(ns, { homeReserve: HOME_RESERVE_GB });
+  const buildPool = () => buildWorkerPool(ns);
 
   // Stale entries would be attributed to this run's batch ids. Safe to clear:
   // this process owns the port.

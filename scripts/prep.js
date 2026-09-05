@@ -10,10 +10,10 @@ import { prep, measure, pickTarget, DEFAULT_MAX_CYCLES } from "./prepper.js";
  * file is just argument parsing and the tail window.
  *
  * Usage:  run scripts/prep.js --target foodnstuff
- *         run scripts/prep.js                      (auto: richest rooted server)
+ *         run scripts/prep.js                      (auto: richest server you can hack)
  *         run scripts/prep.js --target n00dles --max-cycles 5
  *
- * RAM: 1.60 base + prepper.js 3.25 = 4.85 GB
+ * RAM: 1.60 base + prepper.js 3.50 = 5.10 GB
  * (was 6.85 - weakenAnalyze and growthAnalyzeSecurity are now cache reads.)
  * Requires /data/calib.json: run scripts/calibrate.js first.
  */

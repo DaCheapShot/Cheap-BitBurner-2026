@@ -1,4 +1,4 @@
-import { WORKER_LIST } from "./config.js";
+import { ROOT_MARKER } from "./config.js";
 
 /**
  * Cloud server purchaser / upgrader.
@@ -18,9 +18,9 @@ import { WORKER_LIST } from "./config.js";
  * on a name collision instead of failing - asking for an existing "cheapserv-00"
  * silently yields "cheapserv-00-0", which would wreck the numbering.
  *
- * Newly purchased servers get the worker scripts copied to them immediately. An
- * empty new server is useless to the batcher, and exec fails with a bare "0"
- * that's annoying to diagnose. Upgrades keep their files, so they aren't re-scp'd.
+ * Does NOT copy worker scripts. A purchase stamps ROOT_MARKER instead, and
+ * scripts/boot.js notices and runs deploy.js - which keeps ns.scp (0.60 GB) out
+ * of this script. Upgrades keep their files, so they need nothing either way.
  *
  * Usage:  run scripts/cloud.js                 one action, then exit
  *         run scripts/cloud.js --dry-run       show the plan, buy nothing
@@ -32,8 +32,8 @@ import { WORKER_LIST } from "./config.js";
  *      + cloud.getServerNames 1.05 + purchaseServer 2.25 + upgradeServer 0.25
  *      + getServerCost 0.25 + getServerUpgradeCost 0.10
  *      + getServerLimit 0.05 + getRamLimit 0.05
- *      + getServerMaxRam 0.05 + getServerMoneyAvailable 0.10 + scp 0.60
- *      = 6.35 GB     (sleep, print, args are 0)
+ *      + getServerMaxRam 0.05 + getServerMoneyAvailable 0.10
+ *      = 5.75 GB     (sleep, print, args and ns.write are 0)
  */
 
 // ---------------------------------------------------------------- config ----
@@ -146,16 +146,20 @@ function step(ns, budgetFraction, dryRun) {
 
     // The game renames on collision rather than failing - surface it if it did.
     const renamed = got !== name ? `  (game renamed from ${name})` : "";
-    // New server is empty; without workers the batcher's exec just returns 0.
-    const copied = ns.scp(WORKER_LIST, got, "home");
+
+    // A new server is empty, and without workers the batcher's exec just
+    // returns 0. Copying is scripts/deploy.js's job, so stamp the marker
+    // boot.js polls and let it deploy - that keeps scp (0.60 GB) out of this
+    // script entirely. Until that happens the pool skips hosts with no worker
+    // files, so an undeployed server is idle rather than broken.
+    ns.write(ROOT_MARKER, `${Date.now()}\nbought ${got}`, "w");
 
     return {
       acted: true,
       done: false,
       msg:
         `BOUGHT ${got} @ ${fmtRam(pick.ram)} for ${fmtMoney(pick.cost)} ` +
-        `(slot ${owned.length + 1}/${limit})${renamed}` +
-        (copied ? "  workers copied" : "  WARN: scp of workers FAILED"),
+        `(slot ${owned.length + 1}/${limit})${renamed}  workers queued for deploy`,
     };
   }
 

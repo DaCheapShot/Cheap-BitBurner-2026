@@ -71,12 +71,15 @@ export async function main(ns) {
     else failed.push(host);
   }
 
-  const out = [
-    "",
-    `workers: ${WORKER_LIST.join("  ")}`,
-    `copied to ${copied.length} host(s): ${copied.join(", ") || "(none)"}`,
-    `skipped ${skipped} (no root or no RAM), scanned ${seen.size}`,
-  ];
-  if (failed.length) out.push(`FAILED on ${failed.length}: ${failed.join(", ")}`);
-  ns.tprint(out.join("\n"));
+  // Routine copies go to the script's own log, not the terminal. boot.js runs
+  // this on every network change, and a success line per run is pure noise.
+  ns.print(`workers: ${WORKER_LIST.join("  ")}`);
+  ns.print(`copied to ${copied.length} host(s): ${copied.join(", ") || "(none)"}`);
+  ns.print(`skipped ${skipped} (no root or no RAM), scanned ${seen.size}`);
+
+  // A failed scp still goes to the terminal: it means hosts are missing workers,
+  // and every exec the batcher aims at them will silently return 0.
+  if (failed.length) {
+    ns.tprint(`ERROR: deploy failed on ${failed.length} host(s): ${failed.join(", ")}`);
+  }
 }
