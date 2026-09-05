@@ -128,6 +128,10 @@ function planThreadsForHack(math, snap, hack, perThread, consts) {
   ));
 
   const weaken2 = Math.max(1, Math.ceil((consts.growSec * grow) / consts.weakenSec));
+
+  // Actual take, from the rounded-up thread count - not the requested fraction.
+  // ceil() means a batch almost always steals a little more than asked, and the
+  // steal search has to compare what batches really earn.
   const hackAmount = snap.maxMoney * steal;
   return { hack, weaken1, grow, weaken2, perThread, steal, hackAmount };
 }
