@@ -1,4 +1,3 @@
-import { ServerPool } from "./ram.js";
 import {
   STEAL_FRACTION,
   SPACER_MS,
@@ -20,7 +19,7 @@ import {
 } from "./config.js";
 import { loadCalibration, growThreadsFor } from "./calib.js";
 import { analyzeBatch, batchOk } from "./verify.js";
-import { prep, measure, isPrepped, pickTarget } from "./prepper.js";
+import { prep, measure, isPrepped, pickTarget, buildWorkerPool } from "./prepper.js";
 
 /**
  * Phase 5: the shotgun volley loop.
@@ -521,6 +520,9 @@ export async function main(ns) {
     }
   }
 
+  // Distinguishes this manager's batch ids from those of a previous run whose
+  // workers are still in flight.
+  const runId = Date.now() % 100000;
   let strikes = 0;
   let cycle = 0;
   let totalEarned = 0;
@@ -542,7 +544,14 @@ export async function main(ns) {
         `cycle ${cycle}: ${target} needs prep - ${fmtMoney(m.money)}/${fmtMoney(m.maxMoney)}, ` +
           `sec ${m.sec.toFixed(2)}/${m.minSec.toFixed(2)}`,
       );
-      const res = await prep(ns, target, { calib, ram, port: REPORT_PORT, buildPool, log });
+      // Unique prefix per manager run. Workers still in flight from a previous
+      // manager (or a hand-run prep.js) land after this one clears the port and
+      // report under their own batch id - a fixed "prep-1" would collide with
+      // ours and be counted as one of this wave's reports.
+      const res = await prep(ns, target, {
+        calib, ram, port: REPORT_PORT, buildPool, log,
+        idPrefix: `prep${runId}`,
+      });
       if (!res.ok) {
         ns.tprint(`ERROR: prep of ${target} failed - ${res.reason}. Manager stopping.`);
         return;
@@ -598,9 +607,13 @@ export async function main(ns) {
         `steal ${(pick.chosen.steal * 100).toFixed(2)}% (auto, ${pick.chosen.hack} hack threads, ` +
         `${pick.chosen.n} batches, ${fmtMoney(pick.chosen.yield)}/volley)` +
         (pick.tradedFor
-          ? `  - took ${pick.chosen.n} batches over ${pick.tradedFor.n} at ` +
-            `${(pick.tradedFor.steal * 100).toFixed(2)}%, giving up ` +
-            `${fmtMoney(pick.tradedFor.yield - pick.chosen.yield)} for fewer workers in flight`
+          ? `  - gave up ${fmtMoney(pick.tradedFor.yield - pick.chosen.yield)} vs ` +
+            `${(pick.tradedFor.steal * 100).toFixed(2)}% for ` +
+            // Say the real reason. Batch count is the first tie-break, spare RAM
+            // the second, so when the counts match it was headroom that decided.
+            (pick.chosen.n < pick.tradedFor.n
+              ? `${pick.chosen.n} batches instead of ${pick.tradedFor.n} - fewer workers in flight`
+              : `${fmtRam(pick.chosen.spare)} spare instead of ${fmtRam(pick.tradedFor.spare)}`)
           : "");
     }
     if (th.error) {
@@ -660,7 +673,9 @@ export async function main(ns) {
     // -- fire ---------------------------------------------------------------
 
     const { t0, launched, aborted, expected } = launchVolley(
-      ns, target, batches, timing, `v${cycle}`, log,
+      // Same collision reasoning as the prep prefix: a bare "v1-0" would match
+      // a previous manager run's still-airborne workers.
+      ns, target, batches, timing, `v${runId}c${cycle}`, log,
     );
 
     if (launched === 0) {
