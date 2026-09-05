@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path 'e:\\\\Games\\\\BitBurner' -Recurse -File)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:bitburner.readthedocs.io)",
+      "WebSearch"
+    ]
+  },
+  "enableAllProjectMcpServers": true
+}
