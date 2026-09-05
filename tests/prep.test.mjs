@@ -48,12 +48,27 @@ function wireExec(ns) {
 }
 
 export const tests = {
-  // Regression: prepper once re-exported its tolerances without importing them,
-  // so measure() threw ReferenceError. Static parsing cannot catch that - only
-  // calling the function does. measure() now delegates to the injected math
-  // module's snapshot(), so the math module (not a bare ns mock) is what
-  // exercises the import/export in prepper.js.
-  "prepper.measure resolves its tolerance constants": async () => {
+  // Regression: prepper once used a bare `export { X } from "./config.js"`, which
+  // forwards names to importers without binding them locally - measure() then threw
+  // ReferenceError. measure() no longer uses the constants directly, so this asserts
+  // the re-export itself resolves: a bare re-export of a name prepper never imported
+  // would surface here as undefined.
+  "prepper re-exports its tolerance constants as real values": async () => {
+    const { prepper } = await loadScripts();
+    assert(typeof prepper.MONEY_TOLERANCE === "number",
+      `MONEY_TOLERANCE should be a number, got ${typeof prepper.MONEY_TOLERANCE}`);
+    assert(typeof prepper.SEC_TOLERANCE === "number",
+      `SEC_TOLERANCE should be a number, got ${typeof prepper.SEC_TOLERANCE}`);
+    assert(prepper.MONEY_TOLERANCE > 0 && prepper.MONEY_TOLERANCE <= 1,
+      "MONEY_TOLERANCE should be a fraction");
+  },
+
+  // NOT a guard on the import/export binding above - measure() just forwards to
+  // the injected math module's snapshot() and never touches MONEY_TOLERANCE or
+  // SEC_TOLERANCE itself, so a broken re-export would not be caught here. This
+  // only checks that measure() plumbs an ns/host/math triple through to a sane
+  // moneyOk/secOk result.
+  "prepper.measure delegates to the injected math module": async () => {
     const { prepper, mathAnalyze } = await loadScripts();
     const ns = makeNs({
       servers: { x: { moneyMax: 100, moneyAvailable: 100, minDifficulty: 1, hackDifficulty: 1 } },
