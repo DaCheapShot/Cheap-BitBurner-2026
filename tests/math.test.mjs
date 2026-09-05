@@ -58,4 +58,52 @@ export const tests = {
     assert(!ready.ok, "should refuse without /data/calib.json");
     assert(/calibrate/i.test(ready.error), `error should name calibrate.js, got: ${ready.error}`);
   },
+
+  "mathFormulas satisfies the same interface": async () => {
+    const { mathFormulas } = await loadScripts();
+    const { withFormulas } = await import("./mockNs.mjs");
+    const ns = withFormulas(baseNs());
+    const ready = mathFormulas.prepare(ns);
+    assert(ready.ok, `prepare failed: ${ready.error}`);
+
+    const snap = mathFormulas.snapshot(ns, HOST);
+    assert(snap.maxMoney === 62.5e6, "maxMoney wrong");
+    assert(snap.moneyOk === true, "moneyOk should be true at max money");
+    assert(mathFormulas.maxMoneyOf(ns, HOST) === 62.5e6, "maxMoneyOf wrong");
+    assertClose(mathFormulas.hackFractionPerThread(snap), 0.0037, 1e-9, "hack fraction");
+    assertClose(mathFormulas.securityPerWeakenThread(snap), 0.05, 1e-9, "weaken security");
+
+    const times = mathFormulas.opTimes(snap);
+    assert(times.weaken === 2000 && times.grow === 1600 && times.hack === 500, "op times wrong");
+  },
+
+  "mathFormulas.prepare fails without the program": async () => {
+    const { mathFormulas } = await loadScripts();
+    const { withFormulas } = await import("./mockNs.mjs");
+    const ns = withFormulas(baseNs(), { owned: false });
+    const ready = mathFormulas.prepare(ns);
+    assert(!ready.ok, "should refuse without Formulas.exe");
+    assert(/manager\.js/.test(ready.error), `error should point at manager.js, got: ${ready.error}`);
+  },
+
+  // The divergence that justifies the whole feature. Asserting it stops anyone
+  // later "fixing" the two implementations into a false equivalence.
+  "formulas honours atSecurity; analyze cannot": async () => {
+    const { mathFormulas, mathAnalyze } = await loadScripts();
+    const { withFormulas } = await import("./mockNs.mjs");
+
+    const nsF = withFormulas(baseNs({ moneyAvailable: 50e6 }));
+    mathFormulas.prepare(nsF);
+    const snapF = mathFormulas.snapshot(nsF, HOST);
+    const atMin = mathFormulas.growThreadsToRestore(snapF, 50e6, 62.5e6, 5);
+    const atHigh = mathFormulas.growThreadsToRestore(snapF, 50e6, 62.5e6, 25);
+    assert(atHigh > atMin, `growth is worse at high security: ${atHigh} should exceed ${atMin}`);
+
+    const nsA = baseNs({ moneyAvailable: 50e6 });
+    mathAnalyze.prepare(nsA);
+    const snapA = mathAnalyze.snapshot(nsA, HOST);
+    const aMin = mathAnalyze.growThreadsToRestore(snapA, 50e6, 62.5e6, 5);
+    const aHigh = mathAnalyze.growThreadsToRestore(snapA, 50e6, 62.5e6, 25);
+    assertClose(aMin, aHigh, 1e-9, "analyze cannot honour atSecurity and must return the same");
+  },
 };
