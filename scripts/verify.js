@@ -90,6 +90,11 @@ export function batchOutcome(reports) {
   let hackThreads = 0;
   let growThreads = 0;
   let missing = 0;
+  // Hack has a success CHANCE. A failed hack returns 0 and takes nothing, so
+  // counting hits against tries measures that chance directly - far better than
+  // inferring it from money, which needs assumptions about the starting state.
+  let hackHits = 0;
+  let hackTries = 0;
 
   for (const m of reports) {
     // A report with no numeric r came from a worker deployed before workers
@@ -102,6 +107,8 @@ export function batchOutcome(reports) {
     if (m.op === "H") {
       stolen += m.r;
       hackThreads += m.t;
+      hackTries++;
+      if (m.r > 0) hackHits++;
     } else if (m.op === "G") {
       growMult *= m.r;
       growThreads += m.t;
@@ -110,5 +117,5 @@ export function batchOutcome(reports) {
     }
   }
 
-  return { stolen, growMult, weakened, hackThreads, growThreads, missing };
+  return { stolen, growMult, weakened, hackThreads, growThreads, missing, hackHits, hackTries };
 }

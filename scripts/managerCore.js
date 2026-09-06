@@ -481,6 +481,8 @@ function measureVolley(byBatch, expected, wantGrowMult) {
   let stolen = 0;
   let weakened = 0;
   let unmeasurable = 0;
+  let hackHits = 0;
+  let hackTries = 0;
 
   for (const id of expected.keys()) {
     const reports = byBatch.get(id) ?? [];
@@ -489,27 +491,46 @@ function measureVolley(byBatch, expected, wantGrowMult) {
     if (o.missing > 0) unmeasurable++;
     stolen += o.stolen;
     weakened += o.weakened;
+    hackHits += o.hackHits;
+    hackTries += o.hackTries;
     if (o.growThreads > 0) samples.push(o.growMult);
   }
 
   if (!samples.length) {
-    return { stolen, weakened, unmeasurable, samples: 0, growMean: 0, growFirst: 0, growLast: 0, growRatio: 0 };
+    return { stolen, weakened, unmeasurable, hackHits, hackTries, samples: 0,
+             growMean: 0, growFirst: 0, growLast: 0, growRatio: 0 };
   }
 
-  const mean = samples.reduce((n, v) => n + v, 0) / samples.length;
-  // Average the leading and trailing tenth rather than single batches: one
-  // batch is noise, a tenth of the volley is a trend.
+  /*
+   * GEOMETRIC mean, not arithmetic. These are multipliers applied in sequence,
+   * so their average is the one that compounds to the same total - and hack has
+   * a success chance, which makes the per-batch multiplier vary wildly: a failed
+   * hack leaves the server at max, so its grow reports ~1.0, while a successful
+   * one reports the full restore.
+   *
+   * Averaging multipliers arithmetically over that spread is biased upward
+   * (Jensen's inequality) and it misled this very analysis: an arithmetic mean
+   * of 2.99 implied a 57% hack success rate while the measured take implied 38%.
+   * With p=0.4 and a x4.49 restore, the arithmetic mean reads 2.395 where the
+   * geometric reads 1.823 - the geometric one is what actually compounds.
+   */
+  const geoMean = (a) => Math.exp(a.reduce((n, v) => n + Math.log(v > 0 ? v : 1e-12), 0) / a.length);
+
+  // Leading and trailing tenth rather than single batches: one batch is noise,
+  // a tenth of the volley is a trend.
   const edge = Math.max(1, Math.floor(samples.length / 10));
-  const avg = (a) => a.reduce((n, v) => n + v, 0) / a.length;
+  const mean = geoMean(samples);
 
   return {
     stolen,
     weakened,
     unmeasurable,
+    hackHits,
+    hackTries,
     samples: samples.length,
     growMean: mean,
-    growFirst: avg(samples.slice(0, edge)),
-    growLast: avg(samples.slice(-edge)),
+    growFirst: geoMean(samples.slice(0, edge)),
+    growLast: geoMean(samples.slice(-edge)),
     growRatio: wantGrowMult > 0 ? mean / wantGrowMult : 0,
   };
 }
@@ -918,16 +939,32 @@ export async function run(ns, math) {
         `           [v] grow:  want x${wantGrowMult.toFixed(4)}  got x${vol.growMean.toFixed(4)}  ` +
           `(first ${vol.growFirst.toFixed(4)} -> last ${vol.growLast.toFixed(4)}, ${vol.samples} batches)`,
       );
-      // The trend is the diagnosis. A flat shortfall means the growth model is
-      // wrong; one that worsens across the volley means security is creeping up
-      // underneath it, so grow runs at a worse rate than it was sized for.
+      // The trend is the diagnosis, and its SIGN is the whole point: grow
+      // getting worse across the volley means conditions are degrading under it
+      // (security creeping up), while grow getting better means the early
+      // batches were starting from a fuller server than the later ones.
       const drift = vol.growFirst > 0 ? (vol.growLast / vol.growFirst - 1) * 100 : 0;
       ns.print(
         `           [v] trend: ${drift >= 0 ? "+" : ""}${drift.toFixed(2)}% first->last  ` +
           (Math.abs(drift) < 0.5
-            ? "flat - shortfall is in the growth model, not security creep"
-            : "degrading - suspect security creeping up under the volley"),
+            ? "flat - the shortfall is in the growth model itself"
+            : drift < 0
+              ? "grow WEAKENING - suspect security creeping up under the volley"
+              : "grow STRENGTHENING - later batches start from a lower server, so grow has more room before the max-money clamp"),
       );
+
+      // Measured directly rather than inferred. A failed hack returns 0 and
+      // takes nothing, so hits/tries IS the hack chance - no assumption about
+      // the server's starting money required. If this is well under 1, the plan
+      // is overstating every batch's take by exactly this factor, because
+      // nothing in the thread math models hack chance at all.
+      if (vol.hackTries > 0) {
+        const rate = vol.hackHits / vol.hackTries;
+        ns.print(
+          `           [v] hack:  ${vol.hackHits}/${vol.hackTries} succeeded (${(rate * 100).toFixed(1)}%)  ` +
+            `-> plan overstates take by ${(1 / Math.max(rate, 1e-9)).toFixed(2)}x if chance is unmodelled`,
+        );
+      }
       ns.print(
         `           [v] weaken: ${vol.weakened.toFixed(2)} sec removed across the volley; ` +
           `security ${after.sec.toFixed(2)}/${after.minSec.toFixed(2)} after`,

@@ -53,4 +53,17 @@ export const tests = {
     assert(headroom < (1 - got / want),
       "GROW_MARGIN 1.05 should be shown insufficient against the observed shortfall");
   },
+
+  "batchOutcome measures hack success rate directly": async () => {
+    const { verify } = await loadScripts();
+    const o = verify.batchOutcome([
+      rep("H", 10, 5000),   // hit
+      rep("H", 10, 0),      // miss - hack has a success chance
+      rep("H", 10, 3000),   // hit
+      rep("G", 30, 1.5),
+    ]);
+    assert(o.hackTries === 3, `expected 3 tries, got ${o.hackTries}`);
+    assert(o.hackHits === 2, `expected 2 hits, got ${o.hackHits}`);
+    assert(o.stolen === 8000, "a missed hack contributes 0, not undefined");
+  },
 };
