@@ -160,6 +160,35 @@ the manager does not do — `pickTarget` chooses the richest *hackable* server, 
 profitable one. `prep.js` / `prep-formulas.js` and `calibrate.js` are manual entry points to
 logic the supervisor otherwise drives. `scan.js` predates the batcher.
 
+### Prep, and why it fans out
+
+A prep wave is sized by **need, not capacity**. Growing past max money does nothing and
+weakening below minimum security does nothing, so `planPrepWave` asks for exactly the threads
+required and no more. One target therefore cannot use more than a sliver of the pool: a server
+carrying 50 excess security wants `50 / 0.05 = 1000` weaken threads, about 1.75TB of a 3267TB
+pool — while the manager blocks on that wave for a whole weaken window earning nothing.
+
+`prepGroup` spends the remainder prepping the next targets down `rankTargets`, up to
+`PREP_FANOUT`. Two rules make it safe, and both look arbitrary:
+
+- **The primary is launched before any extra is planned.** Its placements are already reserved,
+  so extras can only ever be sized against leftovers. Reordering this would let an extra take RAM
+  the primary wanted, making prep of the one server we are blocked on slower.
+- **An extra whose weaken window exceeds the primary's is skipped.** Every placement releases
+  together at the end of the cycle, so a slower wave would hold the cycle open past the
+  primary's landing. The primary is the richest target and usually the slowest, so this rejects
+  few candidates.
+
+Fanning out is safe in a way a speculative volley would not be: grow and weaken can only move a
+server *toward* prepped. There is no partial-failure mode that loses money the way a batch that
+hacks but fails to grow does.
+
+`launchPrepWave` and `awaitWaves` are split for the same reason: `port.read()` REMOVES the
+message, so two drain loops on one port destroy each other's reports. There is one drain for all
+in-flight waves, matching on batch id.
+
+Volley cycles are deliberately left alone — a volley already consumes nearly the whole pool.
+
 ### The volley loop
 
 Each cycle: measure free RAM across the rooted network → pick a steal fraction → compute how

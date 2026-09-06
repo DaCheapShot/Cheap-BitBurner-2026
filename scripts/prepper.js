@@ -2,6 +2,7 @@ import { ServerPool } from "./ram.js";
 import {
   SPACER_MS,
   GROW_MARGIN,
+  PREP_FANOUT,
   HOME_RESERVE_GB,
   REPORT_PORT,
   WORKER_FILES,
@@ -116,7 +117,7 @@ export function measure(ns, host, math) {
 export const isPrepped = (m) => m.moneyOk && m.secOk;
 
 /**
- * Richest server we can actually hack. Only used without an explicit target.
+ * Every server we can actually hack, richest first.
  *
  * The hacking-level check is load-bearing, not a nicety. NUKE ignores hacking
  * level entirely - scripts/root.js roots every server whose ports it can open -
@@ -124,18 +125,33 @@ export const isPrepped = (m) => m.moneyOk && m.secOk;
  * richest rooted server would hand back something far above your level, where
  * hackAnalyze returns 0 and the manager exits immediately; a supervisor would
  * then restart it into the same failure forever.
+ *
+ * Returns the whole ranking rather than just the winner because prep fans out
+ * across the next few candidates (PREP_FANOUT) with the RAM the primary's wave
+ * cannot use. Same ns calls as picking one - the scan was already whole-network.
  */
-export function pickTarget(ns, math) {
+export function rankTargets(ns, math) {
   const level = ns.getHackingLevel();
-  let best = null;
+  const found = [];
   for (const host of ServerPool.scanAll(ns)) {
     if (host === "home" || !ns.hasRootAccess(host)) continue;
     const maxMoney = math.maxMoneyOf(ns, host);
     if (maxMoney <= 0) continue;
     if (ns.getServerRequiredHackingLevel(host) > level) continue;
-    if (!best || maxMoney > best.maxMoney) best = { host, maxMoney };
+    found.push({ host, maxMoney });
   }
-  return best?.host ?? null;
+  found.sort((a, b) => b.maxMoney - a.maxMoney);
+  return found.map((f) => f.host);
+}
+
+/**
+ * Richest server we can actually hack. Only used without an explicit target.
+ *
+ * Defined in terms of rankTargets so the manager's choice of primary and prep's
+ * choice of extras can never disagree about the ordering.
+ */
+export function pickTarget(ns, math) {
+  return rankTargets(ns, math)[0] ?? null;
 }
 
 /**
@@ -238,22 +254,32 @@ export function planPrepWave(pool, ram, math, snap) {
 }
 
 /**
- * Launch one wave and wait for it to land.
+ * Launch one wave. Does NOT wait for it, and does NOT release its RAM.
  *
  * All workers exec at the same instant; separation comes from additionalMsec,
  * never from sleeping between launches. Grow lands one spacer BEFORE weaken so
  * the weaken cancels the security the grow just added.
  *
- * The caller owns the port - this reads from it but never clears it.
+ * Split from the waiting half so several waves can be in flight against one
+ * drain loop. Two drains on one port cannot coexist: port.read() REMOVES the
+ * message, so a loop that reads a report belonging to another wave destroys it
+ * - which is exactly what the old single-wave version did to anything whose
+ * batch id did not match. The caller launches every wave, then calls
+ * awaitWaves once, then releases every placement.
+ *
+ * Placements are returned rather than released because they must stay reserved
+ * while later waves are planned - that is what stops an extra target from
+ * eating RAM the primary is about to use.
  *
  * times comes from the caller (math.opTimes(snap)), not a fresh ns.getWeakenTime
  * / ns.getGrowTime call here - those are exactly the two ns calls this module
  * is not allowed to make directly, since the formulas build must price them
  * through getServer instead of a dedicated 0.05GB-each ns call.
  *
- * @returns {{launched: number, reports: number, threads: number}}
+ * @returns {{host: string, batch: string, launched: number, threads: number,
+ *            placements: object[][], landAt: number}}
  */
-export async function runPrepWave(ns, host, pool, ram, plan, batch, port, log, times) {
+export function launchPrepWave(ns, host, pool, ram, plan, batch, port, log, times) {
   const W = times.weaken;
   const G = times.grow;
 
@@ -314,33 +340,88 @@ export async function runPrepWave(ns, host, pool, ram, plan, batch, port, log, t
     }
   }
 
-  // Wait for reports, but never past the deadline: a lost report (full port,
-  // killed worker) must not wedge prep. We re-measure regardless.
-  const handle = ns.getPortHandle(port);
-  const deadline = landAt + REPORT_GRACE_MS;
-  let reports = 0;
-
-  while (reports < launched && Date.now() < deadline) {
-    await ns.sleep(Math.min(500, Math.max(50, deadline - Date.now())));
-    while (!handle.empty()) {
-      const msg = handle.read();
-      if (typeof msg === "object" && msg !== null && msg.b === batch) reports++;
-    }
-  }
-
-  for (const p of placements) pool.release(p);
-  return { launched, reports, threads };
+  return { host, batch, launched, threads, placements, landAt };
 }
 
 /**
- * Run prep cycles until the target is prepped, RAM runs out, or cycles run out.
+ * Drain the port until every wave has reported, or the deadline passes.
+ *
+ * ONE loop for ALL in-flight waves. A report is credited to its own batch id;
+ * anything else is dropped, as before - but "anything else" now means no wave
+ * is waiting on it, rather than merely "not the one wave this call knows".
+ *
+ * The deadline is the caller's, not max(landAt), and that is deliberate. Every
+ * placement releases together when the cycle ends, so waiting for a slower
+ * extra target would stretch the cycle of the primary - the one server we are
+ * actually blocked on. The caller sets the deadline from the primary and lets
+ * extras be best-effort.
+ *
+ * A lost report (full port, killed worker) must never wedge prep: the caller
+ * re-measures regardless of what came back.
+ *
+ * @param {object[]} waves  launchPrepWave results
+ * @returns {Promise<Map<string, number>>} batch id -> reports seen
+ */
+export async function awaitWaves(ns, port, waves, deadline) {
+  const handle = ns.getPortHandle(port);
+  const seen = new Map(waves.map((w) => [w.batch, 0]));
+  const total = waves.reduce((n, w) => n + w.launched, 0);
+  let got = 0;
+
+  const drain = () => {
+    while (!handle.empty()) {
+      const msg = handle.read();
+      if (typeof msg !== "object" || msg === null || !seen.has(msg.b)) continue;
+      seen.set(msg.b, seen.get(msg.b) + 1);
+      got++;
+    }
+  };
+
+  while (got < total && Date.now() < deadline) {
+    await ns.sleep(Math.min(500, Math.max(50, deadline - Date.now())));
+    drain();
+  }
+  // The last workers can report between the final sleep and the deadline.
+  drain();
+
+  return seen;
+}
+
+/**
+ * One wave, launched and waited on. The single-target path, kept so the
+ * standalone CLI and anything else with exactly one wave reads the same as it
+ * always did.
+ *
+ * @returns {{launched: number, reports: number, threads: number}}
+ */
+export async function runPrepWave(ns, host, pool, ram, plan, batch, port, log, times) {
+  const wave = launchPrepWave(ns, host, pool, ram, plan, batch, port, log, times);
+  const seen = await awaitWaves(ns, port, [wave], wave.landAt + REPORT_GRACE_MS);
+  for (const p of wave.placements) pool.release(p);
+  return { launched: wave.launched, reports: seen.get(batch) ?? 0, threads: wave.threads };
+}
+
+/**
+ * Prep `host` until it is ready, fanning out to extra targets with the RAM the
+ * primary's own wave cannot use.
  *
  * Re-measures every cycle rather than computing one plan up front. Same
  * self-correcting principle as the volley loop: hacking level and timings move,
  * and a wave that was right three minutes ago may not be now.
  *
+ * The fan-out exists because a prep wave is sized by NEED and the manager blocks
+ * on it. Growing past max money does nothing and weakening below minimum
+ * security does nothing, so a single target cannot use more than a sliver of the
+ * pool - a server carrying 50 excess security wants 1000 weaken threads, about
+ * 1.75TB of a 3267TB pool - while the manager waits out a whole weaken window
+ * earning nothing. The leftovers go to the next-best targets, so that when the
+ * manager retargets, the server it moves to is already prepped.
+ *
+ * Ordering is what makes that safe: the primary is planned AND launched before
+ * any extra is planned, so extras can only ever be sized against what is left.
+ *
  * @param {NS} ns
- * @param {string} host
+ * @param {string} host            the target that must be prepped before this returns
  * @param {object} opts
  * @param {object} opts.math       injected math module (required) - the whole
  *                                 point of this file: no calib, no *Analyze
@@ -351,10 +432,17 @@ export async function runPrepWave(ns, host, pool, ram, plan, batch, port, log, t
  *                                 waves apart from volley batches on the port
  * @param {() => ServerPool} [opts.buildPool] called once per cycle. Defaults to
  *        a fresh buildWorkerPool - pass your own if you already own a pool.
+ * @param {() => string[]} [opts.extras] candidate extra targets, best first,
+ *        re-evaluated every cycle. Defaults to none, which is plain single-host
+ *        prep.
+ * @param {number} [opts.fanout]   max extra targets per cycle; PREP_FANOUT
+ * @param {boolean} [opts.verbose] print a line per extra wave and pool usage
  * @param {(s: string) => void} [opts.log]
  * @returns {Promise<{ok: boolean, cycles: number, reason: string, m: object}>}
+ *          ok reflects the PRIMARY only - extras are best-effort and never
+ *          decide the result
  */
-export async function prep(ns, host, opts = {}) {
+export async function prepGroup(ns, host, opts = {}) {
   const {
     math,
     ram = workerRam(ns),
@@ -363,6 +451,9 @@ export async function prep(ns, host, opts = {}) {
     idPrefix = "prep",
     buildPool = () => buildWorkerPool(ns),
     log = (s) => ns.print(s),
+    extras = () => [],
+    fanout = PREP_FANOUT,
+    verbose = false,
   } = opts;
 
   if (!math) {
@@ -404,20 +495,27 @@ export async function prep(ns, host, opts = {}) {
     }
 
     // Op times come from the snapshot already taken above, not a fresh ns
-    // call - see runPrepWave for why getWeakenTime/getGrowTime can't be
+    // call - see launchPrepWave for why getWeakenTime/getGrowTime cannot be
     // called directly here.
     const times = math.opTimes(m);
+    const poolBefore = pool.freeRam;
     log(
       `cycle ${padL(cycle, 2)}  ${plan.mode}  ->  ` +
         `G ${padL(plan.grow, 5)}t  W ${padL(plan.weaken, 5)}t  ` +
         `(${fmtRam(plan.grow * ram.grow + plan.weaken * ram.weaken)} of ` +
-        `${fmtRam(pool.freeRam)})  eta ${fmtTime(times.weaken)}`,
+        `${fmtRam(poolBefore)})  eta ${fmtTime(times.weaken)}`,
     );
 
-    const res = await runPrepWave(
-      ns, host, pool, ram, plan, `${idPrefix}-${cycle}`, port, log, times,
-    );
-    if (res.launched === 0) {
+    // The primary launches FIRST, so its RAM is reserved in the pool before any
+    // extra is planned. Extras are then sized against leftovers only - that
+    // ordering is the whole guarantee that fanning out cannot slow down the one
+    // server we are actually blocked on.
+    const waves = [
+      launchPrepWave(ns, host, pool, ram, plan, `${idPrefix}-${cycle}`, port, log, times),
+    ];
+
+    if (waves[0].launched === 0) {
+      for (const place of waves[0].placements) pool.release(place);
       return {
         ok: false,
         cycles: cycle - 1,
@@ -426,18 +524,90 @@ export async function prep(ns, host, opts = {}) {
       };
     }
 
+    // A prep wave is sized by NEED, not capacity: growing past max money and
+    // weakening below minimum security both do nothing, so one target can never
+    // use more than a sliver of the pool while the manager blocks on it for a
+    // whole weaken window. Spend the rest getting the NEXT targets ready, so a
+    // later retarget costs no stall.
+    //
+    // Safe in a way a speculative volley would not be: grow and weaken can only
+    // move a server TOWARD prepped. There is no partial-failure mode that loses
+    // money the way a batch that hacks but fails to grow does. The worst a
+    // mis-sized extra can do is waste RAM and leave a server slightly dirty,
+    // which that server's own next cycle re-measures and corrects.
+    let n = 0;
+    for (const other of extras()) {
+      if (n >= fanout) break;
+      if (other === host) continue;
+
+      const om = math.snapshot(ns, other);
+      if (isPrepped(om)) continue;
+
+      // LOAD-BEARING. Every placement releases together at the end of the cycle,
+      // so a wave with a longer window would hold the cycle open past the
+      // primary's landing and make prepping the target we care about SLOWER.
+      // The primary is the richest target and so usually the slowest, which is
+      // why this rejects few candidates in practice.
+      const otimes = math.opTimes(om);
+      if (otimes.weaken > times.weaken) continue;
+
+      // Planned against the pool as it now stands, with the primary's
+      // placements already subtracted.
+      const oplan = planPrepWave(pool, ram, math, om);
+      // Zero threads means zero room, and every later candidate would be
+      // planned against this same exhausted pool - stop rather than pay a
+      // snapshot each to learn the same thing.
+      if (oplan.grow === 0 && oplan.weaken === 0) break;
+
+      const w = launchPrepWave(
+        ns, other, pool, ram, oplan, `${idPrefix}x${n + 1}-${cycle}`, port, log, otimes,
+      );
+      if (w.launched === 0) {
+        for (const place of w.placements) pool.release(place);
+        continue;
+      }
+      n++;
+      waves.push(w);
+      if (verbose) {
+        log(
+          `         [v] also prepping ${other}: G ${padL(oplan.grow, 5)}t ` +
+            `W ${padL(oplan.weaken, 5)}t  eta ${fmtTime(otimes.weaken)}  ${oplan.mode}`,
+        );
+      }
+    }
+
+    // Deadline comes from the PRIMARY, not the slowest wave. Extras are
+    // best-effort and nothing waits on them.
+    const seen = await awaitWaves(ns, port, waves, waves[0].landAt + REPORT_GRACE_MS);
+
+    const used = waves.reduce(
+      (gb, w) => gb + w.placements.reduce((a, place) => a + place.reduce((g, x) => g + x.gb, 0), 0),
+      0,
+    );
+    for (const w of waves) for (const place of w.placements) pool.release(place);
+
+    const launched = waves[0].launched;
+    const reports = seen.get(waves[0].batch) ?? 0;
+
     const after = math.snapshot(ns, host);
     log(
-      `         landed ${res.reports}/${res.launched} report(s), ${res.threads}t  ->  ` +
+      `         landed ${reports}/${launched} report(s), ${waves[0].threads}t  ->  ` +
         `${fmtMoney(after.money)} (${((after.money / after.maxMoney) * 100).toFixed(1)}%), ` +
         `sec ${after.sec.toFixed(2)}`,
     );
-    if (res.reports < res.launched) {
+    if (verbose && waves.length > 1) {
+      log(
+        `         [v] pool: ${fmtRam(used)} of ${fmtRam(poolBefore)} ` +
+          `(${((used / poolBefore) * 100).toFixed(1)}%) across ${waves.length} target(s), ` +
+          `${n} extra alongside the primary`,
+      );
+    }
+    if (reports < launched) {
       // Harmless on its own - prep trusts the measurement above, not the port.
       // Near-always a second process reading the same port and consuming the
       // reports before we see them.
       log(
-        `         WARN: ${res.launched - res.reports} report(s) never arrived - ` +
+        `         WARN: ${launched - reports} report(s) never arrived - ` +
           `is something else reading port ${port}? ` +
           `(prep uses the measurement, not the reports, so this is cosmetic)`,
       );
@@ -445,6 +615,17 @@ export async function prep(ns, host, opts = {}) {
   }
 
   return { ok: false, cycles: maxCycles, reason: "hit max cycles", m: math.snapshot(ns, host) };
+}
+
+/**
+ * Prep ONE target, with no fan-out.
+ *
+ * What the standalone CLI wants: a lone prep.js has no manager waiting on it,
+ * so there is no stall for extra targets to fill. The manager calls prepGroup
+ * directly.
+ */
+export async function prep(ns, host, opts = {}) {
+  return prepGroup(ns, host, { ...opts, extras: () => [] });
 }
 
 /**
