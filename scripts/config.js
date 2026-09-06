@@ -154,6 +154,31 @@ export const GROW_MARGIN = 1.05;
  */
 export const PREP_FANOUT = 3;
 
+/**
+ * How long prep waits for a full pool before calling it a failure.
+ *
+ * A pool with no placeable thread is usually TRANSIENT. The case that forced
+ * this: boot swaps manager builds when Formulas.exe is gained or lost, and the
+ * outgoing manager's volley keeps running - hundreds of batches holding 2.7TB
+ * for the rest of their weaken window. The incoming manager would plan against
+ * that, find nothing fits, and stop; boot then restarted it a tick later into
+ * exactly the same wall, once a minute until the workers drained.
+ *
+ * boot now kills those workers, so this is the belt to that fix's braces - any
+ * other script that fills the pool gets waited out instead of taking the
+ * manager down with it.
+ *
+ * Waiting cycles do not count against maxCycles: they do no work, and spending
+ * the prep budget on them would turn a busy pool into a failed prep by a
+ * different route. The product below is the real bound.
+ *
+ * 10s x 90 = 15 minutes, chosen to outlast one weaken window on a large target
+ * (12.6m measured). Past that the pool is not busy, it is empty - no rooted
+ * hosts, or no workers deployed - which is worth stopping for.
+ */
+export const POOL_WAIT_MS = 10000;
+export const POOL_WAIT_CYCLES = 90;
+
 // ------------------------------------------------------------------ ram -----
 
 /**

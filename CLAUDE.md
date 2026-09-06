@@ -144,7 +144,7 @@ Layers, bottom up:
 | `manager-formulas.js` | entry: core + mathFormulas | 6.10 |
 | `prep.js` | entry: prepper + mathAnalyze | 6.15 |
 | `prep-formulas.js` | entry: prepper + mathFormulas | 6.10 |
-| `boot.js` | supervisor | 3.40 |
+| `boot.js` | supervisor | 3.60 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
 
@@ -213,6 +213,16 @@ Breaking any of these produces silent, compounding damage rather than an error:
   the byte total overstates what can actually be placed. Simulate placement instead.
 - **Judge timing on jitter (spread of drift within a batch), never absolute lateness.** The
   game lands whole batches tens of ms late together, which cannot reorder anything.
+- **A manager swap must clear the network.** boot switches builds when Formulas.exe is gained
+  or lost, and the outgoing manager's volley keeps running — hundreds of batches holding the
+  RAM the replacement needs and still working a target nobody owns. `killOrphanWorkers` runs
+  only when no manager of either build survives; doing it on every manager kill would destroy
+  the volley of the survivor `killDuplicates` just kept. Nothing is lost by killing them:
+  `ns.hack` credits money on landing, so a killed grow forfeits only the restore, which prep
+  does anyway.
+- **A full pool is transient, not a failure.** Prep waits it out (`POOL_WAIT_CYCLES`) rather
+  than returning an error that stops the manager and has boot restart it into the same wall a
+  tick later. Waiting cycles do not spend `maxCycles`.
 - **Cap the auto-chosen steal fraction.** Thread counts are sized once per volley, then the
   batches land across the whole weaken window while hacking level climbs. A batch landing late
   steals more than planned, and its grow was sized for the smaller take, so it ends below where
