@@ -237,4 +237,95 @@ export const tests = {
     assert(x.batches === 0 && x.collided === 0,
       `an unmeasurable batch must not be judged, got ${JSON.stringify(x)}`);
   },
+
+  // --- money, the only unconfounded reading --------------------------------
+
+  // The second confound, which fooled this analysis as badly as the first.
+  // ns.grow adds `threads` dollars BEFORE multiplying, so on a drained server the
+  // additive term dominates: $1 with 1393 grow threads reports ~x9400 while the
+  // server gained $9k. A live run reported 259/259 batches "restoring", median
+  // x9361, with the target sitting at $9.36k of $499.68b.
+  "grow multipliers go useless on a drained server, money does not": async () => {
+    const { verify } = await loadScripts();
+    const max = 499.68e9;
+    const steal = 0.8437;
+
+    // A collapsing volley: each batch finds the server lower than the last.
+    const outcomes = [];
+    let money = max;
+    for (let i = 0; i < 50; i++) {
+      outcomes.push({ hackHits: 1, growThreads: 1393, growMult: 9361, stolen: money * steal });
+      money *= 0.2;
+    }
+
+    // restoreStats sees nothing wrong - every batch cleared the bar by miles.
+    const rs = verify.restoreStats(outcomes, 1 / (1 - steal));
+    assert(rs.restored === 50, "the multiplier reading calls a collapse healthy");
+
+    // The money trail calls it what it is.
+    const t = verify.moneyTrail(outcomes, steal, max);
+    assert(t.samples === 50, `expected 50 samples, got ${t.samples}`);
+    assertClose(t.first, 1, 1e-9, "the first batch found the server at max");
+    assert(t.last < 1e-6, `the last batch should find it empty, got ${t.last}`);
+    assert(t.heldAtMax === 1, `only the opening batch found it full, got ${t.heldAtMax}`);
+  },
+
+  "moneyTrail skips batches that carry no information": async () => {
+    const { verify } = await loadScripts();
+    const t = verify.moneyTrail([
+      { hackHits: 0, stolen: 0 },              // hack missed: says nothing
+      { hackHits: 1, stolen: 500 },
+      { hackHits: 1, stolen: 250 },
+    ], 0.5, 1000);
+    assert(t.samples === 2, `expected 2 samples, got ${t.samples}`);
+    assertClose(t.first, 1, 1e-9, "stolen 500 at 50% steal means the server held 1000");
+    assertClose(t.last, 0.5, 1e-9, "stolen 250 at 50% steal means the server held 500");
+  },
+
+  // --- the derived grow margin ---------------------------------------------
+
+  // A FIXED margin buys drift protection that collapses as steal rises, which is
+  // why a volley at 84.37% opened healthy and then drained to $9.36k of $499.68b.
+  "growMarginFor buys the same drift tolerance at every steal": async () => {
+    const { config } = await loadScripts();
+    const D = config.HACK_DRIFT_TOLERANCE;
+
+    for (const steal of [0.1, 0.3, 0.5, 0.7, 0.8437]) {
+      const margin = config.growMarginFor(steal);
+      // A batch that steals D more than planned must still break even.
+      const actual = steal * (1 + D);
+      const net = (1 - actual) * (margin / (1 - steal));
+      assertClose(net, 1, 1e-9, `steal ${steal} should break even at exactly ${D} drift`);
+    }
+
+    // And the fixed margin it replaces does not.
+    const fixed = config.GROW_MARGIN;
+    const toleranceOf = (s) => ((fixed - 1) / fixed) * ((1 - s) / s);
+    assert(toleranceOf(0.8437) < 0.01,
+      `GROW_MARGIN 1.05 should be under 1% at 84% steal, got ${toleranceOf(0.8437)}`);
+    assert(config.growMarginFor(0.8437) > fixed,
+      "the derived margin must be larger than the fixed one where it mattered");
+  },
+
+  "growMarginFor refuses a steal no margin can save": async () => {
+    const { config } = await loadScripts();
+    const D = config.HACK_DRIFT_TOLERANCE;
+    // Past 1/(1+D) the drifted hack takes everything, and no grow sizing helps.
+    assert(!Number.isFinite(config.growMarginFor(1 / (1 + D))),
+      "the break-even steal must be rejected, not returned as a number");
+    assert(Number.isFinite(config.growMarginFor(1 / (1 + D) - 0.01)),
+      "just below it must still be survivable");
+  },
+
+  "the derived margin costs little in grow threads": async () => {
+    const { config } = await loadScripts();
+    const steal = 0.8437;
+    // Threads scale with the LOG of the multiplier, so a much bigger margin is a
+    // small thread increase - which is what makes this affordable at all.
+    const need = 1 / (1 - steal);
+    const oldThreads = Math.log(need * config.GROW_MARGIN);
+    const newThreads = Math.log(need * config.growMarginFor(steal));
+    assert(newThreads / oldThreads < 1.25,
+      `expected under 25% more grow threads, got ${((newThreads / oldThreads - 1) * 100).toFixed(1)}%`);
+  },
 };

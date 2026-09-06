@@ -4,6 +4,8 @@ import {
   SPACER_MS,
   BATCH_SPACING_MS,
   GROW_MARGIN,
+  growMarginFor,
+  HACK_DRIFT_TOLERANCE,
   HACK_CONTIGUOUS,
   HOME_RESERVE_GB,
   REPORT_PORT,
@@ -19,7 +21,7 @@ import {
   OP_WORKER,
 } from "./config.js";
 import {
-  analyzeBatch, batchOk, batchOutcome, restoreStats, crossBatchOrder,
+  analyzeBatch, batchOk, batchOutcome, restoreStats, crossBatchOrder, moneyTrail,
 } from "./verify.js";
 import {
   prepGroup, isPrepped, pickTarget, rankTargets, buildWorkerPool, workerRam,
@@ -138,9 +140,19 @@ export function planThreadsForHack(math, snap, hack, perThread, consts) {
   //
   // Overshooting is free: the game clamps money at maxMoney, so grow threads
   // beyond what is needed do nothing rather than something harmful.
+  //
+  // The margin is DERIVED from the steal, not fixed. A fixed one buys drift
+  // protection that collapses as steal rises - GROW_MARGIN 1.05 is worth 19%
+  // at 20% steal but 0.88% at 84%, and a measured volley at 84.37% opened
+  // healthy and then collapsed to $9.36k of $499.68b once level climbed past
+  // that. growMarginFor solves for the same tolerance at every steal.
+  const margin = growMarginFor(steal);
+  if (!Number.isFinite(margin)) {
+    return { error: `steal ${steal} cannot survive HACK_DRIFT_TOLERANCE` };
+  }
   const afterHack = snap.maxMoney * (1 - steal);
   const grow = Math.max(1, Math.ceil(
-    math.growThreadsToRestore(snap, afterHack / GROW_MARGIN, snap.maxMoney, snap.minSec),
+    math.growThreadsToRestore(snap, afterHack / margin, snap.maxMoney, snap.minSec),
   ));
 
   const weaken2 = Math.max(1, Math.ceil((consts.growSec * grow) / consts.weakenSec));
@@ -525,7 +537,7 @@ function measureVolley(byBatch, expected, wantGrowMult, breakEvenMult) {
   if (!samples.length) {
     return { stolen, weakened, unmeasurable, hackHits, hackTries, samples: 0,
              growMean: 0, growFirst: 0, growLast: 0, growRatio: 0,
-             restore: { hacked: 0, restored: 0, median: 0, worst: 0 } };
+             restore: { hacked: 0, restored: 0, median: 0, worst: 0 }, outcomes: [] };
   }
 
   /*
@@ -562,6 +574,7 @@ function measureVolley(byBatch, expected, wantGrowMult, breakEvenMult) {
     // The clamp-free reading. wantGrowMult carries GROW_MARGIN, but a batch can
     // never report more than the clamp allows, so break-even is the yardstick.
     restore: restoreStats(outcomes, breakEvenMult),
+    outcomes,
   };
 }
 
@@ -812,7 +825,8 @@ export async function run(ns, math) {
       ns.print(
         `           [v] plan:  steal ${(th.steal * 100).toFixed(2)}% of ${fmtMoney(m.maxMoney)} = ` +
           `${fmtMoney(th.hackAmount)}/batch, grow must return x${(1 / (1 - th.steal)).toFixed(4)} ` +
-          `(GROW_MARGIN ${GROW_MARGIN} sized ${th.grow}t for it)`,
+          `(margin x${growMarginFor(th.steal).toFixed(3)} for ${(HACK_DRIFT_TOLERANCE * 100).toFixed(0)}% ` +
+          `hack drift sized ${th.grow}t for it)`,
       );
       ns.print(
         `           [v] state: money ${fmtMoney(m.money)}/${fmtMoney(m.maxMoney)}, ` +
@@ -898,6 +912,10 @@ export async function run(ns, math) {
     // A foreign hack landing inside this batch's hack-to-grow gap means two
     // steals answered by one restore, and nothing else measured here can see it.
     const xb = crossBatchOrder(byBatch);
+    // The only clamp-free, additive-free reading of the server's balance:
+    // ns.hack takes a known fraction of whatever is present and reports what
+    // it took, so stolen/steal IS the money at that instant.
+    const trail = moneyTrail(vol.outcomes, th.steal, m.maxMoney);
     const measured = vol.unmeasurable === 0 && vol.samples > 0;
     totalEarned += measured ? vol.stolen : j.ok * th.hackAmount;
 
@@ -963,45 +981,48 @@ export async function run(ns, math) {
     // The real test is whether the server came back. If grow were genuinely
     // undersized the money would not be at max, so gate on that.
     const restored = isPrepped(after);
-    const rs = vol.restore;
-    const breakEven = 1 / (1 - th.steal);
 
-    // Judge on the batches whose hack SUCCEEDED, never on the mean of every
-    // batch's multiplier. A batch whose hack missed starts at max money and its
-    // grow clamps to ~1.0, so at a 60.8% hack chance a PERFECT volley averages
-    // 6.44^0.608 = x3.10 - and a live run reporting x3.55 was warned it was 45%
-    // short and told to raise GROW_MARGIN, which would have been wrong.
-    if (!restored && rs.hacked > 0) {
-      const shortfall = rs.hacked - rs.restored;
-      if (shortfall > 0) {
+    // Judge on MONEY, never on grow multipliers. Both multiplier readings that
+    // came before this were confounded and both produced a confident wrong
+    // answer: the mean is dragged down by missed-hack batches clamping at max,
+    // and restoreStats is dragged UP by ns.grow's additive term, which reports
+    // ~x9400 for a batch that took a drained server from $1 to $9k. The trail
+    // below is stolen/steal - the server's actual balance at a known instant.
+    if (!restored && trail.samples > 0) {
+      const held = (trail.heldAtMax / trail.samples) * 100;
+      ns.print(
+        `           WARN: the target did NOT return to max. Money at hack time: ` +
+          `first ${(trail.first * 100).toFixed(1)}% -> last ${(trail.last * 100).toFixed(1)}% ` +
+          `of max (median ${(trail.median * 100).toFixed(1)}%, low ` +
+          `${(trail.min * 100).toFixed(2)}%, ${held.toFixed(0)}% of batches found it full).`,
+      );
+
+      if (xb.collided > 0) {
         ns.print(
-          `           WARN: ${shortfall}/${rs.hacked} hacked batches failed to restore ` +
-            `x${breakEven.toFixed(4)} (median x${rs.median.toFixed(4)}, worst ` +
-            `x${rs.worst.toFixed(4)}) and the target did NOT return to max. Grow is ` +
-            `genuinely short - raise GROW_MARGIN or lower the steal fraction.`,
+          `           WARN: ${xb.collided}/${xb.batches} batches were hacked again before ` +
+            `their own grow landed (${xb.intrusions} intrusions, worst ${xb.worst} in one ` +
+            `gap) - two steals answered by one restore. Batch spacing ` +
+            `${timing.spacing}ms is too tight for a lateness spread of ` +
+            `${j.latenessSpread.toFixed(1)}ms.`,
         );
-      } else {
-        // Every hacked batch restored, yet the money still fell. Grow is not the
-        // culprit and raising GROW_MARGIN would not help; say so rather than
-        // blaming the nearest number.
+      } else if (trail.first >= 0.99 && trail.last < 0.5) {
+        // Opened at max and ended drained with ordering clean: the batches that
+        // landed late stole more than they were sized to give back. That is hack
+        // effectiveness rising under the volley, which HACK_DRIFT_TOLERANCE is
+        // what covers.
         ns.print(
-          `           WARN: the target did NOT return to max, but all ${rs.hacked} hacked ` +
-            `batches restored x${breakEven.toFixed(4)}. Grow is NOT the shortfall.`,
+          `           WARN: it opened at max and drained with ordering clean - the late ` +
+            `batches stole more than their grow was sized for. Raise ` +
+            `HACK_DRIFT_TOLERANCE (now ${(HACK_DRIFT_TOLERANCE * 100).toFixed(0)}%, margin ` +
+            `x${growMarginFor(th.steal).toFixed(3)} at ${(th.steal * 100).toFixed(2)}% steal) ` +
+            `or lower MAX_STEAL_FRACTION.`,
         );
-        if (xb.collided > 0) {
-          ns.print(
-            `           WARN: ${xb.collided}/${xb.batches} batches were hacked again before ` +
-              `their own grow landed (${xb.intrusions} intrusions, worst ${xb.worst} in one ` +
-              `gap). Two steals answered by one restore - that is the drain. Batch spacing ` +
-              `${timing.spacing}ms is too tight for a lateness spread of ` +
-              `${j.latenessSpread.toFixed(1)}ms.`,
-          );
-        } else {
-          ns.print(
-            `           WARN: ordering across batches was clean too - look at security ` +
-              `under the volley or at batches lost at launch.`,
-          );
-        }
+      } else if (trail.first < 0.99) {
+        ns.print(
+          `           WARN: the FIRST batch already found only ` +
+            `${(trail.first * 100).toFixed(1)}% of max - the volley did not start from a ` +
+            `prepped server. Suspect a previous volley's workers still in flight.`,
+        );
       }
     }
 
@@ -1010,6 +1031,11 @@ export async function run(ns, math) {
         `           [v] take: ${measured ? fmtMoney(vol.stolen) : "unmeasurable"} measured vs ` +
           `${fmtMoney(j.ok * th.hackAmount)} planned` +
           (vol.unmeasurable ? `  (${vol.unmeasurable} batch(es) had stale workers)` : ""),
+      );
+      ns.print(
+        `           [v] money at hack: first ${(trail.first * 100).toFixed(1)}%  ` +
+          `median ${(trail.median * 100).toFixed(1)}%  last ${(trail.last * 100).toFixed(1)}%  ` +
+          `low ${(trail.min * 100).toFixed(2)}%  (${trail.heldAtMax}/${trail.samples} found it full)`,
       );
       ns.print(
         `           [v] cross-batch: ${xb.collided}/${xb.batches} batches hacked again ` +

@@ -243,3 +243,60 @@ export function crossBatchOrder(byBatch) {
 
   return { batches: rows.length, collided, intrusions, worst };
 }
+
+/**
+ * Reconstruct the server's money from what the hacks actually took.
+ *
+ * Every multiplier-based reading of a volley is confounded, and the second one
+ * fooled this analysis as badly as the first. `ns.grow` adds `threads` dollars
+ * BEFORE multiplying, so on a drained server the additive term dominates: money
+ * of $1 with 1393 grow threads reports a multiplier near x9400 while the server
+ * gained $9k. A live run showed exactly that - `restoreStats` reported 259/259
+ * batches restoring, median x9361, while the target sat at $9.36k of $499.68b.
+ * Multipliers are scale-free; the server is not.
+ *
+ * Money is not scale-free, and the reports already carry it. `ns.hack` returns
+ * the money it took, and it takes a known fraction of whatever is present, so
+ *
+ *     money at that batch's hack = stolen / steal
+ *
+ * That is a direct reading of the server's balance at a known instant, immune to
+ * both the max-money clamp and the additive term. Batches whose hack missed
+ * carry no information and are skipped.
+ *
+ * Pure arithmetic over reports already collected - 0 GB.
+ *
+ * @param {object[]} outcomes  batchOutcome() results, in launch order
+ * @param {number} steal       the planned fraction each hack takes
+ * @param {number} maxMoney    for expressing the trail as a fraction
+ * @returns {{samples: number, first: number, median: number, last: number,
+ *            min: number, heldAtMax: number}} money as a FRACTION of maxMoney;
+ *          heldAtMax counts samples at or above 99% of max
+ */
+export function moneyTrail(outcomes, steal, maxMoney) {
+  if (!(steal > 0) || !(maxMoney > 0)) {
+    return { samples: 0, first: 0, median: 0, last: 0, min: 0, heldAtMax: 0 };
+  }
+
+  const trail = [];
+  for (const o of outcomes) {
+    if (o.hackHits > 0 && o.stolen > 0) trail.push(o.stolen / steal / maxMoney);
+  }
+  if (!trail.length) {
+    return { samples: 0, first: 0, median: 0, last: 0, min: 0, heldAtMax: 0 };
+  }
+
+  // Median over a SORTED copy; the trail itself must stay in launch order so
+  // first and last mean what they say.
+  const sorted = [...trail].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+
+  return {
+    samples: trail.length,
+    first: trail[0],
+    median: sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2,
+    last: trail[trail.length - 1],
+    min: sorted[0],
+    heldAtMax: trail.filter((m) => m >= 0.99).length,
+  };
+}
