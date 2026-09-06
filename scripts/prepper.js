@@ -3,6 +3,8 @@ import {
   SPACER_MS,
   GROW_MARGIN,
   PREP_FANOUT,
+  POOL_WAIT_MS,
+  POOL_WAIT_CYCLES,
   HOME_RESERVE_GB,
   REPORT_PORT,
   WORKER_FILES,
@@ -453,12 +455,15 @@ export async function prepGroup(ns, host, opts = {}) {
     log = (s) => ns.print(s),
     extras = () => [],
     fanout = PREP_FANOUT,
+    poolWait = POOL_WAIT_CYCLES,
     verbose = false,
   } = opts;
 
   if (!math) {
     return { ok: false, cycles: 0, reason: "no math implementation supplied", m: null };
   }
+
+  let starved = 0;
 
   for (let cycle = 1; cycle <= maxCycles; cycle++) {
     // Rebuild every cycle: hosts get rooted, RAM gets bought, other scripts
@@ -482,17 +487,38 @@ export async function prepGroup(ns, host, opts = {}) {
       // own thread count. Quote the placeable thread count too - that is the
       // number that actually decided this.
       const smallest = Math.min(ram.grow, ram.weaken);
+      const detail =
+        `${fmtRam(pool.freeRam)} free across the pool but 0 threads placeable at ` +
+        `${fmtRam(smallest)} each (largest single-host gap holds ` +
+        `${pool.maxContiguousThreadsFor(smallest)})`;
+
+      // A full pool is normally someone else's workers finishing, not a real
+      // failure - see POOL_WAIT_CYCLES for the manager-swap case that made this
+      // fatal in practice. Wait it out.
+      if (starved < poolWait) {
+        starved++;
+        // Once a minute at the default interval: silence for fifteen minutes
+        // would be indistinguishable from a hang.
+        if (starved === 1 || starved % 6 === 0) {
+          log(`waiting for RAM (${starved}/${poolWait}): ${detail}`);
+        }
+        await ns.sleep(POOL_WAIT_MS);
+        // This cycle did no work, so it must not spend the prep budget -
+        // otherwise a busy pool fails the prep by simply exhausting maxCycles.
+        // Bounded by the starved counter above, which only ever rises here.
+        cycle--;
+        continue;
+      }
+
       return {
         ok: false,
         cycles: cycle - 1,
-        reason:
-          `nothing fits - ${fmtRam(pool.freeRam)} free across the pool but ` +
-          `0 threads placeable at ${fmtRam(smallest)} each ` +
-          `(largest single-host gap holds ${pool.maxContiguousThreadsFor(smallest)}). ` +
-          `Free RAM or buy more`,
+        reason: `nothing fits - ${detail}. Free RAM or buy more`,
         m,
       };
     }
+    // Progress: any later stall gets a fresh waiting budget.
+    starved = 0;
 
     // Op times come from the snapshot already taken above, not a fresh ns
     // call - see launchPrepWave for why getWeakenTime/getGrowTime cannot be

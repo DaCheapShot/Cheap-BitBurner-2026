@@ -310,4 +310,76 @@ export const tests = {
     assert(Object.values(ns._used).every((v) => Math.abs(v) < 1e-9),
       `RAM leaked: ${JSON.stringify(ns._used)}`);
   },
+
+  // --- a full pool is transient, not fatal --------------------------------
+
+  // The case that forced this: boot swaps manager builds when Formulas.exe is
+  // gained or lost, and the outgoing manager's volley keeps running. The
+  // incoming manager planned against a pool full of those workers, found
+  // nothing fit, and STOPPED - so boot restarted it a tick later into the same
+  // wall, once a minute until the workers drained.
+  "prep waits out a full pool instead of failing": async () => {
+    const { prepper, mathAnalyze } = await loadScripts();
+    const ns = fleetNs();
+    assert(mathAnalyze.prepare(ns).ok, "prepare failed");
+
+    // Occupy every host, as a killed manager's batches in flight would.
+    for (const h of Object.keys(ns._hosts)) ns._used[h] = ns._hosts[h];
+
+    let waits = 0;
+    const sleep = ns.sleep;
+    ns.sleep = (ms) => {
+      // Free the pool partway through, the way workers finishing would.
+      if (++waits === 3) for (const h of Object.keys(ns._hosts)) ns._used[h] = 0;
+      return sleep(ms);
+    };
+
+    const res = await prepper.prepGroup(ns, "rich", {
+      math: mathAnalyze, maxCycles: 2, log: () => {}, poolWait: 30,
+    });
+
+    assert(waits >= 3, `should have waited for RAM, slept ${waits} time(s)`);
+    assert(ns._execs.length > 0, "should have launched once the pool freed");
+    assert(res.reason !== undefined && !/nothing fits/.test(res.reason),
+      `should not report a full pool as failure, got: ${res.reason}`);
+  },
+
+  // Waiting cycles must not spend the prep budget, or a busy pool would fail the
+  // prep by simply exhausting maxCycles - the same outcome by a slower route.
+  "waiting for RAM does not consume the cycle budget": async () => {
+    const { prepper, mathAnalyze } = await loadScripts();
+    const ns = fleetNs();
+    assert(mathAnalyze.prepare(ns).ok, "prepare failed");
+    for (const h of Object.keys(ns._hosts)) ns._used[h] = ns._hosts[h];
+
+    let waits = 0;
+    const sleep = ns.sleep;
+    ns.sleep = (ms) => {
+      if (++waits === 5) for (const h of Object.keys(ns._hosts)) ns._used[h] = 0;
+      return sleep(ms);
+    };
+
+    // One cycle of budget, but five waits before any of it can be used.
+    await prepper.prepGroup(ns, "rich", {
+      math: mathAnalyze, maxCycles: 1, log: () => {}, poolWait: 30,
+    });
+    assert(ns._execs.length > 0,
+      "the single cycle should have survived five waits and still launched");
+  },
+
+  // The wait is bounded: a pool that is empty rather than busy - no rooted
+  // hosts, or workers never deployed - is a real failure worth surfacing.
+  "the wait is bounded and still reports a genuinely empty pool": async () => {
+    const { prepper, mathAnalyze } = await loadScripts();
+    const ns = fleetNs();
+    assert(mathAnalyze.prepare(ns).ok, "prepare failed");
+    for (const h of Object.keys(ns._hosts)) ns._used[h] = ns._hosts[h];
+
+    const res = await prepper.prepGroup(ns, "rich", {
+      math: mathAnalyze, maxCycles: 5, log: () => {}, poolWait: 3,
+    });
+    assert(res.ok === false, "an ever-full pool must eventually fail");
+    assert(/nothing fits/.test(res.reason), `expected a nothing-fits reason, got: ${res.reason}`);
+    assert(ns._execs.length === 0, "nothing should have been launched");
+  },
 };

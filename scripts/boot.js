@@ -1,6 +1,6 @@
 import { loadCalibration, calibAgeMs } from "./calib.js";
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
-         FORMULAS_PROGRAM, FORMULAS_MARKER } from "./config.js";
+         FORMULAS_PROGRAM, FORMULAS_MARKER, WORKER_LIST } from "./config.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -36,7 +36,8 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
  *         run scripts/boot.js --no-formulas       (always use the analyze build)
  *         run scripts/boot.js --interval 30000
  *
- * RAM: 1.60 base + run 1.00 + ps 0.20 + kill 0.50 + fileExists 0.10 = 3.40 GB
+ * RAM: 1.60 base + run 1.00 + ps 0.20 + kill 0.50 + fileExists 0.10
+ *      + scan 0.20 (killOrphanWorkers must reach the whole network) = 3.60 GB
  * (calib.js is 0 GB, ns.read/ns.write are 0 GB, and root.js is imported only
  * for the marker path constant - a plain string, so it adds nothing.)
  */
@@ -105,6 +106,66 @@ function killDuplicates(ns, file, log) {
 }
 
 /**
+ * Every host reachable from home, breadth first.
+ *
+ * A deliberate fourth copy of this walk rather than an import of ram.js's
+ * ServerPool.scanAll: importing it would drag getServerMaxRam, getServerUsedRam
+ * and hasRootAccess along with ns.scan and cost boot 0.35GB for a list of
+ * names. The walk itself is four lines.
+ */
+function reachableHosts(ns) {
+  const seen = new Set(["home"]);
+  const queue = ["home"];
+  for (let i = 0; i < queue.length; i++) {
+    for (const host of ns.scan(queue[i])) if (!seen.has(host)) { seen.add(host); queue.push(host); }
+  }
+  return queue;
+}
+
+/**
+ * Kill every worker still running anywhere on the network.
+ *
+ * Call ONLY when no manager survives to own them. A manager that is killed
+ * mid-volley leaves hundreds of batches in flight, and they do two kinds of
+ * damage: they hold the RAM the replacement needs - a live swap left 2.7TB
+ * reserved against a target the new manager then could not prep - and they keep
+ * hacking and growing that target on a plan nobody owns any more, so the new
+ * manager's first snapshot measures a server being churned by ghosts.
+ *
+ * Killing them costs nothing that was not already lost. ns.hack credits money
+ * the instant it lands, so a killed grow forfeits only the restore - which prep
+ * performs anyway, and which the new manager was going to have to perform
+ * regardless. One prep cycle beats a weaken window of thrash.
+ *
+ * Workers are identified by filename, so anything else running on the network
+ * is left alone. ps reports paths without a leading slash while WORKER_LIST
+ * carries one, hence normPath on both sides.
+ */
+function killOrphanWorkers(ns, log) {
+  const workers = new Set(WORKER_LIST.map(normPath));
+  let killed = 0;
+  let threads = 0;
+
+  for (const host of reachableHosts(ns)) {
+    for (const p of ns.ps(host)) {
+      if (!workers.has(normPath(p.filename))) continue;
+      if (ns.kill(p.pid)) {
+        killed++;
+        threads += p.threads;
+      }
+    }
+  }
+
+  if (killed > 0) {
+    log(
+      `killed ${killed} orphaned worker(s), ${threads} thread(s) - they belonged to the ` +
+        `manager just stopped and would have held its RAM for a whole weaken window`,
+    );
+  }
+  return killed;
+}
+
+/**
  * Ensure exactly one manager runs, and that it is the right one.
  *
  * The two managers are ALTERNATIVES, not separate services. killDuplicates only
@@ -116,11 +177,21 @@ function killDuplicates(ns, file, log) {
  * @returns {boolean} true if a manager is running when this returns
  */
 function ensureOneManager(ns, wanted, other, args, log) {
+  let swapped = false;
   for (const p of instancesOf(ns, other)) {
     ns.kill(p.pid);
     log(`stopped ${other} - switching to ${wanted}`);
+    swapped = true;
   }
   killDuplicates(ns, wanted, log);
+
+  // Only after a real swap, and only once nothing of either build survives:
+  // every worker still running then belongs to the manager just killed. Doing
+  // this whenever a manager is killed would be wrong - killDuplicates keeps a
+  // survivor whose own volley is in flight, and its workers are indistinguishable
+  // from the dead one's without reading batch ids out of their argv.
+  if (swapped && !isUp(ns, wanted)) killOrphanWorkers(ns, log);
+
   return isUp(ns, wanted) || ensureService(ns, wanted, args, log);
 }
 
