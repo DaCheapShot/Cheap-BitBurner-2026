@@ -146,7 +146,7 @@ export function planThreadsForHack(math, snap, hack, perThread, consts) {
   // at 20% steal but 0.88% at 84%, and a measured volley at 84.37% opened
   // healthy and then collapsed to $9.36k of $499.68b once level climbed past
   // that. growMarginFor solves for the same tolerance at every steal.
-  const margin = growMarginFor(steal);
+  const margin = growMarginFor(steal, consts.drift);
   if (!Number.isFinite(margin)) {
     return { error: `steal ${steal} cannot survive HACK_DRIFT_TOLERANCE` };
   }
@@ -669,6 +669,11 @@ export async function run(ns, math) {
   // state carried between cycles, along with the strike count - everything else
   // is re-measured, which is what makes the loop self-correcting.
   let capScale = 1;
+  // What the hack fraction ACTUALLY did across the last volley. Seeded from the
+  // constant and then measured, because the right value is a property of how
+  // fast this player is levelling, not something a constant can know. Same
+  // recompute-every-cycle principle as everything else in this loop.
+  let drift = HACK_DRIFT_TOLERANCE;
 
   while (true) {
     cycle++;
@@ -754,6 +759,7 @@ export async function run(ns, math) {
       hackSec: math.securityPerHackThread(m),
       growSec: math.securityPerGrowThread(m),
       weakenSec: math.securityPerWeakenThread(m),
+      drift,
     };
     const perThread = math.hackFractionPerThread(m);
     if (!(perThread > 0)) {
@@ -900,6 +906,21 @@ export async function run(ns, math) {
     const j = judgeVolley(byBatch, expected, timing.s);
     const after = math.snapshot(ns, target);
 
+    // The drift measurement, free: hackFractionPerThread comes from the
+    // snapshot already taken, and both math backends already price it.
+    //
+    // There is a hard ceiling here that no grow margin can lift. A batch that
+    // steals s(1+D) leaves 1 - s(1+D), and once that is zero the server is
+    // empty whatever grow does - so drift above (1-s)/s is unsurvivable at ANY
+    // margin. At 83.90% steal that ceiling is 19.2%. growMarginFor returns
+    // Infinity past it and the steal search stops, which is what pulls the
+    // steal down to something the measured drift can actually survive.
+    const perThreadAfter = math.hackFractionPerThread(after);
+    const measuredDrift = perThread > 0 ? Math.max(0, perThreadAfter / perThread - 1) : 0;
+    // Smoothed, and floored at the constant so a quiet cycle cannot leave the
+    // next volley unprotected. Falls back toward the floor as levelling slows.
+    drift = Math.max(HACK_DRIFT_TOLERANCE, 0.5 * drift + 0.5 * measuredDrift);
+
     // MEASURED, not planned. The old figure was `cleanBatches * plannedTake`,
     // which prints the same whether every hack succeeded or every hack stole
     // nothing - a volley that drained its target to $6.81k still reported
@@ -1031,6 +1052,13 @@ export async function run(ns, math) {
         `           [v] take: ${measured ? fmtMoney(vol.stolen) : "unmeasurable"} measured vs ` +
           `${fmtMoney(j.ok * th.hackAmount)} planned` +
           (vol.unmeasurable ? `  (${vol.unmeasurable} batch(es) had stale workers)` : ""),
+      );
+      ns.print(
+        `           [v] drift: hack fraction/thread ${perThread.toExponential(3)} -> ` +
+          `${perThreadAfter.toExponential(3)} (${measuredDrift >= 0 ? "+" : ""}` +
+          `${(measuredDrift * 100).toFixed(1)}% across the window)  next volley plans for ` +
+          `${(drift * 100).toFixed(1)}%, which caps steal at ` +
+          `${(100 / (1 + drift)).toFixed(1)}%`,
       );
       ns.print(
         `           [v] money at hack: first ${(trail.first * 100).toFixed(1)}%  ` +

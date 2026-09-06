@@ -328,4 +328,39 @@ export const tests = {
     assert(newThreads / oldThreads < 1.25,
       `expected under 25% more grow threads, got ${((newThreads / oldThreads - 1) * 100).toFixed(1)}%`);
   },
+
+  // The ceiling no grow margin can lift. A batch that steals s(1+D) leaves
+  // 1 - s(1+D); once that is zero the server is empty whatever grow does. So
+  // drift above (1-s)/s is unsurvivable at ANY margin, and the only remedy is a
+  // smaller steal. At the 83.90% a live volley ran, that ceiling is 19.2% - and
+  // hack effectiveness measured 1.78x across one cycle.
+  "drift above (1-steal)/steal is unsurvivable at any margin": async () => {
+    const { config } = await loadScripts();
+    for (const steal of [0.3, 0.5, 0.839]) {
+      const ceiling = (1 - steal) / steal;
+      assert(Number.isFinite(config.growMarginFor(steal, ceiling * 0.99)),
+        `just under the ceiling must still be survivable at steal ${steal}`);
+      assert(!Number.isFinite(config.growMarginFor(steal, ceiling * 1.01)),
+        `past the ceiling must be refused at steal ${steal}, not priced`);
+    }
+    // The ceiling at the steal that drained the live run.
+    assertClose((1 - 0.839) / 0.839, 0.19190, 1e-4, "83.9% steal survives ~19% drift, no more");
+  },
+
+  // Which is what makes the planner self-limiting: feed it a large measured
+  // drift and the steal search runs out of survivable candidates long before
+  // MAX_STEAL_FRACTION.
+  "a large measured drift pulls the survivable steal down on its own": async () => {
+    const { config } = await loadScripts();
+    const survivable = (D) => {
+      let best = 0;
+      for (let s = 0.01; s < 0.99; s += 0.01) if (Number.isFinite(config.growMarginFor(s, D))) best = s;
+      return best;
+    };
+    assertClose(survivable(0.05), 0.95, 0.011, "5% drift allows steal up to ~95%");
+    assert(survivable(0.78) < 0.57,
+      `78% drift must cap steal near 56%, got ${survivable(0.78)}`);
+    assert(survivable(0.78) < survivable(0.20),
+      "more drift must always mean less steal");
+  },
 };
