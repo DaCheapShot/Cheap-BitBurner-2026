@@ -44,7 +44,7 @@ const BUDGET_FRACTION = 0.10;
 const NAME_PREFIX = "cheapserv-";
 
 /** Smallest server worth owning. Below 2GB nothing useful runs. */
-const MIN_RAM = 2;
+const MIN_RAM = 8;
 
 const DEFAULT_LOOP_MS = 60000;
 
