@@ -22,11 +22,19 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER } from "./config.js";
  * scripts/boot.js notices and runs deploy.js - which keeps ns.scp (0.60 GB) out
  * of this script. Upgrades keep their files, so they need nothing either way.
  *
+ * Reports through ns.print only, and never opens its own tail. scripts/boot.js
+ * runs this as a background service for the whole session, so a tail window it
+ * opened for itself would sit in the way permanently, and every purchase would
+ * also land in the terminal. Read it on demand with `tail scripts/cloud.js`.
+ * The one exception is the --budget usage error, which has to reach whoever
+ * typed the bad argument.
+ *
  * Usage:  run scripts/cloud.js                 one action, then exit
  *         run scripts/cloud.js --dry-run       show the plan, buy nothing
  *         run scripts/cloud.js --loop          keep going as money accumulates
  *         run scripts/cloud.js --loop 30000    ...checking every 30s
  *         run scripts/cloud.js --budget 0.25   spend up to 25% instead of 10%
+ *         tail scripts/cloud.js                watch what it has been doing
  *
  * RAM: 1.60 base
  *      + cloud.getServerNames 1.05 + purchaseServer 2.25 + upgradeServer 0.25
@@ -44,7 +52,7 @@ const BUDGET_FRACTION = 0.10;
 const NAME_PREFIX = "cheapserv-";
 
 /** Smallest server worth owning. Below 2GB nothing useful runs. */
-const MIN_RAM = 2;
+const MIN_RAM = 8;
 
 const DEFAULT_LOOP_MS = 60000;
 
@@ -251,11 +259,10 @@ export async function main(ns) {
   if (!loop) {
     const r = step(ns, budgetFraction, dryRun);
     if (r.done && !dryRun) ns.write(CLOUD_DONE_MARKER, `${Date.now()}\n${r.msg}`, "w");
-    ns.tprint(`cloud: ${r.msg}`);
+    ns.print(`cloud: ${r.msg}`);
     return;
   }
 
-  ns.ui.openTail();
   ns.print(
     `cloud loop: up to ${(budgetFraction * 100).toFixed(0)}% of money per action, ` +
       `checking every ${(loopMs / 1000).toFixed(0)}s${dryRun ? " [DRY RUN]" : ""}`,
@@ -276,7 +283,7 @@ export async function main(ns) {
       // Nothing left to buy or upgrade. Stamp it so boot.js stops relaunching
       // this every tick just to watch it exit again.
       if (!dryRun) ns.write(CLOUD_DONE_MARKER, `${Date.now()}\n${r.msg}`, "w");
-      ns.tprint(`cloud: ${r.msg}`);
+      ns.print(`cloud: ${r.msg}`);
       return;
     }
 

@@ -1,5 +1,6 @@
 import { loadCalibration, calibAgeMs } from "./calib.js";
-import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS } from "./config.js";
+import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
+         FORMULAS_PROGRAM, FORMULAS_MARKER } from "./config.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -7,10 +8,15 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS } from "./config.js";
  * Each tick, in order:
  *   1. root.js      - open ports and NUKE anything new
  *   2. deploy.js    - push workers, but only if root.js actually rooted something
- *   3. calibrate.js - only when the cache is missing or stale
+ *   3. calibrate.js - only when the cache is missing or stale (skipped entirely
+ *                     when Formulas.exe is owned - see step 3 below)
  *   4. cloud.js     - kept alive as a service (buys and upgrades servers), but
  *                     only until the fleet is maxed; see CLOUD_DONE_MARKER
- *   5. manager.js   - kept alive as a service (the volley loop)
+ *   5. manager      - kept alive as a service (the volley loop). Two interchangeable
+ *                     builds exist - manager.js (*Analyze API, always available)
+ *                     and manager-formulas.js (ns.formulas, needs Formulas.exe,
+ *                     more accurate) - and boot picks whichever is owned, EVERY
+ *                     tick, since Formulas.exe can be bought or lost at any time.
  *
  * TRANSIENTS RUN ONE AT A TIME, and the tick waits for each to exit before
  * starting the next. They all run on home, and the manager reserves everything
@@ -21,23 +27,26 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS } from "./config.js";
  * Services are identified by filename in ns.ps("home"), so a manager you
  * started by hand is adopted rather than duplicated. Two managers would be
  * actively harmful: each would believe it owned the pool and the report port.
+ * The same is true of the two manager BUILDS - see ensureOneManager.
  *
  * Usage:  run scripts/boot.js
  *         run scripts/boot.js --target joesguns   (pin the manager's target)
  *         run scripts/boot.js --once              (one pass, then exit)
  *         run scripts/boot.js --no-cloud          (don't buy servers)
+ *         run scripts/boot.js --no-formulas       (always use the analyze build)
  *         run scripts/boot.js --interval 30000
  *
- * RAM: 1.60 base + run 1.00 + ps 0.20 + kill 0.50 = 3.30 GB
- * (calib.js is 0 GB, ns.read is 0 GB, and root.js is imported only for the
- * marker path constant - a plain string, so it adds nothing.)
+ * RAM: 1.60 base + run 1.00 + ps 0.20 + kill 0.50 + fileExists 0.10 = 3.40 GB
+ * (calib.js is 0 GB, ns.read/ns.write are 0 GB, and root.js is imported only
+ * for the marker path constant - a plain string, so it adds nothing.)
  */
 
 const ROOT = "/scripts/root.js";
 const DEPLOY = "/scripts/deploy.js";
 const CALIBRATE = "/scripts/calibrate.js";
 const CLOUD = "/scripts/cloud.js";
-const MANAGER = "/scripts/manager.js";
+const MANAGER_ANALYZE = "/scripts/manager.js";
+const MANAGER_FORMULAS = "/scripts/manager-formulas.js";
 
 const DEFAULT_TICK_MS = 60000;
 
@@ -96,6 +105,26 @@ function killDuplicates(ns, file, log) {
 }
 
 /**
+ * Ensure exactly one manager runs, and that it is the right one.
+ *
+ * The two managers are ALTERNATIVES, not separate services. killDuplicates only
+ * dedupes by filename, so on its own it would happily leave an analyze manager
+ * and a formulas manager running side by side - each believing it owned the RAM
+ * pool and the report port, over-committing the same RAM and stealing each
+ * other's completion reports.
+ *
+ * @returns {boolean} true if a manager is running when this returns
+ */
+function ensureOneManager(ns, wanted, other, args, log) {
+  for (const p of instancesOf(ns, other)) {
+    ns.kill(p.pid);
+    log(`stopped ${other} - switching to ${wanted}`);
+  }
+  killDuplicates(ns, wanted, log);
+  return isUp(ns, wanted) || ensureService(ns, wanted, args, log);
+}
+
+/**
  * Run a script and wait for it to exit.
  *
  * Polls ns.ps rather than ns.isRunning purely to avoid paying for a second API
@@ -139,6 +168,7 @@ export async function main(ns) {
   const once = args.includes("--once");
   const noCloud = args.includes("--no-cloud");
   const noManager = args.includes("--no-manager");
+  const noFormulas = args.includes("--no-formulas");
   const tIdx = args.indexOf("--target");
   const target = tIdx >= 0 ? args[tIdx + 1] : null;
   const iIdx = args.indexOf("--interval");
@@ -163,8 +193,15 @@ export async function main(ns) {
     // on its own has almost always hit a target with no cached growth base - a
     // newly rooted, richer server it auto-picked - so the cache must be
     // refreshed in THIS tick, before the restart, or it just dies again.
-    const managerDied = !firstPass && !noManager && !isUp(ns, MANAGER);
+    const managerDied = !firstPass && !noManager
+      && !isUp(ns, MANAGER_ANALYZE) && !isUp(ns, MANAGER_FORMULAS);
     if (managerDied) log("manager is not running - it exited since the last tick");
+
+    // Re-checked every tick, not once at startup: Formulas.exe is lost on every
+    // augment install and can be bought at any time, so the correct build to run
+    // changes underneath a long-lived boot.
+    const hasFormulas = !noFormulas && ns.fileExists(FORMULAS_PROGRAM, "home");
+    ns.write(FORMULAS_MARKER, `${hasFormulas ? 1 : 0}\n${Date.now()}`, "w");
 
     // -- 1. root ------------------------------------------------------------
     await runToCompletion(ns, ROOT, ["--quiet"], log);
@@ -180,9 +217,11 @@ export async function main(ns) {
     }
 
     // -- 3. calibrate -------------------------------------------------------
-    const calib = loadCalibration(ns);
+    // The calibration cache exists only to feed mathAnalyze. On the formulas
+    // build it is dead weight, and calibrating costs a 6.20 GB transient.
+    const calib = hasFormulas ? null : loadCalibration(ns);
     const age = calib ? calibAgeMs(calib) : Infinity;
-    if (!calib || age > CALIB_MAX_AGE_MS || managerDied) {
+    if (!hasFormulas && (!calib || age > CALIB_MAX_AGE_MS || managerDied)) {
       log(
         !calib
           ? "no calibration cache - calibrating"
@@ -216,8 +255,9 @@ export async function main(ns) {
       }
     }
     if (!noManager) {
-      killDuplicates(ns, MANAGER, log);
-      ensureService(ns, MANAGER, target ? ["--target", target] : [], log);
+      const wanted = hasFormulas ? MANAGER_FORMULAS : MANAGER_ANALYZE;
+      const other = hasFormulas ? MANAGER_ANALYZE : MANAGER_FORMULAS;
+      ensureOneManager(ns, wanted, other, target ? ["--target", target] : [], log);
     }
 
     firstPass = false;

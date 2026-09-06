@@ -6,8 +6,9 @@ import {
   REPORT_PORT,
   WORKER_FILES,
   WORKER_RAM_FALLBACK,
+  MONEY_TOLERANCE,
+  SEC_TOLERANCE,
 } from "./config.js";
-import { growSecurity, weakenThreadsFor } from "./calib.js";
 
 /**
  * Prep logic as a pure module - bring one target to max money, minimum security.
@@ -36,26 +37,22 @@ import { growSecurity, weakenThreadsFor } from "./calib.js";
  *   money == max -> nothing left to grow, so the wave is all weaken.
  *
  * RAM charged to whoever imports this (verified against the fork's docs):
- *   ram.js 0.35 + exec 1.30 + getScriptRam 0.10
- *   + getServerMaxMoney/MoneyAvailable/SecurityLevel/MinSecurityLevel 0.40
- *   + getWeakenTime/getGrowTime 0.10 + growthAnalyze 1.00
- *   + getServerRequiredHackingLevel 0.10 + getHackingLevel 0.05 + fileExists 0.10
- *   = 3.50 GB   (ports, sleep, print are all 0)
- *
- * Two functions that used to be here are now cache reads, saving 2.00 GB:
- *   weakenAnalyze         -> calib.weakenPerThread
- *   growthAnalyzeSecurity -> calib.growSecPerThread
- * Both are linear in threads and independent of the target's current security,
- * so a cached constant is exactly right, not an approximation. growthAnalyze
- * stays live because it is NOT: it reads security at call time, and prep runs
- * precisely when security is off baseline - which is also why the calibration
- * cache refuses to answer growth questions there.
+ *   ram.js 0.35 + exec 1.30 + getScriptRam 0.10 + fileExists 0.10
+ *   + getServerRequiredHackingLevel 0.10 + getHackingLevel 0.05
+ *   = 2.00 GB   (ports, sleep, print are 0; ALL target reads and thread math
+ *   now come from the injected math module, which is what lets the two
+ *   implementations stay separately priced)
  */
 
-// Stop declaring "prepped" at exact equality - money asymptotes toward max and
-// security carries float noise.
-export const MONEY_TOLERANCE = 0.999;
-export const SEC_TOLERANCE = 0.01;
+// Single source of truth: both math implementations and every consumer must
+// agree on what "prepped" means, so the values live in config.js. Imported AND
+// re-exported deliberately - a bare `export ... from` would forward the names to
+// importers without binding them here. measure() used to read these directly
+// and a bare re-export left them undefined at that call site, throwing at
+// runtime; the bound form is kept even though both math modules' snapshot()
+// now own that check, so the same class of bug can't come back if something
+// here ever needs them again.
+export { MONEY_TOLERANCE, SEC_TOLERANCE };
 
 // How long past the expected landing to wait for reports before giving up on
 // them and re-measuring anyway. A missing report must not wedge prep.
@@ -104,17 +101,15 @@ export function workerRam(ns) {
   return out;
 }
 
-/** Current money/security of a host, plus the two "is it there yet" flags. */
-export function measure(ns, host) {
-  const maxMoney = ns.getServerMaxMoney(host);
-  const money = ns.getServerMoneyAvailable(host);
-  const minSec = ns.getServerMinSecurityLevel(host);
-  const sec = ns.getServerSecurityLevel(host);
-  return {
-    maxMoney, money, minSec, sec,
-    moneyOk: money >= maxMoney * MONEY_TOLERANCE,
-    secOk: sec <= minSec + SEC_TOLERANCE,
-  };
+/**
+ * Current state of a host.
+ *
+ * Delegates to the math module because the formulas implementation already
+ * holds a getServer object with these fields, and paying 0.40 GB for four
+ * getServer* calls to re-read them would cancel out the swap's RAM saving.
+ */
+export function measure(ns, host, math) {
+  return math.snapshot(ns, host);
 }
 
 /** True if a measure() result is at max money AND minimum security. */
@@ -130,12 +125,12 @@ export const isPrepped = (m) => m.moneyOk && m.secOk;
  * hackAnalyze returns 0 and the manager exits immediately; a supervisor would
  * then restart it into the same failure forever.
  */
-export function pickTarget(ns) {
+export function pickTarget(ns, math) {
   const level = ns.getHackingLevel();
   let best = null;
   for (const host of ServerPool.scanAll(ns)) {
     if (host === "home" || !ns.hasRootAccess(host)) continue;
-    const maxMoney = ns.getServerMaxMoney(host);
+    const maxMoney = math.maxMoneyOf(ns, host);
     if (maxMoney <= 0) continue;
     if (ns.getServerRequiredHackingLevel(host) > level) continue;
     if (!best || maxMoney > best.maxMoney) best = { host, maxMoney };
@@ -156,19 +151,15 @@ export function pickTarget(ns) {
  * sizes compete, even maxThreadsFor is only exact for one of them at a time.
  * A real allocate/release pair is the only honest test.
  */
-export function sizeGrowWave(pool, ram, calib, growWanted, extraWeaken = 0) {
+export function sizeGrowWave(pool, ram, math, snap, growWanted, extraWeaken = 0) {
   let grow = Math.min(growWanted, pool.maxThreadsFor(ram.grow));
+  const perWeaken = math.securityPerWeakenThread(snap);
+  const perGrow = math.securityPerGrowThread(snap);
 
   while (grow > 0) {
-    // Cached per-thread constant, measured with NO host argument. With a host,
-    // growthAnalyzeSecurity caps its answer by the threads needed to reach max
-    // money; as prep closes in on max money that cap collapses toward zero, the
-    // paired weaken gets sized at 1 thread, and security creeps back up exactly
-    // when prep is trying to finish. The uncapped per-thread figure is honest at
-    // any money level, which is what makes it cacheable.
     // extraWeaken covers security the server is ALREADY carrying, on top of
     // what this grow will add. Both are cancelled by the same weaken landing.
-    const weaken = Math.max(1, weakenThreadsFor(calib, growSecurity(calib, grow)) + extraWeaken);
+    const weaken = Math.max(1, Math.ceil((perGrow * grow) / perWeaken) + extraWeaken);
 
     const g = pool.allocate(ram.grow, grow);
     if (g) {
@@ -196,12 +187,13 @@ export function sizeGrowWave(pool, ram, calib, growWanted, extraWeaken = 0) {
  *
  * @returns {{grow: number, weaken: number, mode: string}}
  */
-export function planPrepWave(ns, host, pool, ram, calib, m) {
+export function planPrepWave(pool, ram, math, snap) {
   // Threads needed purely to undo the security the server is already carrying.
-  const excess = Math.max(0, m.sec - m.minSec);
-  const fixSec = weakenThreadsFor(calib, excess);
+  const excess = Math.max(0, snap.sec - snap.minSec);
+  const perWeaken = math.securityPerWeakenThread(snap);
+  const fixSec = excess > 0 ? Math.ceil(excess / perWeaken) : 0;
 
-  if (m.moneyOk) {
+  if (snap.moneyOk) {
     // Money is already at max, so there is nothing to grow - spend the whole
     // wave on weaken.
     //
@@ -227,23 +219,20 @@ export function planPrepWave(ns, host, pool, ram, calib, m) {
   // Running them together spends extra grow threads to save whole cycles, and
   // threads are the cheap resource once the pool is large.
   //
-  // growthAnalyze is evaluated at CURRENT security, which is exactly right
-  // here: grow lands before the weaken, so it really does execute at this
-  // security level.
-  //
-  // The ratio is capped at current money: at very low money growthAnalyze's
-  // multiplier explodes, and the +$1/thread additive growth it ignores means
-  // fewer threads are really needed anyway.
-  const ratio = m.maxMoney / Math.max(m.money, 1);
-  const wanted = Math.ceil(ns.growthAnalyze(host, ratio) * GROW_MARGIN);
-  const plan = sizeGrowWave(pool, ram, calib, wanted, fixSec);
+  // atSecurity is snap.sec because grow really does execute at the CURRENT
+  // security - it lands before this wave's weaken. The formulas implementation
+  // uses that argument; the analyze one ignores it and is approximate here.
+  const wanted = Math.ceil(
+    math.growThreadsToRestore(snap, snap.money, snap.maxMoney, snap.sec) * GROW_MARGIN,
+  );
+  const plan = sizeGrowWave(pool, ram, math, snap, wanted, fixSec);
   // When the drift alone needs more threads than the pool holds, grow is
   // squeezed out entirely and the wave is pure weaken - say so rather than
   // labelling a 0-thread grow as a grow.
   const mode =
     plan.grow === 0
       ? `weaken only (${excess.toFixed(2)} sec drift needs ${fixSec}t; no room left to grow)`
-      : `grow (want ${wanted}t for x${ratio.toFixed(2)})` +
+      : `grow (want ${wanted}t to reach max money)` +
         (fixSec > 0 ? ` + ${fixSec}t weaken for ${excess.toFixed(2)} sec drift` : "");
   return { ...plan, mode };
 }
@@ -257,11 +246,16 @@ export function planPrepWave(ns, host, pool, ram, calib, m) {
  *
  * The caller owns the port - this reads from it but never clears it.
  *
+ * times comes from the caller (math.opTimes(snap)), not a fresh ns.getWeakenTime
+ * / ns.getGrowTime call here - those are exactly the two ns calls this module
+ * is not allowed to make directly, since the formulas build must price them
+ * through getServer instead of a dedicated 0.05GB-each ns call.
+ *
  * @returns {{launched: number, reports: number, threads: number}}
  */
-export async function runPrepWave(ns, host, pool, ram, plan, batch, port, log) {
-  const W = ns.getWeakenTime(host);
-  const G = ns.getGrowTime(host);
+export async function runPrepWave(ns, host, pool, ram, plan, batch, port, log, times) {
+  const W = times.weaken;
+  const G = times.grow;
 
   const jobs = [];
   if (plan.grow > 0) {
@@ -348,7 +342,8 @@ export async function runPrepWave(ns, host, pool, ram, plan, batch, port, log) {
  * @param {NS} ns
  * @param {string} host
  * @param {object} opts
- * @param {object} opts.calib      loaded calibration cache (required)
+ * @param {object} opts.math       injected math module (required) - the whole
+ *                                 point of this file: no calib, no *Analyze
  * @param {object} [opts.ram]      per-thread worker RAM; computed if omitted
  * @param {number} [opts.port]     report port; defaults to REPORT_PORT
  * @param {number} [opts.maxCycles]
@@ -361,7 +356,7 @@ export async function runPrepWave(ns, host, pool, ram, plan, batch, port, log) {
  */
 export async function prep(ns, host, opts = {}) {
   const {
-    calib,
+    math,
     ram = workerRam(ns),
     port = REPORT_PORT,
     maxCycles = DEFAULT_MAX_CYCLES,
@@ -370,15 +365,15 @@ export async function prep(ns, host, opts = {}) {
     log = (s) => ns.print(s),
   } = opts;
 
-  if (!calib) {
-    return { ok: false, cycles: 0, reason: "no calibration cache", m: measure(ns, host) };
+  if (!math) {
+    return { ok: false, cycles: 0, reason: "no math implementation supplied", m: null };
   }
 
   for (let cycle = 1; cycle <= maxCycles; cycle++) {
     // Rebuild every cycle: hosts get rooted, RAM gets bought, other scripts
     // start and stop. A stale pool would over-commit.
     const pool = buildPool();
-    const m = measure(ns, host);
+    const m = math.snapshot(ns, host);
 
     if (isPrepped(m)) {
       log(
@@ -388,7 +383,7 @@ export async function prep(ns, host, opts = {}) {
       return { ok: true, cycles: cycle - 1, reason: "prepped", m };
     }
 
-    const plan = planPrepWave(ns, host, pool, ram, calib, m);
+    const plan = planPrepWave(pool, ram, math, m);
 
     if (plan.grow === 0 && plan.weaken === 0) {
       // freeRam alone reads like a contradiction here ("2.00GB free, need
@@ -408,15 +403,20 @@ export async function prep(ns, host, opts = {}) {
       };
     }
 
-    const W = ns.getWeakenTime(host);
+    // Op times come from the snapshot already taken above, not a fresh ns
+    // call - see runPrepWave for why getWeakenTime/getGrowTime can't be
+    // called directly here.
+    const times = math.opTimes(m);
     log(
       `cycle ${padL(cycle, 2)}  ${plan.mode}  ->  ` +
         `G ${padL(plan.grow, 5)}t  W ${padL(plan.weaken, 5)}t  ` +
         `(${fmtRam(plan.grow * ram.grow + plan.weaken * ram.weaken)} of ` +
-        `${fmtRam(pool.freeRam)})  eta ${fmtTime(W)}`,
+        `${fmtRam(pool.freeRam)})  eta ${fmtTime(times.weaken)}`,
     );
 
-    const res = await runPrepWave(ns, host, pool, ram, plan, `${idPrefix}-${cycle}`, port, log);
+    const res = await runPrepWave(
+      ns, host, pool, ram, plan, `${idPrefix}-${cycle}`, port, log, times,
+    );
     if (res.launched === 0) {
       return {
         ok: false,
@@ -426,7 +426,7 @@ export async function prep(ns, host, opts = {}) {
       };
     }
 
-    const after = measure(ns, host);
+    const after = math.snapshot(ns, host);
     log(
       `         landed ${res.reports}/${res.launched} report(s), ${res.threads}t  ->  ` +
         `${fmtMoney(after.money)} (${((after.money / after.maxMoney) * 100).toFixed(1)}%), ` +
@@ -444,5 +444,63 @@ export async function prep(ns, host, opts = {}) {
     }
   }
 
-  return { ok: false, cycles: maxCycles, reason: "hit max cycles", m: measure(ns, host) };
+  return { ok: false, cycles: maxCycles, reason: "hit max cycles", m: math.snapshot(ns, host) };
+}
+
+/**
+ * CLI body shared by scripts/prep.js and scripts/prep-formulas.js.
+ *
+ * The two entry scripts are identical apart from which math module they inject
+ * - the same shape managerCore.run() already shares between manager.js and
+ * manager-formulas.js. Pulling the body out here stops the two prep CLIs
+ * drifting apart the way they had.
+ *
+ * @param {NS} ns
+ * @param {object} math injected math implementation
+ */
+export async function prepCli(ns, math) {
+  ns.disableLog("ALL");
+  ns.ui.openTail();
+
+  const args = ns.args.map(String);
+  const tIdx = args.indexOf("--target");
+  const cIdx = args.indexOf("--max-cycles");
+  const maxCycles = cIdx >= 0 ? Number(args[cIdx + 1]) : DEFAULT_MAX_CYCLES;
+
+  const ready = math.prepare(ns);
+  if (!ready.ok) {
+    ns.tprint(`ERROR: ${ready.error}`);
+    return;
+  }
+
+  const host = tIdx >= 0 ? args[tIdx + 1] : pickTarget(ns, math);
+  if (!host) {
+    ns.tprint("ERROR: no rooted, money-bearing target found. Pass --target <host>.");
+    return;
+  }
+
+  // Drop anything stale so old batch ids can't be counted as this run's reports.
+  // Safe here because this process owns the port; the manager clears its own.
+  ns.getPortHandle(REPORT_PORT).clear();
+
+  const start = measure(ns, host, math);
+  ns.print(
+    `prep ${host}: money ${fmtMoney(start.money)}/${fmtMoney(start.maxMoney)}  ` +
+      `sec ${start.sec.toFixed(2)}/${start.minSec.toFixed(2)}`,
+  );
+
+  const res = await prep(ns, host, { math, maxCycles });
+
+  if (res.ok) {
+    ns.tprint(
+      `SUCCESS: ${host} prepped in ${res.cycles} cycle(s) - ` +
+        `${fmtMoney(res.m.money)} at security ${res.m.sec.toFixed(2)}`,
+    );
+  } else {
+    ns.tprint(
+      `WARN: ${host} not prepped after ${res.cycles} cycle(s) - ${res.reason}. ` +
+        `${fmtMoney(res.m.money)}/${fmtMoney(res.m.maxMoney)}, ` +
+        `sec ${res.m.sec.toFixed(2)}/${res.m.minSec.toFixed(2)}`,
+    );
+  }
 }

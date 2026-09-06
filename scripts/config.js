@@ -72,12 +72,22 @@ export const BATCH_SPACING_MS = 4 * SPACER_MS;
 export const HACK_CONTIGUOUS = false;
 
 /**
- * Grow thread padding.
+ * Grow safety margin, as a fraction of MONEY - not of threads.
  *
- * growthAnalyze returns a decimal thread count that we round up, but its
- * multiplier ignores the +$1/thread additive growth and assumes the security
- * level at call time. A little slack costs one or two threads and prevents a
- * batch from silently failing to refill.
+ * Batches ask for enough grow to climb back from `afterHack / GROW_MARGIN`
+ * rather than from `afterHack`, so 1.05 means "size grow as though the hack took
+ * 5% more than it did". That gives the same headroom at every steal fraction.
+ *
+ * It must not be applied to the thread count. Threads relate to the growth
+ * multiplier exponentially, so `threads * 1.05` yields `mult^1.05`: 9% of
+ * headroom at a x5.64 restore, but 2% at x1.49 and 0.5% at x1.11. Measured
+ * volleys bear that out - 77-82% steal held the target at max money, while
+ * 32.74% and 69.31% drained it to nothing. Every batch in a volley is planned
+ * against the same max-money snapshot, so a per-batch shortfall compounds
+ * geometrically over hundreds of batches.
+ *
+ * Overshooting costs almost nothing: the game clamps money at maxMoney, so
+ * surplus grow threads simply do nothing.
  */
 export const GROW_MARGIN = 1.05;
 
@@ -165,6 +175,19 @@ export const DESYNC_STRIKES = 2;
  */
 export const VOLLEY_OK_FRACTION = 0.9;
 
+/**
+ * How much richer a new target must be before the manager switches to it.
+ *
+ * Switching is not free: the new server has to be prepped from scratch, which
+ * costs whole weaken windows during which nothing is earned, and the old
+ * server's prepped state is abandoned. A margin stops the manager chasing a
+ * marginally better host every time hacking level ticks up - and stops it
+ * oscillating between two servers of near-equal worth.
+ *
+ * Only consulted when no --target is pinned.
+ */
+export const TARGET_SWITCH_MARGIN = 1.25;
+
 // --------------------------------------------------------------- workers ----
 
 /**
@@ -231,6 +254,19 @@ export const CLOUD_DONE_MARKER = "/data/cloud-maxed.txt";
  */
 export const CLOUD_RECHECK_MS = 30 * 60 * 1000;
 
+/** The program that unlocks ns.formulas. */
+export const FORMULAS_PROGRAM = "Formulas.exe";
+
+/**
+ * Written by boot.js so other scripts can learn which build boot is currently
+ * running without paying 0.10 GB for fileExists. This is the EFFECTIVE build
+ * choice, not raw ownership: with --no-formulas it records 0 even though the
+ * program is owned. Advisory only - boot re-checks every tick, so a stale
+ * value corrects itself within one tick and nothing that matters is decided
+ * from it.
+ */
+export const FORMULAS_MARKER = "/data/formulas.txt";
+
 // ---------------------------------------------------------------- report ----
 
 /**
@@ -261,3 +297,17 @@ export const CLOUD_RECHECK_MS = 30 * 60 * 1000;
  *   [6] thread count
  */
 export const WORKER_ARGV = ["target", "delay", "batch", "port", "planned", "op", "threads"];
+
+// ------------------------------------------------------------ tolerances ----
+
+/**
+ * How close to max money counts as "prepped".
+ *
+ * Lives here rather than in prepper.js because both math implementations
+ * compute snapshot().moneyOk, and a difference between them would mean
+ * "prepped" silently meant two different things depending on which one loaded.
+ */
+export const MONEY_TOLERANCE = 0.999;
+
+/** How far above minimum security still counts as "at minimum". */
+export const SEC_TOLERANCE = 0.01;

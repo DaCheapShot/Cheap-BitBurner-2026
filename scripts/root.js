@@ -98,12 +98,12 @@ export async function main(ns) {
       // Stamp before printing: a supervisor polling this file should never see
       // the message without the marker.
       ns.write(ROOT_MARKER, `${Date.now()}\n${r.rooted.join(",")}`, "w");
-      ns.tprint(
+      ns.print(
         `ROOTED ${r.rooted.length} new server(s): ${r.rooted.join(", ")}\n` +
           `Run scripts/deploy.js to put workers on them.`,
       );
     } else if (!quiet) {
-      ns.tprint(
+      ns.print(
         `root: nothing new. ${r.already} already rooted, ` +
           `${r.locked} still need more port openers.`,
       );
