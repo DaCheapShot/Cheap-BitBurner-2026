@@ -51,6 +51,7 @@ run scripts/deploy.js                   # scp workers home -> every rooted host
 run scripts/calibrate.js                # write /data/calib.json (needs target at min security)
 run scripts/capacity.js --steal 0.05    # RAM/target/batch-size analysis, launches nothing
 run scripts/manager.js --dry-run        # plan a volley and print it
+run scripts/manager.js --once --verbose # one volley, measured vs planned outcome
 run scripts/prep.js --target <host>     # prep one target without the manager
 node tests/run.mjs                      # run the test suite
 ```

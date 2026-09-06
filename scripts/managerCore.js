@@ -17,7 +17,7 @@ import {
   BATCH_OPS,
   OP_WORKER,
 } from "./config.js";
-import { analyzeBatch, batchOk } from "./verify.js";
+import { analyzeBatch, batchOk, batchOutcome } from "./verify.js";
 import { prep, isPrepped, pickTarget, buildWorkerPool, workerRam } from "./prepper.js";
 
 /**
@@ -54,6 +54,13 @@ import { prep, isPrepped, pickTarget, buildWorkerPool, workerRam } from "./prepp
  *         run scripts/manager.js --steal 0.05 --once   (pin the fraction)
  *         run scripts/manager.js --fixed               (use STEAL_FRACTION)
  *         run scripts/manager.js --dry-run        (plan and print, launch nothing)
+ *         run scripts/manager.js --verbose        (measured vs planned, per volley)
+ *
+ * --verbose costs nothing: every figure it prints comes from the worker reports
+ * already collected, so it adds no ns calls and no RAM. Use it when the volley
+ * looks healthy but the target's money does not add up - it prints what grow
+ * ACTUALLY delivered against what the plan assumed, which is the one comparison
+ * the normal output cannot make.
  *
  * RAM charged to whoever imports this:
  *   ram.js/prepper.js union 2.00 + exec (already counted) = 2.00 GB
@@ -450,6 +457,64 @@ function judgeVolley(byBatch, expected, spacerMs) {
 }
 
 /**
+ * What the volley actually did, measured from the workers' return values.
+ *
+ * This exists because the manager used to report `batches x plannedHackAmount`
+ * as "earned", a figure that prints identically whether every hack succeeded or
+ * every hack stole nothing. A 397-batch volley drained its target from $12.99b
+ * to $6.81k while reporting $1.69t earned, and nothing in the output disagreed.
+ *
+ * The number that matters is `growRatio`: achieved grow multiplier over the one
+ * the plan assumed. Batches are ALL planned against the same snapshot - money at
+ * max - so there is no feedback inside a volley and any per-batch shortfall
+ * compounds geometrically. At 397 batches a 1% shortfall leaves under 2% of the
+ * server's money.
+ *
+ * Trend matters as much as magnitude, which is why first/last are kept
+ * separately: a CONSTANT shortfall points at the growth model, while one that
+ * WORSENS across the volley points at security creeping up under it.
+ *
+ * Pure arithmetic on reports already collected - no ns calls, 0 GB.
+ */
+function measureVolley(byBatch, expected, wantGrowMult) {
+  const samples = [];
+  let stolen = 0;
+  let weakened = 0;
+  let unmeasurable = 0;
+
+  for (const id of expected.keys()) {
+    const reports = byBatch.get(id) ?? [];
+    if (!reports.length) continue;
+    const o = batchOutcome(reports);
+    if (o.missing > 0) unmeasurable++;
+    stolen += o.stolen;
+    weakened += o.weakened;
+    if (o.growThreads > 0) samples.push(o.growMult);
+  }
+
+  if (!samples.length) {
+    return { stolen, weakened, unmeasurable, samples: 0, growMean: 0, growFirst: 0, growLast: 0, growRatio: 0 };
+  }
+
+  const mean = samples.reduce((n, v) => n + v, 0) / samples.length;
+  // Average the leading and trailing tenth rather than single batches: one
+  // batch is noise, a tenth of the volley is a trend.
+  const edge = Math.max(1, Math.floor(samples.length / 10));
+  const avg = (a) => a.reduce((n, v) => n + v, 0) / a.length;
+
+  return {
+    stolen,
+    weakened,
+    unmeasurable,
+    samples: samples.length,
+    growMean: mean,
+    growFirst: avg(samples.slice(0, edge)),
+    growLast: avg(samples.slice(-edge)),
+    growRatio: wantGrowMult > 0 ? mean / wantGrowMult : 0,
+  };
+}
+
+/**
  * @param {NS} ns
  * @param {object} math injected math implementation - see the math interface
  *                      documented in mathAnalyze.js / mathFormulas.js
@@ -468,6 +533,10 @@ export async function run(ns, math) {
   const tIdx = args.indexOf("--target");
   const sIdx = args.indexOf("--steal");
   const once = args.includes("--once");
+  // Diagnostic detail. Off by default because a 400-batch volley would otherwise
+  // bury the one line that matters, but everything it prints comes from data
+  // already collected - it costs no ns calls and no RAM.
+  const verbose = args.includes("--verbose");
   const dryRun = args.includes("--dry-run");
 
   // null means "work it out each cycle". A fraction pins it, for comparing
@@ -679,6 +748,33 @@ export async function run(ns, math) {
         `)  ${fmtRam(batches.length * batchRam)} of ${fmtRam(pool.freeRam + pool.pendingRam)}`,
     );
 
+    if (verbose) {
+      // The plan's own assumptions, stated before the volley flies, so the
+      // measured numbers printed afterwards have something to be compared to.
+      ns.print(
+        `           [v] plan:  steal ${(th.steal * 100).toFixed(2)}% of ${fmtMoney(m.maxMoney)} = ` +
+          `${fmtMoney(th.hackAmount)}/batch, grow must return x${(1 / (1 - th.steal)).toFixed(4)} ` +
+          `(GROW_MARGIN ${GROW_MARGIN} sized ${th.grow}t for it)`,
+      );
+      ns.print(
+        `           [v] state: money ${fmtMoney(m.money)}/${fmtMoney(m.maxMoney)}, ` +
+          `sec ${m.sec.toFixed(2)}/${m.minSec.toFixed(2)}, backend ${math.NAME}, ` +
+          `hack fraction/thread ${perThread.toExponential(3)}`,
+      );
+      ns.print(
+        `           [v] sec/thread: hack ${consts.hackSec} grow ${consts.growSec} ` +
+          `weaken ${consts.weakenSec}  ->  W1 cancels ${(consts.hackSec * th.hack).toFixed(2)} ` +
+          `with ${th.weaken1}t, W2 cancels ${(consts.growSec * th.grow).toFixed(2)} with ${th.weaken2}t`,
+      );
+      // EVERY batch is planned against this one snapshot, so the volley bets the
+      // whole window on the grow model being right this many times running.
+      ns.print(
+        `           [v] exposure: ${batches.length} batches x ${(th.steal * 100).toFixed(2)}% = ` +
+          `${(batches.length * th.steal).toFixed(1)}x the target's max money, all planned ` +
+          `against the state above - no feedback until the volley ends`,
+      );
+    }
+
     if (batches.length === 0) {
       pool.releaseAll();
       ns.tprint(
@@ -731,10 +827,17 @@ export async function run(ns, math) {
 
     const j = judgeVolley(byBatch, expected, timing.s);
     const after = math.snapshot(ns, target);
-    // Only clean batches are counted: a mistimed or incomplete batch may have
-    // stolen nothing, and the target ends the volley back at max money either
-    // way, so the balance itself cannot tell us what a volley earned.
-    totalEarned += j.ok * th.hackAmount;
+
+    // MEASURED, not planned. The old figure was `cleanBatches * plannedTake`,
+    // which prints the same whether every hack succeeded or every hack stole
+    // nothing - a volley that drained its target to $6.81k still reported
+    // $1.69t earned. Sum what the hack workers actually returned instead, and
+    // fall back to the projection only when reports carry no result values
+    // (stale workers), saying so rather than passing a guess off as a total.
+    const wantGrowMult = th.steal < 1 ? 1 / (1 - th.steal) : 0;
+    const vol = measureVolley(byBatch, expected, wantGrowMult);
+    const measured = vol.unmeasurable === 0 && vol.samples > 0;
+    totalEarned += measured ? vol.stolen : j.ok * th.hackAmount;
 
     ns.print(
       `           landed ${j.ok} ok, ${j.bad} mistimed, ${j.incomplete} incomplete  ` +
@@ -784,6 +887,54 @@ export async function run(ns, math) {
       ns.print(
         `           WARN: ${j.stale} report(s) had no result field - stale workers ` +
           `in game. Run scripts/deploy.js.`,
+      );
+    }
+
+    // -- measured outcome ----------------------------------------------------
+    // Always warn when grow misses its mark, because that shortfall compounds
+    // across the volley and is invisible in every other line. --verbose adds the
+    // breakdown needed to tell WHY it missed.
+    if (vol.samples > 0 && wantGrowMult > 0) {
+      const off = (1 - vol.growRatio) * 100;
+      if (off > 0.5) {
+        // Where the volley lands after n batches of this shortfall. Batches are
+        // all planned against max money, so the error is geometric, not additive.
+        const endsAt = Math.pow(vol.growRatio, expected.size) * 100;
+        ns.print(
+          `           WARN: grow delivered x${vol.growMean.toFixed(4)} against x${wantGrowMult.toFixed(4)} ` +
+            `planned - ${off.toFixed(2)}% short. Over ${expected.size} batches that leaves ` +
+            `${endsAt < 0.01 ? endsAt.toExponential(1) : endsAt.toFixed(1)}% of max money.`,
+        );
+      }
+    }
+
+    if (verbose) {
+      ns.print(
+        `           [v] take: ${measured ? fmtMoney(vol.stolen) : "unmeasurable"} measured vs ` +
+          `${fmtMoney(j.ok * th.hackAmount)} planned` +
+          (vol.unmeasurable ? `  (${vol.unmeasurable} batch(es) had stale workers)` : ""),
+      );
+      ns.print(
+        `           [v] grow:  want x${wantGrowMult.toFixed(4)}  got x${vol.growMean.toFixed(4)}  ` +
+          `(first ${vol.growFirst.toFixed(4)} -> last ${vol.growLast.toFixed(4)}, ${vol.samples} batches)`,
+      );
+      // The trend is the diagnosis. A flat shortfall means the growth model is
+      // wrong; one that worsens across the volley means security is creeping up
+      // underneath it, so grow runs at a worse rate than it was sized for.
+      const drift = vol.growFirst > 0 ? (vol.growLast / vol.growFirst - 1) * 100 : 0;
+      ns.print(
+        `           [v] trend: ${drift >= 0 ? "+" : ""}${drift.toFixed(2)}% first->last  ` +
+          (Math.abs(drift) < 0.5
+            ? "flat - shortfall is in the growth model, not security creep"
+            : "degrading - suspect security creeping up under the volley"),
+      );
+      ns.print(
+        `           [v] weaken: ${vol.weakened.toFixed(2)} sec removed across the volley; ` +
+          `security ${after.sec.toFixed(2)}/${after.minSec.toFixed(2)} after`,
+      );
+      ns.print(
+        `           [v] money: ${fmtMoney(m.money)} before -> ${fmtMoney(after.money)} after ` +
+          `(${((after.money / after.maxMoney) * 100).toFixed(2)}% of max)`,
       );
     }
 

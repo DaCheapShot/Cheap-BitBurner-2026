@@ -63,3 +63,52 @@ export function analyzeBatch(reports, ops) {
 export function batchOk(a, spacerMs) {
   return a.orderOk && a.gapsOk && a.jitter < spacerMs;
 }
+
+/**
+ * What a batch ACTUALLY did, from the values its workers returned.
+ *
+ * Every worker already reports its op's return value: hack returns money
+ * stolen, grow returns the multiplier it achieved, weaken returns the security
+ * it removed. Until now nothing read them, so the manager reported PLANNED
+ * figures as though they were measured - and a volley that drained its target
+ * to nothing still printed a healthy-looking take.
+ *
+ * Grow multipliers MULTIPLY rather than sum: a batch's grow is split across
+ * hosts, each call scaling whatever money is present when it runs, so the
+ * batch's real multiplier is the product of the parts.
+ *
+ * Pure arithmetic over data already collected - 0 GB, no new ns calls.
+ *
+ * @param {object[]} reports port messages for ONE batch
+ * @returns {{stolen: number, growMult: number, weakened: number,
+ *            hackThreads: number, growThreads: number, missing: number}}
+ */
+export function batchOutcome(reports) {
+  let stolen = 0;
+  let growMult = 1;
+  let weakened = 0;
+  let hackThreads = 0;
+  let growThreads = 0;
+  let missing = 0;
+
+  for (const m of reports) {
+    // A report with no numeric r came from a worker deployed before workers
+    // returned results. Counting it as zero would understate the batch; count
+    // it as missing so the caller can say "unmeasurable" instead of "bad".
+    if (typeof m.r !== "number") {
+      missing++;
+      continue;
+    }
+    if (m.op === "H") {
+      stolen += m.r;
+      hackThreads += m.t;
+    } else if (m.op === "G") {
+      growMult *= m.r;
+      growThreads += m.t;
+    } else {
+      weakened += m.r;
+    }
+  }
+
+  return { stolen, growMult, weakened, hackThreads, growThreads, missing };
+}
