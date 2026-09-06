@@ -13,6 +13,47 @@
 export const STEAL_FRACTION = 0.10;
 
 /**
+ * Hard ceiling on the auto-chosen steal fraction.
+ *
+ * The picker maximises money per batch, and when RAM is plentiful and
+ * MAX_VOLLEY_BATCHES is the binding constraint, more steal is the only way to
+ * more money - so it pushes to whatever wall exists. That wall used to be a
+ * bare `steal >= 0.99` in chooseSteal, and a measured volley at 98.28% drained
+ * a $17.68b target to $166.11k in one window.
+ *
+ * The failure is NOT a slow drain. Thread counts are sized once from one
+ * snapshot, then the batches land spread across the whole weaken window while
+ * hacking level keeps climbing. A batch landing late steals a larger fraction
+ * than planned, its grow was sized for the smaller one, and the batch ends
+ * below where it started. Measured across two consecutive cycles on alpha-ent,
+ * per-thread hack effectiveness rose 2.26x (9.78e-4 -> 2.21e-3) with security
+ * pinned at minimum the whole time, so hacking level was the only input moving.
+ *
+ * How much drift a volley survives, from
+ *   net = (1 - actual) * GROW_MARGIN / (1 - planned)  >=  1:
+ *
+ *     tolerance = ((GROW_MARGIN - 1) / GROW_MARGIN) * (1 - steal) / steal
+ *
+ * At GROW_MARGIN 1.05:
+ *
+ *     steal   20%    60%    80%    85%    90%    95%   98.28%
+ *     drift    19%  3.17%  1.19%  0.84%  0.53%  0.25%   0.08%
+ *
+ * The headroom collapses as steal rises, which is why the extreme end is
+ * where volleys die rather than merely underperform. Note this is tolerance
+ * to EFFECTIVENESS drift, and one batch ending below max compounds into the
+ * next.
+ *
+ * 0.85 is a deliberate ceiling on the cliff edge, not a safe operating point -
+ * re-read the table above before raising it, and watch for OFF BASELINE.
+ *
+ * Applies only to the AUTO picker. An explicit --steal is left alone: pinning a
+ * fraction by hand is a deliberate act, and silently overriding it would make
+ * the flag lie.
+ */
+export const MAX_STEAL_FRACTION = 0.85;
+
+/**
  * Gap between the four landings INSIDE one batch, ms.
  *
  * Must exceed the game's scheduling JITTER - the spread of drift within a batch,
