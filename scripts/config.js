@@ -91,6 +91,28 @@ export const HACK_CONTIGUOUS = false;
  */
 export const GROW_MARGIN = 1.05;
 
+/**
+ * How many EXTRA targets may be prepped alongside the one the manager is
+ * waiting on.
+ *
+ * A prep wave is sized by need, not by capacity: growing past max money does
+ * nothing and weakening below minimum security does nothing, so one target can
+ * never consume more than a sliver of the pool. The weaken-only case is the
+ * worst - a server carrying 50 excess security needs 50/0.05 = 1000 weaken
+ * threads, about 1.75TB out of a 3267TB pool - and the manager then blocks on
+ * that wave for a whole weaken window earning nothing.
+ *
+ * The leftover RAM goes to prepping the NEXT targets, so that when the manager
+ * retargets (TARGET_SWITCH_MARGIN) the new server is already prepped and the
+ * switch costs no stall.
+ *
+ * Capped rather than "fill the pool" because the benefit flattens fast while
+ * the costs do not: each extra costs a math.snapshot every cycle, hundreds of
+ * small waves fragment the pool for the primary, and the log stops being
+ * readable. Three is roughly how far down the ranking a retarget ever reaches.
+ */
+export const PREP_FANOUT = 3;
+
 // ------------------------------------------------------------------ ram -----
 
 /**

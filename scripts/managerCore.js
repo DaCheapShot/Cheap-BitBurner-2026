@@ -18,7 +18,9 @@ import {
   OP_WORKER,
 } from "./config.js";
 import { analyzeBatch, batchOk, batchOutcome } from "./verify.js";
-import { prep, isPrepped, pickTarget, buildWorkerPool, workerRam } from "./prepper.js";
+import {
+  prepGroup, isPrepped, pickTarget, rankTargets, buildWorkerPool, workerRam,
+} from "./prepper.js";
 
 /**
  * The shotgun volley loop (math-agnostic core).
@@ -685,9 +687,16 @@ export async function run(ns, math) {
       // manager (or a hand-run prep.js) land after this one clears the port and
       // report under their own batch id - a fixed "prep-1" would collide with
       // ours and be counted as one of this wave's reports.
-      const res = await prep(ns, target, {
-        math, ram, port: REPORT_PORT, buildPool, log,
+      //
+      // extras is a function, not a list, because the ranking is re-evaluated
+      // every prep cycle: hosts get rooted and hacking level climbs while a prep
+      // runs, and a list captured once would go stale exactly when it matters.
+      // The primary is filtered out inside prepGroup, so passing the whole
+      // ranking is correct.
+      const res = await prepGroup(ns, target, {
+        math, ram, port: REPORT_PORT, buildPool, log, verbose,
         idPrefix: `prep${runId}`,
+        extras: () => rankTargets(ns, math),
       });
       if (!res.ok) {
         ns.tprint(`ERROR: prep of ${target} failed - ${res.reason}. Manager stopping.`);
