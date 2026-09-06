@@ -34,19 +34,24 @@ export const STEAL_FRACTION = 0.10;
  *
  *     tolerance = ((GROW_MARGIN - 1) / GROW_MARGIN) * (1 - steal) / steal
  *
- * At GROW_MARGIN 1.05 that is 0.25% at 95% steal, 1.19% at 80%, 3.17% at 60%,
- * 19% at 20%. The headroom collapses as steal rises, which is exactly why the
- * extreme end is where volleys die. Note this is tolerance to EFFECTIVENESS
- * drift, and one batch ending below max compounds into the next.
+ * At GROW_MARGIN 1.05:
  *
- * 0.95 is a deliberate ceiling on the cliff edge, not a safe operating point -
+ *     steal   20%    60%    80%    85%    90%    95%   98.28%
+ *     drift    19%  3.17%  1.19%  0.84%  0.53%  0.25%   0.08%
+ *
+ * The headroom collapses as steal rises, which is why the extreme end is
+ * where volleys die rather than merely underperform. Note this is tolerance
+ * to EFFECTIVENESS drift, and one batch ending below max compounds into the
+ * next.
+ *
+ * 0.85 is a deliberate ceiling on the cliff edge, not a safe operating point -
  * re-read the table above before raising it, and watch for OFF BASELINE.
  *
  * Applies only to the AUTO picker. An explicit --steal is left alone: pinning a
  * fraction by hand is a deliberate act, and silently overriding it would make
  * the flag lie.
  */
-export const MAX_STEAL_FRACTION = 0.95;
+export const MAX_STEAL_FRACTION = 0.85;
 
 /**
  * Gap between the four landings INSIDE one batch, ms.

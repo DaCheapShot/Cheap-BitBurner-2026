@@ -156,7 +156,7 @@ export const tests = {
     // The pool here is deliberately huge, so without a cap the picker would run
     // right up to the old bare 0.99 - if this ever passes trivially the fixture
     // has stopped exercising the ceiling.
-    assert(pick.chosen.steal > 0.9,
+    assert(pick.chosen.steal > 0.8,
       `the cap is no longer the binding constraint - picked only ${(pick.chosen.steal * 100).toFixed(2)}%`);
   },
 
