@@ -18,7 +18,7 @@ import {
   BATCH_OPS,
   OP_WORKER,
 } from "./config.js";
-import { analyzeBatch, batchOk, batchOutcome } from "./verify.js";
+import { analyzeBatch, batchOk, batchOutcome, restoreStats } from "./verify.js";
 import {
   prepGroup, isPrepped, pickTarget, rankTargets, buildWorkerPool, workerRam,
 } from "./prepper.js";
@@ -496,8 +496,11 @@ function judgeVolley(byBatch, expected, spacerMs) {
  *
  * Pure arithmetic on reports already collected - no ns calls, 0 GB.
  */
-function measureVolley(byBatch, expected, wantGrowMult) {
+function measureVolley(byBatch, expected, wantGrowMult, breakEvenMult) {
   const samples = [];
+  // Kept whole, not just their multipliers: restoreStats has to correlate each
+  // batch's grow against whether that same batch's hack landed.
+  const outcomes = [];
   let stolen = 0;
   let weakened = 0;
   let unmeasurable = 0;
@@ -514,11 +517,13 @@ function measureVolley(byBatch, expected, wantGrowMult) {
     hackHits += o.hackHits;
     hackTries += o.hackTries;
     if (o.growThreads > 0) samples.push(o.growMult);
+    outcomes.push(o);
   }
 
   if (!samples.length) {
     return { stolen, weakened, unmeasurable, hackHits, hackTries, samples: 0,
-             growMean: 0, growFirst: 0, growLast: 0, growRatio: 0 };
+             growMean: 0, growFirst: 0, growLast: 0, growRatio: 0,
+             restore: { hacked: 0, restored: 0, median: 0, worst: 0 } };
   }
 
   /*
@@ -552,6 +557,9 @@ function measureVolley(byBatch, expected, wantGrowMult) {
     growFirst: geoMean(samples.slice(0, edge)),
     growLast: geoMean(samples.slice(-edge)),
     growRatio: wantGrowMult > 0 ? mean / wantGrowMult : 0,
+    // The clamp-free reading. wantGrowMult carries GROW_MARGIN, but a batch can
+    // never report more than the clamp allows, so break-even is the yardstick.
+    restore: restoreStats(outcomes, breakEvenMult),
   };
 }
 
@@ -883,7 +891,7 @@ export async function run(ns, math) {
     // fall back to the projection only when reports carry no result values
     // (stale workers), saying so rather than passing a guess off as a total.
     const wantGrowMult = th.steal < 1 ? 1 / (1 - th.steal) : 0;
-    const vol = measureVolley(byBatch, expected, wantGrowMult);
+    const vol = measureVolley(byBatch, expected, wantGrowMult, 1 / (1 - th.steal));
     const measured = vol.unmeasurable === 0 && vol.samples > 0;
     totalEarned += measured ? vol.stolen : j.ok * th.hackAmount;
 
@@ -949,16 +957,33 @@ export async function run(ns, math) {
     // The real test is whether the server came back. If grow were genuinely
     // undersized the money would not be at max, so gate on that.
     const restored = isPrepped(after);
-    if (!restored && vol.samples > 0 && wantGrowMult > 0 && vol.growRatio < 1) {
-      // Batches are all planned against the same max-money snapshot, so a
-      // per-batch shortfall compounds geometrically rather than adding up.
-      const endsAt = Math.pow(vol.growRatio, expected.size) * 100;
-      ns.print(
-        `           WARN: grow delivered x${vol.growMean.toFixed(4)} against x${wantGrowMult.toFixed(4)} ` +
-          `planned and the target did NOT return to max. Compounded over ${expected.size} ` +
-          `batches that trends to ${endsAt < 0.01 ? endsAt.toExponential(1) : endsAt.toFixed(1)}% ` +
-          `of max money - raise GROW_MARGIN.`,
-      );
+    const rs = vol.restore;
+    const breakEven = 1 / (1 - th.steal);
+
+    // Judge on the batches whose hack SUCCEEDED, never on the mean of every
+    // batch's multiplier. A batch whose hack missed starts at max money and its
+    // grow clamps to ~1.0, so at a 60.8% hack chance a PERFECT volley averages
+    // 6.44^0.608 = x3.10 - and a live run reporting x3.55 was warned it was 45%
+    // short and told to raise GROW_MARGIN, which would have been wrong.
+    if (!restored && rs.hacked > 0) {
+      const shortfall = rs.hacked - rs.restored;
+      if (shortfall > 0) {
+        ns.print(
+          `           WARN: ${shortfall}/${rs.hacked} hacked batches failed to restore ` +
+            `x${breakEven.toFixed(4)} (median x${rs.median.toFixed(4)}, worst ` +
+            `x${rs.worst.toFixed(4)}) and the target did NOT return to max. Grow is ` +
+            `genuinely short - raise GROW_MARGIN or lower the steal fraction.`,
+        );
+      } else {
+        // Every hacked batch restored, yet the money still fell. Grow is not the
+        // culprit and raising GROW_MARGIN would not help; say so rather than
+        // blaming the nearest number.
+        ns.print(
+          `           WARN: the target did NOT return to max, but all ${rs.hacked} hacked ` +
+            `batches restored x${breakEven.toFixed(4)}. Grow is NOT the shortfall - look ` +
+            `at ordering, at security under the volley, or at batches lost at launch.`,
+        );
+      }
     }
 
     if (verbose) {
@@ -968,14 +993,20 @@ export async function run(ns, math) {
           (vol.unmeasurable ? `  (${vol.unmeasurable} batch(es) had stale workers)` : ""),
       );
       ns.print(
+        `           [v] restore: ${vol.restore.restored}/${vol.restore.hacked} hacked batches ` +
+          `reached x${(1 / (1 - th.steal)).toFixed(4)}` +
+          (vol.restore.hacked
+            ? `  (${((vol.restore.restored / vol.restore.hacked) * 100).toFixed(1)}%, ` +
+              `median x${vol.restore.median.toFixed(4)}, worst x${vol.restore.worst.toFixed(4)})`
+            : ""),
+      );
+      ns.print(
         `           [v] grow:  want x${wantGrowMult.toFixed(4)}  got x${vol.growMean.toFixed(4)}  ` +
           `(first ${vol.growFirst.toFixed(4)} -> last ${vol.growLast.toFixed(4)}, ${vol.samples} batches)` +
-          // Below-plan is expected whenever hacks miss: those batches start at
-          // max money, so grow clamps instantly and reports ~1.0. Say which
-          // reading applies rather than leaving the number to be misread.
-          (restored
-            ? "  - under plan is the max-money clamp, not a shortfall"
-            : "  - and the target did NOT return to max"),
+          // This mean mixes clamped and unclamped batches and cannot be read as a
+          // shortfall - the restore line above is the one that can. Kept because
+          // its TREND across the volley is still informative.
+          `  - confounded by the clamp; judge on restore above`,
       );
       // The trend is the diagnosis, and its SIGN is the whole point: grow
       // getting worse across the volley means conditions are degrading under it

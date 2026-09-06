@@ -119,3 +119,58 @@ export function batchOutcome(reports) {
 
   return { stolen, growMult, weakened, hackThreads, growThreads, missing, hackHits, hackTries };
 }
+
+/**
+ * Did grow actually restore the batches it was supposed to?
+ *
+ * The geometric mean of every batch's grow multiplier cannot answer this, and
+ * reading it as though it could produced a false WARN on a live run. Two things
+ * confound it, both of them normal:
+ *
+ *   - `ns.grow` returns the multiplier AFTER the max-money clamp, so even a
+ *     perfect batch reports 1/(1-steal), never the GROW_MARGIN-inflated figure
+ *     the plan asked for.
+ *   - a batch whose hack MISSED starts at max money, so its grow clamps
+ *     immediately and reports ~1.0.
+ *
+ * At steal 84.48% with a 60.8% hack chance, a perfectly healthy volley averages
+ * 6.44^0.608 * 1^0.392 = x3.10. A live run measured x3.55 - better than perfect -
+ * while its WARN claimed grow was 45% short and advised raising GROW_MARGIN.
+ *
+ * Looking only at batches whose hack SUCCEEDED removes both confounds at once.
+ * Such a batch starts at (1-steal) of wherever the server was and has room for
+ * the full restore, so a healthy one reports at least 1/(1-steal). Anything less
+ * is grow genuinely falling short, and by a factor you can read directly.
+ *
+ * Pure arithmetic over reports already collected - 0 GB.
+ *
+ * @param {object[]} outcomes  batchOutcome() results, one per batch
+ * @param {number} required    1 / (1 - steal), the multiplier that breaks even
+ * @param {number} [tolerance] how close counts as restored; floating point and
+ *                             the additive +1/thread term both push slightly off
+ * @returns {{hacked: number, restored: number, median: number, worst: number}}
+ *          hacked is the denominator - batches with no successful hack are not
+ *          evidence either way and are excluded entirely
+ */
+export function restoreStats(outcomes, required, tolerance = 0.99) {
+  const mults = [];
+  for (const o of outcomes) {
+    // growThreads > 0 excludes batches whose grow reports never arrived; a
+    // missing grow is unmeasurable, not a failure to restore.
+    if (o.hackHits > 0 && o.growThreads > 0) mults.push(o.growMult);
+  }
+  if (!mults.length) return { hacked: 0, restored: 0, median: 0, worst: 0 };
+
+  const sorted = [...mults].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+
+  return {
+    hacked: mults.length,
+    restored: mults.filter((m) => m >= required * tolerance).length,
+    // Median rather than mean: one batch that hacked while the server was
+    // already near empty can report an enormous multiplier and drag a mean
+    // upward past the thing being measured.
+    median: sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2,
+    worst: sorted[0],
+  };
+}

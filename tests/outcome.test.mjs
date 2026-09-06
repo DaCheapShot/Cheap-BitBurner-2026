@@ -87,4 +87,81 @@ export const tests = {
       }
     }
   },
+
+  // --- restore rate -------------------------------------------------------
+
+  // The false alarm this exists to kill. At steal 84.48% with a 60.8% hack
+  // chance, a PERFECT volley averages 6.44^0.608 * 1^0.392 = x3.10, because
+  // missed-hack batches sit at max money and their grow clamps to ~1.0. A live
+  // run measured x3.55 - better than perfect - and was told grow was 45% short.
+  "the grow mean cannot tell a perfect volley from a sick one": async () => {
+    const { verify } = await loadScripts();
+    const steal = 0.8448;
+    const required = 1 / (1 - steal);
+
+    // Every hacked batch restores fully; every missed one clamps at 1.0.
+    const perfect = [];
+    for (let i = 0; i < 1000; i++) {
+      const hacked = i % 1000 < 608;
+      perfect.push(
+        hacked
+          ? { hackHits: 1, growThreads: 100, growMult: required }
+          : { hackHits: 0, growThreads: 100, growMult: 1.0 },
+      );
+    }
+
+    const geo = Math.exp(
+      perfect.reduce((n, o) => n + Math.log(o.growMult), 0) / perfect.length);
+    assertClose(geo, Math.pow(required, 0.608), 1e-9,
+      "a perfect volley's grow mean should be the clamped restore raised to the hack chance");
+    assert(geo < 3.2, `a perfect volley already reads only x${geo.toFixed(2)}`);
+
+    // The clamp-free reading calls the same volley what it is.
+    const rs = verify.restoreStats(perfect, required);
+    assert(rs.hacked === 608, `only hacked batches count, got ${rs.hacked}`);
+    assert(rs.restored === 608, `all 608 restored, got ${rs.restored}`);
+  },
+
+  "restoreStats ignores batches whose hack missed": async () => {
+    const { verify } = await loadScripts();
+    const rs = verify.restoreStats([
+      { hackHits: 0, growThreads: 50, growMult: 1.0 },
+      { hackHits: 0, growThreads: 50, growMult: 1.0 },
+      { hackHits: 2, growThreads: 50, growMult: 6.5 },
+    ], 6.4437);
+    assert(rs.hacked === 1, `a missed hack is not evidence either way, got ${rs.hacked}`);
+    assert(rs.restored === 1, "the one hacked batch did restore");
+  },
+
+  "restoreStats catches grow genuinely falling short": async () => {
+    const { verify } = await loadScripts();
+    const required = 6.4437;
+    const rs = verify.restoreStats([
+      { hackHits: 1, growThreads: 50, growMult: 6.50 },
+      { hackHits: 1, growThreads: 50, growMult: 3.20 },
+      { hackHits: 1, growThreads: 50, growMult: 3.00 },
+      { hackHits: 1, growThreads: 50, growMult: 2.80 },
+    ], required);
+    assert(rs.hacked === 4 && rs.restored === 1, `expected 1 of 4, got ${rs.restored} of ${rs.hacked}`);
+    assertClose(rs.median, 3.10, 1e-9, "median should sit between the two middle values");
+    assertClose(rs.worst, 2.80, 1e-9, "worst should be the smallest multiplier");
+  },
+
+  // A batch whose grow reports never arrived is unmeasurable, not a failure -
+  // counting it as one would blame grow for a lost report.
+  "restoreStats excludes batches with no grow report": async () => {
+    const { verify } = await loadScripts();
+    const rs = verify.restoreStats([
+      { hackHits: 1, growThreads: 0, growMult: 1 },
+      { hackHits: 1, growThreads: 40, growMult: 7 },
+    ], 6.4437);
+    assert(rs.hacked === 1, `a missing grow must not count, got ${rs.hacked}`);
+  },
+
+  "restoreStats reports nothing when no batch hacked": async () => {
+    const { verify } = await loadScripts();
+    const rs = verify.restoreStats([{ hackHits: 0, growThreads: 40, growMult: 1 }], 6.4437);
+    assert(rs.hacked === 0 && rs.restored === 0, "no hacked batches means no evidence");
+    assert(rs.median === 0 && rs.worst === 0, "and no median to report");
+  },
 };
