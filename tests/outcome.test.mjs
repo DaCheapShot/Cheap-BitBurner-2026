@@ -66,4 +66,25 @@ export const tests = {
     assert(o.hackHits === 2, `expected 2 hits, got ${o.hackHits}`);
     assert(o.stolen === 8000, "a missed hack contributes 0, not undefined");
   },
+
+  // GROW_MARGIN must buy the SAME money headroom at every steal fraction.
+  // Applied to the thread count it decayed toward nothing as steal fell, which
+  // is why low-steal volleys drained the target while high-steal ones did not.
+  "grow margin gives uniform headroom across steal fractions": async () => {
+    const { config } = await loadScripts();
+    const M = 1e9, margin = config.GROW_MARGIN;
+    for (const steal of [0.10, 0.3274, 0.6931, 0.8227]) {
+      const required = 1 / (1 - steal);
+      const asked = M / ((M * (1 - steal)) / margin);   // what the manager now asks for
+      const headroom = asked / required;
+      assertClose(headroom, margin, 1e-9,
+        `headroom at steal ${steal} should equal GROW_MARGIN`);
+      // The old thread-multiplying form decayed badly at low steal.
+      const oldHeadroom = Math.pow(required, 0.05);
+      if (steal < 0.4) {
+        assert(oldHeadroom < headroom,
+          `the old form should be shown thinner at steal ${steal}`);
+      }
+    }
+  },
 };

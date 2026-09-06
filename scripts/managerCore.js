@@ -119,9 +119,23 @@ export function planThreadsForHack(math, snap, hack, perThread, consts) {
   // Money after this batch's hack lands, which is the state its grow must undo.
   // atSecurity is minSec: the batch's first weaken has already landed by then,
   // so grow executes at baseline security - not at whatever the server shows now.
+  // Ask for the threads to climb back from a LOWER starting point than the batch
+  // will really be at. That is what buys the safety margin, and it buys the SAME
+  // margin at every steal fraction.
+  //
+  // The margin used to multiply the THREAD count, which quietly made it useless
+  // exactly where it was needed. Threads relate to the multiplier exponentially,
+  // so `threads * 1.05` delivers `mult^1.05` - worth 9% of headroom at a x5.64
+  // restore but only 2% at x1.49 and 0.5% at x1.11. Measured runs match: volleys
+  // at 77-82% steal (8-9% headroom) held the server at max money, while volleys
+  // at 32.74% and 69.31% (2.0% and 6.1%) drained it to nothing, because every
+  // batch is planned against max money and any shortfall compounds geometrically.
+  //
+  // Overshooting is free: the game clamps money at maxMoney, so grow threads
+  // beyond what is needed do nothing rather than something harmful.
   const afterHack = snap.maxMoney * (1 - steal);
   const grow = Math.max(1, Math.ceil(
-    math.growThreadsToRestore(snap, afterHack, snap.maxMoney, snap.minSec) * GROW_MARGIN,
+    math.growThreadsToRestore(snap, afterHack / GROW_MARGIN, snap.maxMoney, snap.minSec),
   ));
 
   const weaken2 = Math.max(1, Math.ceil((consts.growSec * grow) / consts.weakenSec));
@@ -912,21 +926,26 @@ export async function run(ns, math) {
     }
 
     // -- measured outcome ----------------------------------------------------
-    // Always warn when grow misses its mark, because that shortfall compounds
-    // across the volley and is invisible in every other line. --verbose adds the
-    // breakdown needed to tell WHY it missed.
-    if (vol.samples > 0 && wantGrowMult > 0) {
-      const off = (1 - vol.growRatio) * 100;
-      if (off > 0.5) {
-        // Where the volley lands after n batches of this shortfall. Batches are
-        // all planned against max money, so the error is geometric, not additive.
-        const endsAt = Math.pow(vol.growRatio, expected.size) * 100;
-        ns.print(
-          `           WARN: grow delivered x${vol.growMean.toFixed(4)} against x${wantGrowMult.toFixed(4)} ` +
-            `planned - ${off.toFixed(2)}% short. Over ${expected.size} batches that leaves ` +
-            `${endsAt < 0.01 ? endsAt.toExponential(1) : endsAt.toFixed(1)}% of max money.`,
-        );
-      }
+    //
+    // A measured grow multiplier BELOW the planned one is normal and healthy on
+    // its own: hack only succeeds about half the time, and a batch whose hack
+    // missed leaves the server at max money, so its grow hits the clamp
+    // immediately and honestly reports ~1.0. Warning on that alone cried wolf at
+    // 57% "short" while the server sat at exactly 100% of max.
+    //
+    // The real test is whether the server came back. If grow were genuinely
+    // undersized the money would not be at max, so gate on that.
+    const restored = isPrepped(after);
+    if (!restored && vol.samples > 0 && wantGrowMult > 0 && vol.growRatio < 1) {
+      // Batches are all planned against the same max-money snapshot, so a
+      // per-batch shortfall compounds geometrically rather than adding up.
+      const endsAt = Math.pow(vol.growRatio, expected.size) * 100;
+      ns.print(
+        `           WARN: grow delivered x${vol.growMean.toFixed(4)} against x${wantGrowMult.toFixed(4)} ` +
+          `planned and the target did NOT return to max. Compounded over ${expected.size} ` +
+          `batches that trends to ${endsAt < 0.01 ? endsAt.toExponential(1) : endsAt.toFixed(1)}% ` +
+          `of max money - raise GROW_MARGIN.`,
+      );
     }
 
     if (verbose) {
@@ -937,7 +956,13 @@ export async function run(ns, math) {
       );
       ns.print(
         `           [v] grow:  want x${wantGrowMult.toFixed(4)}  got x${vol.growMean.toFixed(4)}  ` +
-          `(first ${vol.growFirst.toFixed(4)} -> last ${vol.growLast.toFixed(4)}, ${vol.samples} batches)`,
+          `(first ${vol.growFirst.toFixed(4)} -> last ${vol.growLast.toFixed(4)}, ${vol.samples} batches)` +
+          // Below-plan is expected whenever hacks miss: those batches start at
+          // max money, so grow clamps instantly and reports ~1.0. Say which
+          // reading applies rather than leaving the number to be misread.
+          (restored
+            ? "  - under plan is the max-money clamp, not a shortfall"
+            : "  - and the target did NOT return to max"),
       );
       // The trend is the diagnosis, and its SIGN is the whole point: grow
       // getting worse across the volley means conditions are degrading under it

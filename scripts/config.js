@@ -72,12 +72,22 @@ export const BATCH_SPACING_MS = 4 * SPACER_MS;
 export const HACK_CONTIGUOUS = false;
 
 /**
- * Grow thread padding.
+ * Grow safety margin, as a fraction of MONEY - not of threads.
  *
- * growthAnalyze returns a decimal thread count that we round up, but its
- * multiplier ignores the +$1/thread additive growth and assumes the security
- * level at call time. A little slack costs one or two threads and prevents a
- * batch from silently failing to refill.
+ * Batches ask for enough grow to climb back from `afterHack / GROW_MARGIN`
+ * rather than from `afterHack`, so 1.05 means "size grow as though the hack took
+ * 5% more than it did". That gives the same headroom at every steal fraction.
+ *
+ * It must not be applied to the thread count. Threads relate to the growth
+ * multiplier exponentially, so `threads * 1.05` yields `mult^1.05`: 9% of
+ * headroom at a x5.64 restore, but 2% at x1.49 and 0.5% at x1.11. Measured
+ * volleys bear that out - 77-82% steal held the target at max money, while
+ * 32.74% and 69.31% drained it to nothing. Every batch in a volley is planned
+ * against the same max-money snapshot, so a per-batch shortfall compounds
+ * geometrically over hundreds of batches.
+ *
+ * Overshooting costs almost nothing: the game clamps money at maxMoney, so
+ * surplus grow threads simply do nothing.
  */
 export const GROW_MARGIN = 1.05;
 
