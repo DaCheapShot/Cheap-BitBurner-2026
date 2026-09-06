@@ -53,6 +53,7 @@ run scripts/capacity.js --steal 0.05    # RAM/target/batch-size analysis, launch
 run scripts/manager.js --dry-run        # plan a volley and print it
 run scripts/manager.js --once --verbose # one volley, measured vs planned outcome
 run scripts/prep.js --target <host>     # prep one target without the manager
+run scripts/connectme.js CSEC           # print the connect chain to a host
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -145,6 +146,11 @@ Layers, bottom up:
 | `boot.js` | supervisor | 3.40 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
+
+`connectme.js` (3.80) prints the terminal `connect` chain to a host. It trims the
+chain wherever `src/Terminal/commands/connect.ts` permits a direct jump - that is,
+to any host with `backdoorInstalled` or `purchasedByPlayer` - which is the only
+reason it pays for `getServer`.
 
 `capacity.js` (~7.75) is the surviving diagnostic. It ranks targets by real throughput, which
 the manager does not do — `pickTarget` chooses the richest *hackable* server, not the most
