@@ -1092,12 +1092,12 @@ export async function run(ns, math) {
       // getting worse across the volley means conditions are degrading under it
       // (security creeping up), while grow getting better means the early
       // batches were starting from a fuller server than the later ones.
-      const drift = vol.growFirst > 0 ? (vol.growLast / vol.growFirst - 1) * 100 : 0;
+      const growTrend = vol.growFirst > 0 ? (vol.growLast / vol.growFirst - 1) * 100 : 0;
       ns.print(
-        `           [v] trend: ${drift >= 0 ? "+" : ""}${drift.toFixed(2)}% first->last  ` +
-          (Math.abs(drift) < 0.5
+        `           [v] trend: ${growTrend >= 0 ? "+" : ""}${growTrend.toFixed(2)}% first->last  ` +
+          (Math.abs(growTrend) < 0.5
             ? "flat - the shortfall is in the growth model itself"
-            : drift < 0
+            : growTrend < 0
               ? "grow WEAKENING - suspect security creeping up under the volley"
               : "grow STRENGTHENING - later batches start from a lower server, so grow has more room before the max-money clamp"),
       );
