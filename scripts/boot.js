@@ -162,7 +162,7 @@ function ensureService(ns, file, args, log) {
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-  ns.ui.openTail();
+  //ns.ui.openTail();
 
   const args = ns.args.map(String);
   const once = args.includes("--once");
