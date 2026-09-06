@@ -20,15 +20,41 @@
  * Usage:  run scripts/connectme.js CSEC
  *         run scripts/connectme.js csec              case does not matter
  *         run scripts/connectme.js CSEC avmnite-02h  several at once
+ *         run scripts/connectme.js --factions        every backdoor-gated faction
  *
- * RAM: 1.60 base + scan 0.20 + getServer 2.00 = 3.80 GB
+ * RAM: 1.60 base + scan 0.20 + getServer 2.00 + getHackingLevel 0.05 = 3.85 GB
  *      (tprint, args and string work are 0)
  *
- * getServer is the whole 2.00 GB and buys only the two booleans above. It is
- * charged once no matter how many hosts are inspected, and this is a script you
- * run by hand on home, so the cost is irrelevant here in a way it would not be
- * inside the batcher.
+ * getServer is nearly the whole cost and buys four fields: the two that decide
+ * a direct jump, plus hasAdminRights and requiredHackingSkill for the faction
+ * report. It is charged once no matter how many hosts are inspected, and this
+ * is a script you run by hand on home, so the cost is irrelevant here in a way
+ * it would not be inside the batcher.
  */
+
+/**
+ * The servers whose backdoor grants a faction invite.
+ *
+ * Taken from src/Faction/FactionInfo.tsx - every faction whose inviteReqs
+ * contain haveBackdooredServer, and nothing else. Two mistakes are easy here,
+ * and both were in an earlier connect.js in this repo:
+ *
+ *   - w0r1d_d43m0n grants NO faction. It is the endgame server, and it sits in
+ *     SpecialServers.ts beside the real ones, which is how it creeps in.
+ *   - fulcrumassets is easy to miss because Fulcrum Secret Technologies is a
+ *     megacorp faction rather than a hacking one, so it is declared far from
+ *     the others in the file.
+ *
+ * Order here is arbitrary; the report sorts by required hacking level, which is
+ * the order you can actually reach them in.
+ */
+export const FACTION_SERVERS = [
+  { faction: "CyberSec", host: "CSEC" },
+  { faction: "NiteSec", host: "avmnite-02h" },
+  { faction: "The Black Hand", host: "I.I.I.I" },
+  { faction: "BitRunners", host: "run4theh111z" },
+  { faction: "Fulcrum Secret Technologies", host: "fulcrumassets" },
+];
 
 /**
  * Map every reachable host to its parent, breadth first from home.
@@ -116,28 +142,118 @@ export function commandsFor(path, isDirect) {
   return { commands, from: path[start], jumped: start > 0 };
 }
 
+/**
+ * What still stands between you and `backdoor` on a server.
+ *
+ * src/Terminal/commands/backdoor.ts rejects on hasAdminRights first and
+ * requiredHackingSkill second, so a server blocked by both only ever tells you
+ * about the first. Reporting both is the point: that you are also 200 levels
+ * short changes what you do next, and the root check alone would hide it.
+ *
+ * @param {object} server  an ns.getServer() result
+ * @param {number} hackingLevel
+ * @returns {string[]} empty when `backdoor` would succeed right now
+ */
+export function backdoorBlockers(server, hackingLevel) {
+  const blockers = [];
+  if (!server.hasAdminRights) {
+    const ports = server.numOpenPortsRequired ?? 0;
+    blockers.push(`no root (${ports} port${ports === 1 ? "" : "s"} to open, then NUKE)`);
+  }
+  const need = server.requiredHackingSkill ?? 0;
+  if (need > hackingLevel) blockers.push(`hacking ${need}, you have ${hackingLevel}`);
+  return blockers;
+}
+
+/** The route half of a report block: how to get there, and the shortest way. */
+function routeLines(path, isDirect) {
+  const { commands, from, jumped } = commandsFor(path, isDirect);
+  const hops = path.length - 1;
+  return [
+    `  path   ${path.join(" > ")}  (${hops} hop${hops === 1 ? "" : "s"})`,
+    `  cmd    ${commands.join("; ")}`,
+    ...(jumped ? [`  note   jumping straight to ${from} - it is backdoored or yours`] : []),
+  ];
+}
+
 /** @param {NS} ns */
 export async function main(ns) {
-  const targets = ns.args.map(String);
-  if (targets.length === 0) {
-    ns.tprint("Usage: run scripts/connectme.js <host> [host ...]");
+  const args = ns.args.map(String);
+  // Bare "factions" is accepted alongside --factions: it is what an older
+  // connect.js in this repo took, and muscle memory outlives scripts.
+  const factionsMode = args.some((a) => a === "--factions" || a === "factions");
+  const targets = args.filter((a) => !a.startsWith("--") && a !== "factions");
+
+  if (!factionsMode && targets.length === 0) {
+    ns.tprint("Usage: run scripts/connectme.js <host> [host ...]   |   --factions");
     return;
   }
 
   const parents = buildParents((h) => ns.scan(h));
 
-  // One getServer per host on a route, memoised because routes overlap heavily
-  // near home and a repeated lookup would be pure waste.
-  const directCache = new Map();
+  // One getServer per host, memoised: routes overlap heavily near home, and the
+  // faction report asks about the same hosts twice - once for the jump check
+  // and once for the backdoor status.
+  const cache = new Map();
+  const serverOf = (host) => {
+    if (!cache.has(host)) cache.set(host, ns.getServer(host));
+    return cache.get(host);
+  };
   const isDirect = (host) => {
-    if (!directCache.has(host)) {
-      const s = ns.getServer(host);
-      directCache.set(host, Boolean(s.backdoorInstalled || s.purchasedByPlayer));
-    }
-    return directCache.get(host);
+    const s = serverOf(host);
+    return Boolean(s.backdoorInstalled || s.purchasedByPlayer);
   };
 
   const out = [];
+
+  if (factionsMode) {
+    const rows = FACTION_SERVERS.map(({ faction, host }) => {
+      const name = resolveHost(parents, host);
+      return name
+        ? { faction, host: name, server: serverOf(name), path: pathTo(parents, name) }
+        : { faction, host, server: null, path: null };
+    });
+
+    // Required hacking level is the order you can actually reach these in, and
+    // it is usually the number you are waiting on. Anything unreachable sorts
+    // last rather than to the front as a level of 0.
+    rows.sort((a, b) =>
+      (a.server?.requiredHackingSkill ?? Infinity) - (b.server?.requiredHackingSkill ?? Infinity));
+
+    const level = ns.getHackingLevel();
+    let earned = 0;
+
+    for (const row of rows) {
+      if (!row.server) {
+        out.push(`${row.faction} via ${row.host}\n  ERROR  not on the network`);
+        continue;
+      }
+
+      let status;
+      if (row.server.backdoorInstalled) {
+        earned++;
+        status = "backdoored - invite earned";
+      } else {
+        const blockers = backdoorBlockers(row.server, level);
+        status = blockers.length === 0
+          ? "READY - connect, then run `backdoor`"
+          : `blocked: ${blockers.join("; ")}`;
+      }
+
+      out.push([
+        `${row.faction} via ${row.host}`,
+        `  status ${status}`,
+        ...routeLines(row.path, isDirect),
+      ].join("\n"));
+    }
+
+    ns.tprint(
+      `\nbackdoor-gated factions - ${earned}/${rows.length} earned, hacking level ${level}\n\n` +
+      `${out.join("\n\n")}\n`,
+    );
+    return;
+  }
+
   for (const typed of targets) {
     const host = resolveHost(parents, typed);
     if (!host) {
@@ -145,17 +261,7 @@ export async function main(ns) {
       out.push(`${typed}\n  ERROR  not on the network${near.length ? ` - did you mean: ${near.join(", ")}` : ""}`);
       continue;
     }
-
-    const path = pathTo(parents, host);
-    const { commands, from, jumped } = commandsFor(path, isDirect);
-    const hops = path.length - 1;
-
-    out.push(
-      `${host}\n` +
-      `  path   ${path.join(" > ")}  (${hops} hop${hops === 1 ? "" : "s"})\n` +
-      `  cmd    ${commands.join("; ")}` +
-      (jumped ? `\n  note   jumping straight to ${from} - it is backdoored or yours` : ""),
-    );
+    out.push([host, ...routeLines(pathTo(parents, host), isDirect)].join("\n"));
   }
 
   ns.tprint(`\n${out.join("\n\n")}\n`);

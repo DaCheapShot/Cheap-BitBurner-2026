@@ -54,9 +54,9 @@ export const tests = {
 
   // A hand-run tool, so its 2 GB getServer is affordable - but it must not
   // drift into importing the batcher and dragging that cost somewhere it bites.
-  "connectme.js costs 3.80 GB and imports nothing": () => {
+  "connectme.js costs 3.85 GB and imports nothing": () => {
     const ram = ramOf("connectme");
-    assert(Math.abs(ram - 3.80) < 0.011, `expected 3.80 GB, got ${ram.toFixed(2)}`);
+    assert(Math.abs(ram - 3.85) < 0.011, `expected 3.85 GB, got ${ram.toFixed(2)}`);
     assert(!readScript("connectme").includes('from "./'), "connectme.js should import no other script");
   },
 

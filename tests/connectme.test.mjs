@@ -92,6 +92,46 @@ export const tests = {
     assert(connectme.resolveHost(p, "nope") === null, "an unknown host must resolve to null");
   },
 
+  // Pinned against src/Faction/FactionInfo.tsx: exactly the five factions whose
+  // inviteReqs contain haveBackdooredServer. An earlier connect.js in this repo
+  // got this wrong in both directions at once, which is why the list is asserted
+  // whole rather than just spot-checked.
+  "the faction list is exactly the backdoor-gated factions": async () => {
+    const { connectme } = await loadScripts();
+    const hosts = connectme.FACTION_SERVERS.map((f) => f.host);
+    assert(
+      hosts.join(",") === "CSEC,avmnite-02h,I.I.I.I,run4theh111z,fulcrumassets",
+      `faction hosts drifted: ${hosts.join(",")}`,
+    );
+    // w0r1d_d43m0n is the endgame server and grants no faction, but it lives in
+    // SpecialServers.ts next to the real four and keeps getting swept in.
+    assert(!hosts.includes("w0r1d_d43m0n"), "w0r1d_d43m0n grants no faction invite");
+    assert(connectme.FACTION_SERVERS.every((f) => f.faction), "every entry needs a faction name");
+  },
+
+  // backdoor.ts checks admin rights first and returns, so a doubly-blocked
+  // server never reveals the level requirement in game. Reporting both is the
+  // whole reason this function exists rather than inlining the first check.
+  "backdoorBlockers reports root and level together, not just the first": async () => {
+    const { connectme } = await loadScripts();
+    const both = connectme.backdoorBlockers(
+      { hasAdminRights: false, numOpenPortsRequired: 4, requiredHackingSkill: 505 }, 312);
+    assert(both.length === 2, `expected both blockers, got ${JSON.stringify(both)}`);
+    assert(both[0].includes("4 ports"), `root blocker should name the port count: ${both[0]}`);
+    assert(both[1].includes("505") && both[1].includes("312"), `level blocker should name both: ${both[1]}`);
+  },
+
+  "backdoorBlockers is empty exactly when backdoor would succeed": async () => {
+    const { connectme } = await loadScripts();
+    const ready = { hasAdminRights: true, numOpenPortsRequired: 4, requiredHackingSkill: 505 };
+    assert(connectme.backdoorBlockers(ready, 505).length === 0, "equal level is enough, not short");
+    assert(connectme.backdoorBlockers(ready, 504).length === 1, "one level short must block");
+    // A server needing no ports still needs the singular/plural right, and a
+    // missing requiredHackingSkill must not read as NaN > level.
+    const one = connectme.backdoorBlockers({ hasAdminRights: false, numOpenPortsRequired: 1 }, 1);
+    assert(one.length === 1 && one[0].includes("1 port to open"), `bad singular: ${one[0]}`);
+  },
+
   "an unknown host suggests near matches": async () => {
     const { connectme } = await loadScripts();
     const p = connectme.buildParents(scan);

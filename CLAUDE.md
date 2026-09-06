@@ -54,6 +54,7 @@ run scripts/manager.js --dry-run        # plan a volley and print it
 run scripts/manager.js --once --verbose # one volley, measured vs planned outcome
 run scripts/prep.js --target <host>     # prep one target without the manager
 run scripts/connectme.js CSEC           # print the connect chain to a host
+run scripts/connectme.js --factions     # routes + backdoor status for faction servers
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -150,7 +151,9 @@ Layers, bottom up:
 `connectme.js` (3.80) prints the terminal `connect` chain to a host. It trims the
 chain wherever `src/Terminal/commands/connect.ts` permits a direct jump - that is,
 to any host with `backdoorInstalled` or `purchasedByPlayer` - which is the only
-reason it pays for `getServer`.
+reason it pays for `getServer`. `--factions` reports the five servers whose backdoor
+grants an invite, sourced from `haveBackdooredServer` in `src/Faction/FactionInfo.tsx`
+and pinned by a test - `w0r1d_d43m0n` is NOT one of them.
 
 `capacity.js` (~7.75) is the surviving diagnostic. It ranks targets by real throughput, which
 the manager does not do — `pickTarget` chooses the richest *hackable* server, not the most
