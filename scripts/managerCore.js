@@ -1,5 +1,6 @@
 import {
   STEAL_FRACTION,
+  MAX_STEAL_FRACTION,
   SPACER_MS,
   BATCH_SPACING_MS,
   GROW_MARGIN,
@@ -181,13 +182,16 @@ function batchRamOf(th, ram) {
 const SCREEN_KEEP = 8;
 const TIE_BAND = 0.02;
 
-function chooseSteal(pool, ram, math, snap, perThread, consts, cap) {
+export function chooseSteal(pool, ram, math, snap, perThread, consts, cap) {
   const free = pool.freeRam;
   const screened = [];
 
   for (let hack = 1; ; hack++) {
     const steal = hack * perThread;
-    if (steal >= 0.99) break;
+    // Above this the volley cannot survive the hacking level rising while it
+    // is in flight - see MAX_STEAL_FRACTION for the measured collapse and the
+    // tolerance arithmetic. Every larger hack count is worse, so stop here.
+    if (steal > MAX_STEAL_FRACTION) break;
     const th = planThreadsForHack(math, snap, hack, perThread, consts);
     if (th.error) break;
 

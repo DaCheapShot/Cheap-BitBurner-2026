@@ -213,6 +213,13 @@ Breaking any of these produces silent, compounding damage rather than an error:
   the byte total overstates what can actually be placed. Simulate placement instead.
 - **Judge timing on jitter (spread of drift within a batch), never absolute lateness.** The
   game lands whole batches tens of ms late together, which cannot reorder anything.
+- **Cap the auto-chosen steal fraction.** Thread counts are sized once per volley, then the
+  batches land across the whole weaken window while hacking level climbs. A batch landing late
+  steals more than planned, and its grow was sized for the smaller take, so it ends below where
+  it started and compounds. The headroom is
+  `((GROW_MARGIN - 1) / GROW_MARGIN) * (1 - steal) / steal` — 0.25% at 95% steal against 19% at
+  20%. A measured volley at 98.28% drained $17.68b to $166.11k in one window. See
+  `MAX_STEAL_FRACTION`.
 - **A batch is all-or-nothing.** One that hacks but fails to grow steals money and never
   returns it — worse than not firing.
 - **Never volley an unprepped target**; all thread math assumes max money and min security.
