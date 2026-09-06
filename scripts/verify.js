@@ -174,3 +174,72 @@ export function restoreStats(outcomes, required, tolerance = 0.99) {
     worst: sorted[0],
   };
 }
+
+/**
+ * Did any batch get hacked twice before it could grow?
+ *
+ * analyzeBatch judges ordering WITHIN a batch and nothing else. That was
+ * deliberate - the game lands whole batches tens of ms late together, and
+ * failing them for a common offset is wrong. But it leaves a blind spot: the
+ * offset is only harmless while it is COMMON. When batches drift by different
+ * amounts, one batch's hack can land inside another batch's hack-to-grow gap,
+ * and then two hacks are answered by one grow.
+ *
+ * That drains geometrically and no existing measurement can see it. The batch
+ * still lands in order, so batchOk passes. Its grow still achieves the full
+ * restore it was sized for, so restoreStats passes. Only the money falls, which
+ * is exactly the pattern a live run showed: 109/109 batches restoring while the
+ * target went from $499.68b to $2.71k.
+ *
+ * The invariant is narrow on purpose. A foreign WEAKEN or GROW landing mid-batch
+ * costs a little accuracy; a foreign HACK between this batch's hack and its grow
+ * costs a whole extra steal that nothing pays back.
+ *
+ * Pure arithmetic over reports already collected - 0 GB.
+ *
+ * @param {Map<string, object[]>} byBatch  reports grouped by batch id
+ * @returns {{batches: number, collided: number, intrusions: number, worst: number}}
+ */
+export function crossBatchOrder(byBatch) {
+  const rows = [];
+  for (const [id, reports] of byBatch) {
+    // First landing of each op: a split hack reports once per host, and the
+    // earliest is when the money actually started leaving.
+    let hack = Infinity;
+    let grow = Infinity;
+    for (const r of reports) {
+      if (r.op === "H" && r.a < hack) hack = r.a;
+      if (r.op === "G" && r.a < grow) grow = r.a;
+    }
+    if (hack < Infinity && grow < Infinity) rows.push({ id, hack, grow });
+  }
+  if (!rows.length) return { batches: 0, collided: 0, intrusions: 0, worst: 0 };
+
+  const hacks = rows.map((r) => r.hack).sort((a, b) => a - b);
+
+  let collided = 0;
+  let intrusions = 0;
+  let worst = 0;
+
+  for (const r of rows) {
+    // Binary search the first hack strictly after this batch's own, then walk
+    // while still inside the gap. Linear scanning is fine at 400 batches but
+    // this stays cheap if the volley cap ever rises.
+    let lo = 0;
+    let hi = hacks.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (hacks[mid] <= r.hack) lo = mid + 1; else hi = mid;
+    }
+    let n = 0;
+    for (let i = lo; i < hacks.length && hacks[i] < r.grow; i++) n++;
+
+    if (n > 0) {
+      collided++;
+      intrusions += n;
+      if (n > worst) worst = n;
+    }
+  }
+
+  return { batches: rows.length, collided, intrusions, worst };
+}

@@ -18,7 +18,9 @@ import {
   BATCH_OPS,
   OP_WORKER,
 } from "./config.js";
-import { analyzeBatch, batchOk, batchOutcome, restoreStats } from "./verify.js";
+import {
+  analyzeBatch, batchOk, batchOutcome, restoreStats, crossBatchOrder,
+} from "./verify.js";
 import {
   prepGroup, isPrepped, pickTarget, rankTargets, buildWorkerPool, workerRam,
 } from "./prepper.js";
@@ -892,6 +894,10 @@ export async function run(ns, math) {
     // (stale workers), saying so rather than passing a guess off as a total.
     const wantGrowMult = th.steal < 1 ? 1 / (1 - th.steal) : 0;
     const vol = measureVolley(byBatch, expected, wantGrowMult, 1 / (1 - th.steal));
+    // Ordering ACROSS batches, which analyzeBatch deliberately does not judge.
+    // A foreign hack landing inside this batch's hack-to-grow gap means two
+    // steals answered by one restore, and nothing else measured here can see it.
+    const xb = crossBatchOrder(byBatch);
     const measured = vol.unmeasurable === 0 && vol.samples > 0;
     totalEarned += measured ? vol.stolen : j.ok * th.hackAmount;
 
@@ -980,9 +986,22 @@ export async function run(ns, math) {
         // blaming the nearest number.
         ns.print(
           `           WARN: the target did NOT return to max, but all ${rs.hacked} hacked ` +
-            `batches restored x${breakEven.toFixed(4)}. Grow is NOT the shortfall - look ` +
-            `at ordering, at security under the volley, or at batches lost at launch.`,
+            `batches restored x${breakEven.toFixed(4)}. Grow is NOT the shortfall.`,
         );
+        if (xb.collided > 0) {
+          ns.print(
+            `           WARN: ${xb.collided}/${xb.batches} batches were hacked again before ` +
+              `their own grow landed (${xb.intrusions} intrusions, worst ${xb.worst} in one ` +
+              `gap). Two steals answered by one restore - that is the drain. Batch spacing ` +
+              `${timing.spacing}ms is too tight for a lateness spread of ` +
+              `${j.latenessSpread.toFixed(1)}ms.`,
+          );
+        } else {
+          ns.print(
+            `           WARN: ordering across batches was clean too - look at security ` +
+              `under the volley or at batches lost at launch.`,
+          );
+        }
       }
     }
 
@@ -991,6 +1010,13 @@ export async function run(ns, math) {
         `           [v] take: ${measured ? fmtMoney(vol.stolen) : "unmeasurable"} measured vs ` +
           `${fmtMoney(j.ok * th.hackAmount)} planned` +
           (vol.unmeasurable ? `  (${vol.unmeasurable} batch(es) had stale workers)` : ""),
+      );
+      ns.print(
+        `           [v] cross-batch: ${xb.collided}/${xb.batches} batches hacked again ` +
+          `before their own grow` +
+          (xb.collided
+            ? `  (${xb.intrusions} intrusions, worst ${xb.worst} in one gap) - THIS DRAINS`
+            : `  - clean`),
       );
       ns.print(
         `           [v] restore: ${vol.restore.restored}/${vol.restore.hacked} hacked batches ` +

@@ -164,4 +164,77 @@ export const tests = {
     assert(rs.hacked === 0 && rs.restored === 0, "no hacked batches means no evidence");
     assert(rs.median === 0 && rs.worst === 0, "and no median to report");
   },
+
+  // --- ordering across batches --------------------------------------------
+
+  // The blind spot. analyzeBatch judges ordering WITHIN a batch, which was
+  // deliberate: the game lands whole batches late together and failing them for
+  // a common offset is wrong. But the offset is only harmless while it is
+  // COMMON. A live run showed 194.8ms of lateness spread against 400ms batch
+  // spacing, with every batch passing batchOk and every hacked batch restoring
+  // in full - while the target went from $499.68b to $2.71k.
+  "crossBatchOrder catches a hack landing inside another batch's gap": async () => {
+    const { verify } = await loadScripts();
+    // Batch a hacks at 0 and grows at 200. Batch b's hack lands at 100 - inside
+    // a's gap, so a's single grow answers two steals.
+    const byBatch = new Map([
+      ["a", [{ op: "H", a: 0 }, { op: "G", a: 200 }]],
+      ["b", [{ op: "H", a: 100 }, { op: "G", a: 300 }]],
+    ]);
+    const x = verify.crossBatchOrder(byBatch);
+    assert(x.batches === 2, `expected 2 batches, got ${x.batches}`);
+    assert(x.collided === 1, `only batch a was intruded on, got ${x.collided}`);
+    assert(x.intrusions === 1 && x.worst === 1, `expected one intrusion, got ${JSON.stringify(x)}`);
+  },
+
+  "properly spaced batches report clean": async () => {
+    const { verify } = await loadScripts();
+    // Batch spacing 400ms, grow one spacer after the hack: no overlap anywhere.
+    const byBatch = new Map();
+    for (let i = 0; i < 8; i++) {
+      byBatch.set(`v-${i}`, [{ op: "H", a: i * 400 }, { op: "G", a: i * 400 + 200 }]);
+    }
+    const x = verify.crossBatchOrder(byBatch);
+    assert(x.batches === 8, `expected 8 batches, got ${x.batches}`);
+    assert(x.collided === 0, `nothing should collide, got ${JSON.stringify(x)}`);
+  },
+
+  // Differential lateness is the mechanism: a batch that lands late has its gap
+  // straddle the next batch's hack even though both landed in order internally.
+  "one late batch collides with the batches that overtake it": async () => {
+    const { verify } = await loadScripts();
+    const byBatch = new Map();
+    for (let i = 0; i < 5; i++) {
+      // Batch 1 is 500ms late; everything else is on time.
+      const late = i === 1 ? 500 : 0;
+      byBatch.set(`v-${i}`, [
+        { op: "H", a: i * 400 + late },
+        { op: "G", a: i * 400 + 200 + late },
+      ]);
+    }
+    const x = verify.crossBatchOrder(byBatch);
+    assert(x.collided > 0, "a 500ms slip across 400ms spacing must be caught");
+  },
+
+  // A split hack reports once per host. The earliest is when money actually
+  // started leaving, so that is the one the gap is measured from.
+  "a split hack is measured from its earliest landing": async () => {
+    const { verify } = await loadScripts();
+    const byBatch = new Map([
+      ["a", [{ op: "H", a: 0 }, { op: "H", a: 40 }, { op: "G", a: 200 }]],
+      ["b", [{ op: "H", a: 100 }, { op: "G", a: 300 }]],
+    ]);
+    const x = verify.crossBatchOrder(byBatch);
+    assert(x.collided === 1, `expected batch a to be intruded on, got ${JSON.stringify(x)}`);
+    // b's own hack at 100 must not be counted as intruding on itself.
+    assert(x.intrusions === 1, `a batch cannot intrude on itself, got ${x.intrusions}`);
+  },
+
+  "a batch with no grow report is not judged": async () => {
+    const { verify } = await loadScripts();
+    const byBatch = new Map([["a", [{ op: "H", a: 0 }]]]);
+    const x = verify.crossBatchOrder(byBatch);
+    assert(x.batches === 0 && x.collided === 0,
+      `an unmeasurable batch must not be judged, got ${JSON.stringify(x)}`);
+  },
 };
