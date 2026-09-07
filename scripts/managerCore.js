@@ -705,7 +705,7 @@ export function planShare(pool, ramPerThread, fraction, alive) {
 export function topUpShare(ns, pool, ramPerThread, fraction, alive, aliveByHost = new Map()) {
   const { want, deficit } = planShare(pool, ramPerThread, fraction, alive);
   if (deficit <= 0) {
-    return { want, deficit: 0, launched: 0, placements: [], missing: [] };
+    return { want, deficit: 0, launched: 0, placements: [], noFile: [], refused: [] };
   }
 
   // Home first purely so the rounding remainder lands on the multi-core host.
@@ -716,11 +716,18 @@ export function topUpShare(ns, pool, ramPerThread, fraction, alive, aliveByHost 
     return b.freeRam - a.freeRam;
   });
 
-  const missing = [];
+  // Two failures, kept apart on purpose. Merging them into one "cannot run it"
+  // bucket is what wasted two live runs: deploy.js was current, had copied
+  // share.js to all 68 hosts, and the manager still reported them as missing the
+  // file - because the same list was also collecting hosts whose exec returned 0
+  // for entirely different reasons, and it was labelled with the deploy remedy.
+  // A diagnostic that names the wrong cause is worse than none.
+  const noFile = [];
+  const refused = [];
   const ready = [];
   for (const s of order) {
     if (ns.fileExists(SHARE_WORKER, s.hostname)) ready.push(s);
-    else missing.push(s.hostname);
+    else noFile.push(s.hostname);
   }
 
   let remaining = deficit;
@@ -735,9 +742,14 @@ export function topUpShare(ns, pool, ramPerThread, fraction, alive, aliveByHost 
   const place = (s, n) => {
     if (n <= 0) return;
     if (ns.exec(SHARE_WORKER, s.hostname, n) === 0) {
-      // fileExists said yes, so this is something else - out of RAM by a sliver,
-      // or the process limit. Drop the host rather than the whole top-up.
-      if (!missing.includes(s.hostname)) missing.push(s.hostname);
+      // fileExists already said the script IS here, so this is something else.
+      // Record what was asked for and what the pool believed was free, because
+      // those two numbers are the whole diagnosis: equal-ish means the pool's
+      // view is stale, wildly different means something outside this process is
+      // holding the host. Guessing at the cause is what cost the last two runs.
+      if (!refused.some((r) => r.host === s.hostname)) {
+        refused.push({ host: s.hostname, threads: n, freeGb: s.freeRam });
+      }
       return;
     }
     placedOn.set(s.hostname, (placedOn.get(s.hostname) ?? 0) + n);
@@ -757,7 +769,7 @@ export function topUpShare(ns, pool, ramPerThread, fraction, alive, aliveByHost 
     place(s, Math.min(room(s), remaining));
   }
 
-  return { want, deficit, launched, placements, missing };
+  return { want, deficit, launched, placements, noFile, refused };
 }
 
 /**
@@ -802,19 +814,41 @@ function serviceShare(ns, pool, ramPerThread, log, prefix = INDENT) {
       (res.launched > 0 ? `  +${res.launched}t this cycle` : ""),
   );
 
-  // A shortfall used to be reported as "pool is busy", which was a guess and on
-  // the first live run a wrong one: the fleet was missing share.js entirely and
-  // every exec off home returned 0, so share ran on ONE host out of the whole
-  // network while the log blamed RAM. Name the cause, and name the remedy.
+  // Report the two failures SEPARATELY, with the numbers behind each.
+  //
+  // This line has been wrong twice. First it said "pool is busy" when the fleet
+  // was missing share.js. Then it said hosts could not run share.js when
+  // deploy.js had demonstrably copied it to all 68 of them - because the same
+  // list collected both causes and carried the deploy remedy. Each cause now
+  // prints its own evidence, so the next run diagnoses itself instead of
+  // needing another round trip.
   if (total < res.want) {
-    log(
-      `${prefix}      short of ${res.want}t` +
-        (res.missing.length
-          ? ` - ${res.missing.length} host(s) cannot run ${SHARE_WORKER} ` +
-            `(${res.missing.slice(0, 3).join(", ")}${res.missing.length > 3 ? ", ..." : ""}). ` +
-            `Run scripts/deploy.js.`
-          : ` - the pool is busy; the next cycle retries`),
-    );
+    const some = (xs) => `${xs.slice(0, 3).join(", ")}${xs.length > 3 ? ", ..." : ""}`;
+    log(`${prefix}      short of ${res.want}t (asked for ${fraction * 100}% of the pool)`);
+
+    if (res.noFile.length) {
+      log(
+        `${prefix}      ${res.noFile.length} host(s) have no ${SHARE_WORKER}: ` +
+          `${some(res.noFile)}. Run scripts/deploy.js.`,
+      );
+    }
+    if (res.refused.length) {
+      // fileExists says the script IS on these hosts, so this is not a deploy
+      // problem and telling the user to deploy would send them the wrong way
+      // again. Print what was asked against what the pool thought was free.
+      const r = res.refused[0];
+      log(
+        `${prefix}      ${res.refused.length} host(s) HAVE ${SHARE_WORKER} but refused the exec: ` +
+          `${some(res.refused.map((x) => x.host))}`,
+      );
+      log(
+        `${prefix}      e.g. ${r.host}: asked ${r.threads}t x ${fmtRam(ramPerThread)} = ` +
+          `${fmtRam(r.threads * ramPerThread)}, pool saw ${fmtRam(r.freeGb)} free`,
+      );
+    }
+    if (!res.noFile.length && !res.refused.length) {
+      log(`${prefix}      every host is full; the next cycle retries`);
+    }
   }
 
   return { fraction, threads: total, launched: res.launched };

@@ -197,8 +197,10 @@ export const tests = {
     const pool = prepper.buildWorkerPool(ns);
 
     const res = managerCore.topUpShare(ns, pool, 4.0, 0.25, 0);
-    assert(res.missing.includes("p0") && res.missing.includes("p1"),
-      `both worker-less hosts should be named, got ${JSON.stringify(res.missing)}`);
+    assert(res.noFile.includes("p0") && res.noFile.includes("p1"),
+      `both worker-less hosts should be named, got ${JSON.stringify(res.noFile)}`);
+    assert(res.refused.length === 0,
+      "a missing file is not a refused exec - conflating the two sent two live runs the wrong way");
     assert(res.placements.every((p) => p.host === "home"),
       "nothing should have been placed where the worker does not exist");
     assert(res.launched < res.want, "this fixture is meant to under-share");
@@ -259,6 +261,32 @@ export const tests = {
     assert(res.launched > 0, "nothing was launched, so this proves nothing");
     assert(pool.pendingRam === 0,
       `share left ${pool.pendingRam}GB reserved - refresh() will double-count it`);
+  },
+
+  // The two causes must never share a bucket. They did, and the log then told
+  // the user to run deploy.js on a fleet where deploy.js had already copied the
+  // worker to all 68 hosts - a diagnostic naming the wrong cause, which is worse
+  // than no diagnostic because it is acted on.
+  "a host that HAS the worker but refuses the exec is reported separately": async () => {
+    const { managerCore, prepper } = await loadScripts();
+    const ns = poolNs();
+    const realExec = ns.exec;
+    // Every host has share.js; p0 refuses anyway.
+    ns.exec = (file, host, ...rest) =>
+      (host === "p0" && String(file).includes("share") ? 0 : realExec(file, host, ...rest));
+
+    const res = managerCore.topUpShare(ns, prepper.buildWorkerPool(ns), 4.0, 0.25, 0);
+
+    assert(res.noFile.length === 0,
+      `share.js is on every host, so nothing should be reported missing: ${JSON.stringify(res.noFile)}`);
+    assert(res.refused.some((r) => r.host === "p0"),
+      `p0 refused the exec and should say so, got ${JSON.stringify(res.refused)}`);
+
+    // The evidence that makes the next live log self-diagnosing: what was asked
+    // for against what the pool believed was free.
+    const r = res.refused.find((x) => x.host === "p0");
+    assert(r.threads > 0 && r.freeGb > 0,
+      `a refusal must carry its numbers, got ${JSON.stringify(r)}`);
   },
 
   // deploy.js has not reached every host the moment a server is bought, and exec

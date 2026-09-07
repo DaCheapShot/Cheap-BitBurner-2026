@@ -279,9 +279,15 @@ shape.
 **`deploy.js` only runs when `root.js` roots something new, so adding a worker file never
 triggers it.** The whole fleet can be missing `share.js`, and the first live run was: every
 `exec` off home returned 0, share ran on one host out of the network, and the log blamed a busy
-pool. `topUpShare` now checks `fileExists` per host — free, since `prepper.js` already pays for
-it — and names both the hosts and the remedy (`run scripts/deploy.js`). **After adding or
-changing a worker, run `deploy.js` by hand.**
+pool. `topUpShare` checks `fileExists` per host — free, since `prepper.js` already pays for it —
+and reports **`noFile` and `refused` as separate causes**.
+
+Keeping them apart is the point, and merging them cost two live runs. The first version blamed a
+busy pool when the file was missing; the second told the user to run `deploy.js` on a fleet where
+`deploy.js` had already copied the worker to all 68 hosts, because the same list was collecting
+`exec` failures too. **A diagnostic that names the wrong cause is worse than none — it gets
+acted on.** A refusal now prints what was asked against what the pool believed was free, so the
+next log diagnoses itself instead of costing another round trip.
 
 ### Invariants that look arbitrary but aren't
 
