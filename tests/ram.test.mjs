@@ -15,6 +15,7 @@ const COST = {
   getScriptRam: 0.1, getHackTime: 0.05, getGrowTime: 0.05, getWeakenTime: 0.05,
   getPlayer: 0.5, nuke: 0.05, brutessh: 0.05, ftpcrack: 0.05,
   relaysmtp: 0.05, httpworm: 0.05, sqlinject: 0.05,
+  share: 2.4, getSharePower: 0.2,
 };
 const BASE = 1.6;
 
@@ -42,14 +43,45 @@ function ramOf(bare) {
 }
 
 export const tests = {
-  "manager.js (analyze) stays at 6.15 GB": () => {
+  // 6.15 before share mode; ps (0.20) pays for the census that stops a restarted
+  // manager double-launching share workers, and getSharePower (0.20) for the only
+  // reading of the bonus that includes the intelligence and home-core multipliers.
+  "manager.js (analyze) stays at 6.55 GB": () => {
     const ram = ramOf("manager");
-    assert(Math.abs(ram - 6.15) < 0.011, `expected 6.15 GB, got ${ram.toFixed(2)}`);
+    assert(Math.abs(ram - 6.55) < 0.011, `expected 6.55 GB, got ${ram.toFixed(2)}`);
   },
 
-  "manager-formulas.js costs 6.10 GB": () => {
+  "manager-formulas.js costs 6.50 GB": () => {
     const ram = ramOf("manager-formulas");
-    assert(Math.abs(ram - 6.10) < 0.011, `expected 6.10 GB, got ${ram.toFixed(2)}`);
+    assert(Math.abs(ram - 6.50) < 0.011, `expected 6.50 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // Charged PER THREAD, and the manager places tens of thousands of them, so a
+  // stray import costs more here than anywhere else in the repo: pulling in
+  // ram.js would add 0.35 GB to every single thread. config.js has no ns calls
+  // at all, which is the only reason importing it is safe.
+  "share.js is exactly 4.00 GB and imports only config.js": () => {
+    const ram = ramOf("share");
+    assert(Math.abs(ram - 4.00) < 0.011, `expected 4.00 GB, got ${ram.toFixed(2)}`);
+    const imports = [...readScript("share").matchAll(/from\s+"\.\/([\w-]+)\.js"/g)].map((m) => m[1]);
+    assert(imports.length === 1 && imports[0] === "config",
+      `share.js should import config.js and nothing else, got ${imports.join(", ") || "(none)"}`);
+  },
+
+  // A hand-run toggle, so prepper.js's 2.00 GB is affordable - and it buys the
+  // guarantee that the pool it reports is the pool the manager will divide.
+  "sharemode.js costs 3.80 GB": () => {
+    const ram = ramOf("sharemode");
+    assert(Math.abs(ram - 3.80) < 0.011, `expected 3.80 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // The manager reaches SHARE_WORKER as a STRING from config.js and must never
+  // import the worker itself: ns.share is 2.40 GB for a function it never calls.
+  "no manager build pays for ns.share": () => {
+    for (const entry of ["manager", "manager-formulas", "boot"]) {
+      assert(!closure(entry).has("share"),
+        `${entry}.js imports share.js - 2.40 GB for a function it never calls`);
+    }
   },
 
   // A hand-run tool, so its 2 GB getServer is affordable - but it must not

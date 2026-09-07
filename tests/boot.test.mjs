@@ -127,6 +127,24 @@ export const tests = {
     assert(r.launched.includes("scripts/manager-formulas.js"), "the formulas manager should start");
   },
 
+  // Share workers are NOT in WORKER_LIST, and that is deliberate: none of the
+  // reasoning behind killOrphanWorkers applies to them. They are tied to no
+  // target, so they cannot churn a server nobody owns; they hold a bounded
+  // fraction of the pool rather than a whole volley's worth; and the incoming
+  // manager adopts them through shareCensus instead of launching duplicates.
+  // Killing them would drop the reputation bonus for a tick and buy nothing.
+  "a manager swap spares the share workers": async () => {
+    const r = await runBoot({
+      files: { "/data/calib.json": CALIB }, hasFormulas: true,
+      running: ["scripts/manager.js"],
+      workers: [...ORPHANS, { filename: "scripts/share.js", host: "p1", threads: 2921 }],
+    });
+    assert(!r.killed.includes("scripts/share.js"),
+      `share workers must survive a build swap, killed: ${r.killed}`);
+    assert(r.procs.some((p) => p.filename === "scripts/share.js"),
+      "the share worker should still be running after the swap");
+  },
+
   // The dangerous mistake is killing workers whenever a manager is killed:
   // killDuplicates keeps a survivor whose own volley is in flight, and its
   // workers are indistinguishable from a dead manager's without reading batch

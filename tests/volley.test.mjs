@@ -29,7 +29,7 @@ const TARGET = "rich";
  * A prepped target and a pool big enough to seat a few batches, with workers
  * that apply their op to a simulated server and report like the real ones.
  */
-function volleyNs({ formulas = false } = {}) {
+function volleyNs({ formulas = false, share = null } = {}) {
   const ns = makeNs({
     args: ["--target", TARGET, "--once", "--verbose"],
     hosts: { home: 4096, p0: 8192, p1: 8192 },
@@ -51,13 +51,23 @@ function volleyNs({ formulas = false } = {}) {
         written: Date.now(), hosts: {},
       }),
       "/scripts/hack.js": "x",
+      ...(share === null ? {} : { "/data/share.txt": String(share) }),
     },
   });
 
   const srv = ns._servers[TARGET];
+  const realExec = ns.exec;
   ns._log = [];
 
   ns.exec = (file, host, threads, target, delay, batch, port, planned, op) => {
+    // Share workers are not batch ops: they apply nothing to the target, report
+    // nothing, and - the part that matters here - never hand their RAM back.
+    // Routing them through the batch path below would run them as a weaken.
+    if (file.includes("share")) {
+      ns._used[host] += threads * 1.75;
+      return realExec(file, host, threads);
+    }
+
     ns._used[host] += threads * 1.75;
 
     // Apply the op to the simulated server and report its real return value, so
@@ -136,6 +146,43 @@ export const tests = {
     ]) {
       assert(log.includes(line), `--verbose never printed "${line}":\n${log}`);
     }
+  },
+
+  // The share top-up sits on this path, and its whole contract is that the RAM
+  // it takes disappears from the volley by itself - no reserve mechanism, just
+  // getServerUsedRam reading workers that are already running. Nothing short of
+  // an executed cycle can show that actually happens.
+  //
+  // Measured on the volley POOL, not on its batch count. The batch count here is
+  // capped by the weaken window rather than by RAM, so the manager absorbs a
+  // smaller pool by lowering the steal fraction instead and the count does not
+  // move - which is correct behaviour and a useless assertion.
+  "share mode takes its slice out of the volley": async () => {
+    const { managerCore, mathAnalyze } = await loadScripts();
+    const poolIn = (log) => Number(/volley \d+ batches[\s\S]*?of ([\d.]+)TB/.exec(log)?.[1] ?? -1);
+
+    const off = volleyNs();
+    assert(mathAnalyze.prepare(off).ok, "prepare failed");
+    await managerCore.run(off, mathAnalyze);
+    const offLog = logOf(off);
+
+    const on = volleyNs({ share: 0.25 });
+    assert(mathAnalyze.prepare(on).ok, "prepare failed");
+    await managerCore.run(on, mathAnalyze);
+    const onLog = logOf(on);
+
+    assert(!/share \d+t on/.test(offLog), `share is off but a share line was printed:
+${offLog}`);
+    assert(/share \d+t on \d+ host/.test(onLog), `share is on but nothing was launched:
+${onLog}`);
+
+    assert(poolIn(offLog) > 0 && poolIn(onLog) > 0, `no volley pool was reported:
+${offLog}
+${onLog}`);
+    const taken = 1 - poolIn(onLog) / poolIn(offLog);
+    assert(Math.abs(taken - 0.25) < 0.02,
+      `share should have taken about 25% of the volley pool, took ${(taken * 100).toFixed(1)}% ` +
+        `(${poolIn(onLog)}TB with share vs ${poolIn(offLog)}TB without)`);
   },
 
   "a cycle leaks no RAM": async () => {

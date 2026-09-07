@@ -55,6 +55,10 @@ run scripts/manager.js --once --verbose # one volley, measured vs planned outcom
 run scripts/prep.js --target <host>     # prep one target without the manager
 run scripts/connectme.js CSEC           # print the connect chain to a host
 run scripts/connectme.js --factions     # routes + backdoor status for faction servers
+run scripts/sharemode.js                # share status: power, pool, what each fraction buys
+run scripts/sharemode.js on             # trade SHARE_FRACTION of the pool for faction rep
+run scripts/sharemode.js off            # every share thread exits within 10s
+run scripts/sharemode.js 0.5            # retune live, no restart
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -121,7 +125,9 @@ called or not. Consequences that shape the whole codebase:
 - `hackAnalyze` stays live: it moves with hacking level, and reacting to that is the point.
 
 Worker scripts pay their cost **per thread**, so `hack.js` / `grow.js` / `weaken.js` contain
-nothing beyond one op and one port write.
+nothing beyond one op and one port write. `share.js` follows the same rule and pays the most for
+breaking it: `ns.share` is 2.40 GB, so the worker costs **4.00 GB per thread** and one stray
+import of `ram.js` would add 0.35 GB to every one of tens of thousands of them.
 
 ### Two math backends
 
@@ -147,14 +153,16 @@ Layers, bottom up:
 | `prepper.js` | prep as a module (manager runs it in-process) | 2.00 |
 | `mathAnalyze.js` | math interface via *Analyze + calibration cache | 2.55 |
 | `mathFormulas.js` | math interface via `ns.formulas` | 2.50 |
-| `managerCore.js` | the volley loop, math-free | 2.00 |
-| `manager.js` | entry: core + mathAnalyze (always works) | 6.15 |
-| `manager-formulas.js` | entry: core + mathFormulas | 6.10 |
+| `managerCore.js` | the volley loop + share top-up, math-free | 2.40 |
+| `manager.js` | entry: core + mathAnalyze (always works) | 6.55 |
+| `manager-formulas.js` | entry: core + mathFormulas | 6.50 |
 | `prep.js` | entry: prepper + mathAnalyze | 6.15 |
 | `prep-formulas.js` | entry: prepper + mathFormulas | 6.10 |
 | `boot.js` | supervisor | 3.60 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
+| `share.js` | one `ns.share()` loop | 4.00 **per thread** |
+| `sharemode.js` | the share toggle | 3.80 |
 
 `connectme.js` (3.80) prints the terminal `connect` chain to a host. It trims the
 chain wherever `src/Terminal/commands/connect.ts` permits a direct jump - that is,
@@ -205,6 +213,51 @@ launch the whole volley at once → drain reports while it lands → recompute a
 Recomputing every cycle is the design, not overhead: it self-corrects as hacking level, op
 times and RAM change.
 
+### Share mode
+
+`ns.share()` converts RAM into a multiplier on faction reputation gain. Off by default; it
+matters mid-to-late in a BitNode, when money has stopped being the constraint and rep has not.
+
+**The bonus is logarithmic.** From `src/NetworkShare/Share.ts`, `calculateShareBonus` is
+`1 + ln(shareThreads) / 25`, so every **doubling** of share RAM adds a flat `ln 2 / 25 = 2.77`
+points however much is already running. Hack income is roughly *linear* in RAM. On a 3267 TB
+pool at 4.00 GB per thread:
+
+| share RAM | threads | bonus |
+|---|---|---|
+| 10% | 83.6k | ×1.453 |
+| 25% (`SHARE_FRACTION`) | 209k | ×1.490 |
+| 50% | 418k | ×1.518 |
+| 100% | 837k | ×1.546 |
+
+The last three quarters of the pool buy 5.6 points and cost three quarters of the income. That
+curve is the whole reason share takes a capped fraction rather than "whatever is spare".
+
+**Three pieces**, and the split is not arbitrary:
+
+- `sharemode.js` writes a **fraction** to `/data/share.txt`. A fraction rather than an on/off
+  flag so the amount is retunable from the terminal — putting it in `config.js` would mean
+  waiting on the filesync extension, the least reliable link in the setup.
+- `share.js` loops `while (fraction > 0) await ns.share()`. `ns.share` resolves after 10 s, so
+  sharing continuously means looping — and that loop is also the **off switch**. Workers poll
+  the marker between calls and retire themselves, so `sharemode.js off` clears the network in
+  under 10 s with no `ns.kill` anywhere, and works even when no manager is running.
+- `managerCore.js` tops the thread count up against the volley's own pool, before the volley is
+  sized, then `refresh()`es — so the RAM share took is simply gone from what the volley sees.
+  It does the same per prep cycle through `prepGroup`'s `onCycle` hook, because prep is when the
+  pool is most idle and a prep can hold the manager for ten minutes, so deferring a toggle until
+  prep finished would make the toggle look broken. The top-up is idempotent, so running it from
+  both places costs nothing.
+
+`shareCensus` reads `ns.ps` per host and is what makes a manager restart safe: share workers
+outlive the process that started them, so a manager that did not count them would launch a
+second full set on top — doubling the RAM share holds to buy 2.77 points of a logarithm.
+
+Share threads are placed **home first**, then by free RAM. `getCoreBonus` is
+`1 + (cores - 1) / 16` and home is the only multi-core host, so an 8-core home makes each of its
+share threads worth 1.44 of anyone else's. It is the one placement in this codebase decided by
+host identity rather than host size.
+
 ### Invariants that look arbitrary but aren't
 
 Breaking any of these produces silent, compounding damage rather than an error:
@@ -238,6 +291,25 @@ Breaking any of these produces silent, compounding damage rather than an error:
   `((GROW_MARGIN - 1) / GROW_MARGIN) * (1 - steal) / steal` — 0.25% at 95% steal against 19% at
   20%. A measured volley at 98.28% drained $17.68b to $166.11k in one window. See
   `MAX_STEAL_FRACTION`.
+- **Share is launched by whoever owns the pool.** A share service running beside the manager
+  would `exec` into RAM the manager had already planned a volley against, and the manager's
+  `exec` would fail mid-volley — the same class of damage two managers cause. It would also
+  find nothing free, since a volley normally holds 99%+ of the pool. So `managerCore` does it,
+  before it builds the pool: share workers `exec` outside the reservation system and outlive the
+  cycle, and the volley then sizes itself against what `getServerUsedRam` reports. Do NOT route
+  them through `pool.allocate` — a reservation is released at cycle end, but the worker is not,
+  so the pool would double-count RAM the game already reports as used.
+- **Cap the share fraction.** `SHARE_MAX_FRACTION` is not decoration. At 100% the prep gate
+  finds zero placeable threads, waits out `POOL_WAIT_CYCLES` (15 minutes), fails, and the
+  manager stops — whereupon boot restarts it into the same wall a tick later. That is the
+  manager-swap restart loop arrived at from a different direction, and a mistyped terminal
+  argument is enough to trigger it. For the same reason, anything unparseable in the marker
+  reads as **off**, never as a default: a `NaN` fraction compares false against every bound and
+  would leave the RAM held with no way back but a kill.
+- **`killOrphanWorkers` spares share workers.** They are deliberately not in `WORKER_LIST`.
+  None of the reasoning behind that kill applies: they are tied to no target, they hold a
+  bounded fraction rather than a whole volley's worth, and the incoming manager adopts them
+  through `shareCensus`. Killing them would drop the bonus for a tick and buy nothing.
 - **A batch is all-or-nothing.** One that hacks but fails to grow steals money and never
   returns it — worse than not firing.
 - **Never volley an unprepped target**; all thread math assumes max money and min security.

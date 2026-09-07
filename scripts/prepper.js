@@ -9,6 +9,8 @@ import {
   REPORT_PORT,
   WORKER_FILES,
   WORKER_RAM_FALLBACK,
+  SHARE_WORKER,
+  SHARE_RAM_FALLBACK,
   MONEY_TOLERANCE,
   SEC_TOLERANCE,
 } from "./config.js";
@@ -102,6 +104,21 @@ export function workerRam(ns) {
     out[kind] = real > 0 ? real : WORKER_RAM_FALLBACK[kind];
   }
   return out;
+}
+
+/**
+ * Per-thread RAM of the share worker.
+ *
+ * Kept separate from workerRam rather than added as a fourth key: that object's
+ * shape is consumed positionally-by-name in batchRamOf and sizeGrowWave, and
+ * share is not a batch op - it has no place in a batch's RAM total and must
+ * never be summed into one by accident.
+ *
+ * getScriptRam is already paid for by workerRam, so this adds nothing.
+ */
+export function shareRam(ns) {
+  const real = ns.getScriptRam(SHARE_WORKER, "home");
+  return real > 0 ? real : SHARE_RAM_FALLBACK;
 }
 
 /**
@@ -457,6 +474,7 @@ export async function prepGroup(ns, host, opts = {}) {
     fanout = PREP_FANOUT,
     poolWait = POOL_WAIT_CYCLES,
     verbose = false,
+    onCycle = null,
   } = opts;
 
   if (!math) {
@@ -469,6 +487,20 @@ export async function prepGroup(ns, host, opts = {}) {
     // Rebuild every cycle: hosts get rooted, RAM gets bought, other scripts
     // start and stop. A stale pool would over-commit.
     const pool = buildPool();
+
+    // Hook for work that must claim RAM before prep sizes itself against what
+    // is left. The manager uses it to service share mode: prep is exactly when
+    // the pool sits most idle, and a prep can run for ten minutes, so deferring
+    // a share toggle until prep finished would make the toggle look broken.
+    //
+    // The pool is re-read afterwards rather than trusting the hook to keep it
+    // honest - a hook that exec'd anything has changed the game's used RAM, and
+    // planPrepWave below must not size a wave against bytes that are gone.
+    if (onCycle) {
+      onCycle(pool);
+      pool.refresh();
+    }
+
     const m = math.snapshot(ns, host);
 
     if (isPrepped(m)) {

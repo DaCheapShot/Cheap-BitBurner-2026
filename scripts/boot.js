@@ -140,6 +140,14 @@ function reachableHosts(ns) {
  * Workers are identified by filename, so anything else running on the network
  * is left alone. ps reports paths without a leading slash while WORKER_LIST
  * carries one, hence normPath on both sides.
+ *
+ * SHARE WORKERS ARE DELIBERATELY SPARED. They are not in WORKER_LIST, and that
+ * is not an oversight: none of the reasoning above applies to them. They are
+ * tied to no target, so they cannot churn a server nobody owns; they hold a
+ * bounded fraction of the pool by design rather than a whole volley's worth;
+ * and the incoming manager ADOPTS them through shareCensus instead of launching
+ * duplicates. Killing them would drop the reputation bonus for a tick and buy
+ * nothing. Turning share off is the marker's job - see scripts/sharemode.js.
  */
 function killOrphanWorkers(ns, log) {
   const workers = new Set(WORKER_LIST.map(normPath));

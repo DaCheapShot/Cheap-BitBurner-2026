@@ -1,7 +1,7 @@
-import { WORKER_LIST } from "./config.js";
+import { WORKER_LIST, SHARE_WORKER } from "./config.js";
 
 /**
- * Copy the three worker scripts to every rooted host with RAM.
+ * Copy the worker scripts to every rooted host with RAM.
  *
  * Must run before any exec: exec requires the script to already exist on the
  * target server. Re-run it after editing a worker, or after rooting new hosts -
@@ -28,6 +28,16 @@ import { WORKER_LIST } from "./config.js";
  */
 const REQUIRED_IN_WORKER = "r: result";
 
+/**
+ * The same idea for the share worker, which reports nothing and so cannot be
+ * checked the same way. Its one job is to call ns.share, and a copy on home
+ * without that call is a stale file rather than a working one.
+ */
+const REQUIRED_IN_SHARE = "ns.share(";
+
+/** Everything that must exist on a host before the manager can exec it there. */
+const DEPLOY_LIST = [...WORKER_LIST, SHARE_WORKER];
+
 /** @param {NS} ns */
 export async function main(ns) {
   const stale = [];
@@ -36,6 +46,10 @@ export async function main(ns) {
     if (!src) stale.push(`${file} (not on home at all)`);
     else if (!src.includes(REQUIRED_IN_WORKER)) stale.push(`${file} (no result reporting)`);
   }
+  const share = ns.read(SHARE_WORKER);
+  if (!share) stale.push(`${SHARE_WORKER} (not on home at all)`);
+  else if (!share.includes(REQUIRED_IN_SHARE)) stale.push(`${SHARE_WORKER} (does not call ns.share)`);
+
   if (stale.length) {
     ns.tprint(
       `ERROR: home's copies are stale, refusing to broadcast them:\n  ${stale.join("\n  ")}\n` +
@@ -67,13 +81,13 @@ export async function main(ns) {
       continue;
     }
     // scp takes the whole array; it returns false if ANY file failed.
-    if (ns.scp(WORKER_LIST, host, "home")) copied.push(host);
+    if (ns.scp(DEPLOY_LIST, host, "home")) copied.push(host);
     else failed.push(host);
   }
 
   // Routine copies go to the script's own log, not the terminal. boot.js runs
   // this on every network change, and a success line per run is pure noise.
-  ns.print(`workers: ${WORKER_LIST.join("  ")}`);
+  ns.print(`workers: ${DEPLOY_LIST.join("  ")}`);
   ns.print(`copied to ${copied.length} host(s): ${copied.join(", ") || "(none)"}`);
   ns.print(`skipped ${skipped} (no root or no RAM), scanned ${seen.size}`);
 
