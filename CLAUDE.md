@@ -96,6 +96,14 @@ Several fixes in this repo's history exist because a live run disagreed with a p
 simulation. Tests check syntax, isolation (the two math backends never reach each other),
 RAM accounting, and contract equivalence — but in-game runs are the real gate.
 
+`tests/volley.test.mjs` executes a whole `run()` cycle against a mock that applies each op to a
+simulated server. It is the only test that RUNS the manager rather than calling its parts, and it
+exists because two runtime `ReferenceError`s reached the live game past a clean `node --check` —
+a call site updated without its import, and a `const` in the verbose block shadowing an outer name
+so an earlier read of it hit the temporal dead zone. Both were on the `--verbose` path. A
+shadowing lint was tried and rejected: matching on indentation flags 14 benign redeclarations
+across `scripts/` because it cannot tell a nested block from a different function.
+
 ## RAM is the design constraint
 
 Bitburner charges a script for **every `ns.*` function reachable through its imports**, whether

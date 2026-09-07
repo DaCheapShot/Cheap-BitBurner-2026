@@ -133,6 +133,51 @@ export const HACK_CONTIGUOUS = false;
 export const GROW_MARGIN = 1.05;
 
 /**
+ * How much the hack fraction may grow mid-volley without the volley eating
+ * itself, as a fraction of the planned steal.
+ *
+ * Thread counts are sized once per volley from one snapshot, then the batches
+ * land across the whole weaken window while hacking level climbs. A batch
+ * landing late steals MORE than planned, and its grow was sized for the smaller
+ * take, so it ends below where it started - and every batch is planned against
+ * max money, so the shortfall compounds geometrically.
+ *
+ * A FIXED grow margin cannot buy a fixed amount of that protection. At margin m
+ * the drift a batch survives is ((m-1)/m) * (1-steal)/steal, which collapses as
+ * steal rises: GROW_MARGIN 1.05 is worth 19% at 20% steal but 0.88% at 84%. A
+ * measured volley at 84.37% steal opened healthy - its first tenth averaged
+ * x3.66 against the x3.33 a perfect volley reads at that hack chance - and then
+ * collapsed to $9.36k of $499.68b as level climbed past that 0.88%.
+ *
+ * So fix the TOLERANCE and solve for the margin instead. Requiring
+ *   (1 - steal(1 + D)) * margin / (1 - steal) >= 1
+ * gives growMarginFor() below, which delivers the same D at every steal. This is
+ * the same correction GROW_MARGIN itself needed once already: it used to
+ * multiply the thread count, which made it exponentially weaker exactly where it
+ * mattered.
+ *
+ * 0.05 covers a 5% rise in hack effectiveness across one window. It costs little
+ * - grow threads scale with the LOG of the multiplier, so the 1.37x margin it
+ * implies at 84% steal is about 14% more grow threads, roughly 7% of a batch.
+ */
+export const HACK_DRIFT_TOLERANCE = 0.05;
+
+/**
+ * The grow margin that buys HACK_DRIFT_TOLERANCE at this steal fraction.
+ *
+ * Returns Infinity when no margin can survive the drift (steal >= 1/(1+D)) -
+ * planThreadsForHack turns that into an error and the steal search stops there,
+ * which is the correct answer rather than a number.
+ *
+ * Pure arithmetic, no ns calls - config.js must stay 0 GB.
+ */
+export function growMarginFor(steal, tolerance = HACK_DRIFT_TOLERANCE) {
+  const survives = 1 - steal * (1 + tolerance);
+  if (survives <= 0) return Infinity;
+  return (1 - steal) / survives;
+}
+
+/**
  * How many EXTRA targets may be prepped alongside the one the manager is
  * waiting on.
  *

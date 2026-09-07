@@ -4,6 +4,8 @@ import {
   SPACER_MS,
   BATCH_SPACING_MS,
   GROW_MARGIN,
+  growMarginFor,
+  HACK_DRIFT_TOLERANCE,
   HACK_CONTIGUOUS,
   HOME_RESERVE_GB,
   REPORT_PORT,
@@ -18,7 +20,9 @@ import {
   BATCH_OPS,
   OP_WORKER,
 } from "./config.js";
-import { analyzeBatch, batchOk, batchOutcome } from "./verify.js";
+import {
+  analyzeBatch, batchOk, batchOutcome, restoreStats, crossBatchOrder, moneyTrail,
+} from "./verify.js";
 import {
   prepGroup, isPrepped, pickTarget, rankTargets, buildWorkerPool, workerRam,
 } from "./prepper.js";
@@ -136,9 +140,19 @@ export function planThreadsForHack(math, snap, hack, perThread, consts) {
   //
   // Overshooting is free: the game clamps money at maxMoney, so grow threads
   // beyond what is needed do nothing rather than something harmful.
+  //
+  // The margin is DERIVED from the steal, not fixed. A fixed one buys drift
+  // protection that collapses as steal rises - GROW_MARGIN 1.05 is worth 19%
+  // at 20% steal but 0.88% at 84%, and a measured volley at 84.37% opened
+  // healthy and then collapsed to $9.36k of $499.68b once level climbed past
+  // that. growMarginFor solves for the same tolerance at every steal.
+  const margin = growMarginFor(steal, consts.drift);
+  if (!Number.isFinite(margin)) {
+    return { error: `steal ${steal} cannot survive HACK_DRIFT_TOLERANCE` };
+  }
   const afterHack = snap.maxMoney * (1 - steal);
   const grow = Math.max(1, Math.ceil(
-    math.growThreadsToRestore(snap, afterHack / GROW_MARGIN, snap.maxMoney, snap.minSec),
+    math.growThreadsToRestore(snap, afterHack / margin, snap.maxMoney, snap.minSec),
   ));
 
   const weaken2 = Math.max(1, Math.ceil((consts.growSec * grow) / consts.weakenSec));
@@ -496,8 +510,11 @@ function judgeVolley(byBatch, expected, spacerMs) {
  *
  * Pure arithmetic on reports already collected - no ns calls, 0 GB.
  */
-function measureVolley(byBatch, expected, wantGrowMult) {
+function measureVolley(byBatch, expected, wantGrowMult, breakEvenMult) {
   const samples = [];
+  // Kept whole, not just their multipliers: restoreStats has to correlate each
+  // batch's grow against whether that same batch's hack landed.
+  const outcomes = [];
   let stolen = 0;
   let weakened = 0;
   let unmeasurable = 0;
@@ -514,11 +531,13 @@ function measureVolley(byBatch, expected, wantGrowMult) {
     hackHits += o.hackHits;
     hackTries += o.hackTries;
     if (o.growThreads > 0) samples.push(o.growMult);
+    outcomes.push(o);
   }
 
   if (!samples.length) {
     return { stolen, weakened, unmeasurable, hackHits, hackTries, samples: 0,
-             growMean: 0, growFirst: 0, growLast: 0, growRatio: 0 };
+             growMean: 0, growFirst: 0, growLast: 0, growRatio: 0,
+             restore: { hacked: 0, restored: 0, median: 0, worst: 0 }, outcomes: [] };
   }
 
   /*
@@ -552,6 +571,10 @@ function measureVolley(byBatch, expected, wantGrowMult) {
     growFirst: geoMean(samples.slice(0, edge)),
     growLast: geoMean(samples.slice(-edge)),
     growRatio: wantGrowMult > 0 ? mean / wantGrowMult : 0,
+    // The clamp-free reading. wantGrowMult carries GROW_MARGIN, but a batch can
+    // never report more than the clamp allows, so break-even is the yardstick.
+    restore: restoreStats(outcomes, breakEvenMult),
+    outcomes,
   };
 }
 
@@ -646,6 +669,11 @@ export async function run(ns, math) {
   // state carried between cycles, along with the strike count - everything else
   // is re-measured, which is what makes the loop self-correcting.
   let capScale = 1;
+  // What the hack fraction ACTUALLY did across the last volley. Seeded from the
+  // constant and then measured, because the right value is a property of how
+  // fast this player is levelling, not something a constant can know. Same
+  // recompute-every-cycle principle as everything else in this loop.
+  let drift = HACK_DRIFT_TOLERANCE;
 
   while (true) {
     cycle++;
@@ -731,6 +759,7 @@ export async function run(ns, math) {
       hackSec: math.securityPerHackThread(m),
       growSec: math.securityPerGrowThread(m),
       weakenSec: math.securityPerWeakenThread(m),
+      drift,
     };
     const perThread = math.hackFractionPerThread(m);
     if (!(perThread > 0)) {
@@ -802,7 +831,8 @@ export async function run(ns, math) {
       ns.print(
         `           [v] plan:  steal ${(th.steal * 100).toFixed(2)}% of ${fmtMoney(m.maxMoney)} = ` +
           `${fmtMoney(th.hackAmount)}/batch, grow must return x${(1 / (1 - th.steal)).toFixed(4)} ` +
-          `(GROW_MARGIN ${GROW_MARGIN} sized ${th.grow}t for it)`,
+          `(margin x${growMarginFor(th.steal).toFixed(3)} for ${(HACK_DRIFT_TOLERANCE * 100).toFixed(0)}% ` +
+          `hack drift sized ${th.grow}t for it)`,
       );
       ns.print(
         `           [v] state: money ${fmtMoney(m.money)}/${fmtMoney(m.maxMoney)}, ` +
@@ -876,6 +906,21 @@ export async function run(ns, math) {
     const j = judgeVolley(byBatch, expected, timing.s);
     const after = math.snapshot(ns, target);
 
+    // The drift measurement, free: hackFractionPerThread comes from the
+    // snapshot already taken, and both math backends already price it.
+    //
+    // There is a hard ceiling here that no grow margin can lift. A batch that
+    // steals s(1+D) leaves 1 - s(1+D), and once that is zero the server is
+    // empty whatever grow does - so drift above (1-s)/s is unsurvivable at ANY
+    // margin. At 83.90% steal that ceiling is 19.2%. growMarginFor returns
+    // Infinity past it and the steal search stops, which is what pulls the
+    // steal down to something the measured drift can actually survive.
+    const perThreadAfter = math.hackFractionPerThread(after);
+    const measuredDrift = perThread > 0 ? Math.max(0, perThreadAfter / perThread - 1) : 0;
+    // Smoothed, and floored at the constant so a quiet cycle cannot leave the
+    // next volley unprotected. Falls back toward the floor as levelling slows.
+    drift = Math.max(HACK_DRIFT_TOLERANCE, 0.5 * drift + 0.5 * measuredDrift);
+
     // MEASURED, not planned. The old figure was `cleanBatches * plannedTake`,
     // which prints the same whether every hack succeeded or every hack stole
     // nothing - a volley that drained its target to $6.81k still reported
@@ -883,7 +928,15 @@ export async function run(ns, math) {
     // fall back to the projection only when reports carry no result values
     // (stale workers), saying so rather than passing a guess off as a total.
     const wantGrowMult = th.steal < 1 ? 1 / (1 - th.steal) : 0;
-    const vol = measureVolley(byBatch, expected, wantGrowMult);
+    const vol = measureVolley(byBatch, expected, wantGrowMult, 1 / (1 - th.steal));
+    // Ordering ACROSS batches, which analyzeBatch deliberately does not judge.
+    // A foreign hack landing inside this batch's hack-to-grow gap means two
+    // steals answered by one restore, and nothing else measured here can see it.
+    const xb = crossBatchOrder(byBatch);
+    // The only clamp-free, additive-free reading of the server's balance:
+    // ns.hack takes a known fraction of whatever is present and reports what
+    // it took, so stolen/steal IS the money at that instant.
+    const trail = moneyTrail(vol.outcomes, th.steal, m.maxMoney);
     const measured = vol.unmeasurable === 0 && vol.samples > 0;
     totalEarned += measured ? vol.stolen : j.ok * th.hackAmount;
 
@@ -949,16 +1002,49 @@ export async function run(ns, math) {
     // The real test is whether the server came back. If grow were genuinely
     // undersized the money would not be at max, so gate on that.
     const restored = isPrepped(after);
-    if (!restored && vol.samples > 0 && wantGrowMult > 0 && vol.growRatio < 1) {
-      // Batches are all planned against the same max-money snapshot, so a
-      // per-batch shortfall compounds geometrically rather than adding up.
-      const endsAt = Math.pow(vol.growRatio, expected.size) * 100;
+
+    // Judge on MONEY, never on grow multipliers. Both multiplier readings that
+    // came before this were confounded and both produced a confident wrong
+    // answer: the mean is dragged down by missed-hack batches clamping at max,
+    // and restoreStats is dragged UP by ns.grow's additive term, which reports
+    // ~x9400 for a batch that took a drained server from $1 to $9k. The trail
+    // below is stolen/steal - the server's actual balance at a known instant.
+    if (!restored && trail.samples > 0) {
+      const held = (trail.heldAtMax / trail.samples) * 100;
       ns.print(
-        `           WARN: grow delivered x${vol.growMean.toFixed(4)} against x${wantGrowMult.toFixed(4)} ` +
-          `planned and the target did NOT return to max. Compounded over ${expected.size} ` +
-          `batches that trends to ${endsAt < 0.01 ? endsAt.toExponential(1) : endsAt.toFixed(1)}% ` +
-          `of max money - raise GROW_MARGIN.`,
+        `           WARN: the target did NOT return to max. Money at hack time: ` +
+          `first ${(trail.first * 100).toFixed(1)}% -> last ${(trail.last * 100).toFixed(1)}% ` +
+          `of max (median ${(trail.median * 100).toFixed(1)}%, low ` +
+          `${(trail.min * 100).toFixed(2)}%, ${held.toFixed(0)}% of batches found it full).`,
       );
+
+      if (xb.collided > 0) {
+        ns.print(
+          `           WARN: ${xb.collided}/${xb.batches} batches were hacked again before ` +
+            `their own grow landed (${xb.intrusions} intrusions, worst ${xb.worst} in one ` +
+            `gap) - two steals answered by one restore. Batch spacing ` +
+            `${timing.spacing}ms is too tight for a lateness spread of ` +
+            `${j.latenessSpread.toFixed(1)}ms.`,
+        );
+      } else if (trail.first >= 0.99 && trail.last < 0.5) {
+        // Opened at max and ended drained with ordering clean: the batches that
+        // landed late stole more than they were sized to give back. That is hack
+        // effectiveness rising under the volley, which HACK_DRIFT_TOLERANCE is
+        // what covers.
+        ns.print(
+          `           WARN: it opened at max and drained with ordering clean - the late ` +
+            `batches stole more than their grow was sized for. Raise ` +
+            `HACK_DRIFT_TOLERANCE (now ${(HACK_DRIFT_TOLERANCE * 100).toFixed(0)}%, margin ` +
+            `x${growMarginFor(th.steal).toFixed(3)} at ${(th.steal * 100).toFixed(2)}% steal) ` +
+            `or lower MAX_STEAL_FRACTION.`,
+        );
+      } else if (trail.first < 0.99) {
+        ns.print(
+          `           WARN: the FIRST batch already found only ` +
+            `${(trail.first * 100).toFixed(1)}% of max - the volley did not start from a ` +
+            `prepped server. Suspect a previous volley's workers still in flight.`,
+        );
+      }
     }
 
     if (verbose) {
@@ -968,25 +1054,50 @@ export async function run(ns, math) {
           (vol.unmeasurable ? `  (${vol.unmeasurable} batch(es) had stale workers)` : ""),
       );
       ns.print(
+        `           [v] drift: hack fraction/thread ${perThread.toExponential(3)} -> ` +
+          `${perThreadAfter.toExponential(3)} (${measuredDrift >= 0 ? "+" : ""}` +
+          `${(measuredDrift * 100).toFixed(1)}% across the window)  next volley plans for ` +
+          `${(drift * 100).toFixed(1)}%, which caps steal at ` +
+          `${(100 / (1 + drift)).toFixed(1)}%`,
+      );
+      ns.print(
+        `           [v] money at hack: first ${(trail.first * 100).toFixed(1)}%  ` +
+          `median ${(trail.median * 100).toFixed(1)}%  last ${(trail.last * 100).toFixed(1)}%  ` +
+          `low ${(trail.min * 100).toFixed(2)}%  (${trail.heldAtMax}/${trail.samples} found it full)`,
+      );
+      ns.print(
+        `           [v] cross-batch: ${xb.collided}/${xb.batches} batches hacked again ` +
+          `before their own grow` +
+          (xb.collided
+            ? `  (${xb.intrusions} intrusions, worst ${xb.worst} in one gap) - THIS DRAINS`
+            : `  - clean`),
+      );
+      ns.print(
+        `           [v] restore: ${vol.restore.restored}/${vol.restore.hacked} hacked batches ` +
+          `reached x${(1 / (1 - th.steal)).toFixed(4)}` +
+          (vol.restore.hacked
+            ? `  (${((vol.restore.restored / vol.restore.hacked) * 100).toFixed(1)}%, ` +
+              `median x${vol.restore.median.toFixed(4)}, worst x${vol.restore.worst.toFixed(4)})`
+            : ""),
+      );
+      ns.print(
         `           [v] grow:  want x${wantGrowMult.toFixed(4)}  got x${vol.growMean.toFixed(4)}  ` +
           `(first ${vol.growFirst.toFixed(4)} -> last ${vol.growLast.toFixed(4)}, ${vol.samples} batches)` +
-          // Below-plan is expected whenever hacks miss: those batches start at
-          // max money, so grow clamps instantly and reports ~1.0. Say which
-          // reading applies rather than leaving the number to be misread.
-          (restored
-            ? "  - under plan is the max-money clamp, not a shortfall"
-            : "  - and the target did NOT return to max"),
+          // This mean mixes clamped and unclamped batches and cannot be read as a
+          // shortfall - the restore line above is the one that can. Kept because
+          // its TREND across the volley is still informative.
+          `  - confounded by the clamp; judge on restore above`,
       );
       // The trend is the diagnosis, and its SIGN is the whole point: grow
       // getting worse across the volley means conditions are degrading under it
       // (security creeping up), while grow getting better means the early
       // batches were starting from a fuller server than the later ones.
-      const drift = vol.growFirst > 0 ? (vol.growLast / vol.growFirst - 1) * 100 : 0;
+      const growTrend = vol.growFirst > 0 ? (vol.growLast / vol.growFirst - 1) * 100 : 0;
       ns.print(
-        `           [v] trend: ${drift >= 0 ? "+" : ""}${drift.toFixed(2)}% first->last  ` +
-          (Math.abs(drift) < 0.5
+        `           [v] trend: ${growTrend >= 0 ? "+" : ""}${growTrend.toFixed(2)}% first->last  ` +
+          (Math.abs(growTrend) < 0.5
             ? "flat - the shortfall is in the growth model itself"
-            : drift < 0
+            : growTrend < 0
               ? "grow WEAKENING - suspect security creeping up under the volley"
               : "grow STRENGTHENING - later batches start from a lower server, so grow has more room before the max-money clamp"),
       );
