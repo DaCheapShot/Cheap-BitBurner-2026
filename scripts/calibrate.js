@@ -186,5 +186,5 @@ export async function main(ns) {
   lines.push(`  written to ${CALIB_PATH}`);
   lines.push(`  RE-RUN after installing augmentations, buying home cores, or a new BitNode.`);
   lines.push("");
-  ns.tprint(lines.join("\n"));
+  ns.print(lines.join("\n"));
 }
