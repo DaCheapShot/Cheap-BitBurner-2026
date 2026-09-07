@@ -19,12 +19,16 @@ import {
   WORKER_FILES,
   BATCH_OPS,
   OP_WORKER,
+  SHARE_MARKER,
+  SHARE_WORKER,
+  SHARE_PORT,
+  shareFractionFrom,
 } from "./config.js";
 import {
   analyzeBatch, batchOk, batchOutcome, restoreStats, crossBatchOrder, moneyTrail,
 } from "./verify.js";
 import {
-  prepGroup, isPrepped, pickTarget, rankTargets, buildWorkerPool, workerRam,
+  prepGroup, isPrepped, pickTarget, rankTargets, buildWorkerPool, workerRam, shareRam,
 } from "./prepper.js";
 
 /**
@@ -69,14 +73,22 @@ import {
  * ACTUALLY delivered against what the plan assumed, which is the one comparison
  * the normal output cannot make.
  *
+ * Share mode is serviced here rather than by a script of its own because this
+ * process owns the RAM pool: anything else exec-ing into it would race the
+ * volley already planned against those bytes. See serviceShare.
+ *
  * RAM charged to whoever imports this:
- *   ram.js/prepper.js union 2.00 + exec (already counted) = 2.00 GB
+ *   ram.js/prepper.js union 2.00 + exec (already counted)
+ *   + ps 0.20 (the share census) + getSharePower 0.20 (the only honest reading
+ *     of the bonus) = 2.40 GB
  * The math implementation's cost is added by whichever entry script imports it:
- *   manager.js + mathAnalyze  = 6.15 GB
- *   manager-formulas.js + mathFormulas = 6.10 GB
+ *   manager.js + mathAnalyze  = 6.55 GB
+ *   manager-formulas.js + mathFormulas = 6.50 GB
  */
 
 const padL = (s, n) => String(s).padStart(n);
+// Width of the `cycle NNN  ` prefix, so continuation lines hang under it.
+const INDENT = " ".repeat(11);
 const fmtRam = (gb) => (gb >= 1024 ? `${(gb / 1024).toFixed(2)}TB` : `${gb.toFixed(2)}GB`);
 const fmtTime = (ms) => (ms >= 60000 ? `${(ms / 60000).toFixed(2)}m` : `${(ms / 1000).toFixed(1)}s`);
 
@@ -578,6 +590,308 @@ function measureVolley(byBatch, expected, wantGrowMult, breakEvenMult) {
   };
 }
 
+// ---------------------------------------------------------------- share -----
+
+/**
+ * The game stores paths WITHOUT a leading slash, so ns.ps reports
+ * "scripts/share.js" while SHARE_WORKER carries one. Comparing the two forms
+ * directly never matches - which here would mean every census reads zero and
+ * the manager launches a fresh set of share workers every single cycle until
+ * the pool is full. Same rule, and same failure mode, as boot.js's normPath.
+ */
+const normPath = (p) => String(p).replace(/^\/+/, "");
+
+/**
+ * How many share threads are already running on the network.
+ *
+ * This is what makes a manager restart safe. Share workers are not tied to a
+ * volley and do not die with the process that started them, so a restarted
+ * manager finds them still running - and without counting them it would launch
+ * a second full set on top, doubling the RAM share holds for no extra bonus
+ * (the bonus is logarithmic, so double the threads is worth 2.77 points).
+ * Counting them instead ADOPTS them.
+ *
+ * Only hosts in the pool are inspected. A share worker on a host that has since
+ * dropped out of the pool goes uncounted, which can over-launch by that host's
+ * worth - but scanning the whole network again to catch it would cost another
+ * 0.20 GB to fix a case that requires losing root on a host mid-run.
+ *
+ * byHost is what lets the top-up size each host against its OWN quota rather
+ * than against a single network-wide number, so a host that already carries its
+ * share is not handed more.
+ *
+ * @param {NS} ns
+ * @param {string[]} hosts
+ * @returns {{threads: number, hosts: number, procs: number,
+ *            hostList: string[], byHost: Map<string, number>}}
+ */
+export function shareCensus(ns, hosts) {
+  const want = normPath(SHARE_WORKER);
+  let threads = 0;
+  let procs = 0;
+  const live = [];
+  const byHost = new Map();
+
+  for (const host of hosts) {
+    let n = 0;
+    for (const p of ns.ps(host)) {
+      if (normPath(p.filename) !== want) continue;
+      n += p.threads;
+      procs++;
+    }
+    if (n > 0) {
+      live.push(host);
+      byHost.set(host, n);
+    }
+    threads += n;
+  }
+  return { threads, hosts: live.length, procs, hostList: live, byHost };
+}
+
+/**
+ * How many share threads there SHOULD be, and how many are missing.
+ *
+ * Sized against usableRam rather than freeRam, for two reasons. It is meant to
+ * be a stable fraction of the FLEET - free RAM swings between nearly all of the
+ * pool and nearly none of it depending on where in a cycle you ask, so a
+ * fraction of it would size share differently every time. And alive threads
+ * already occupy part of usableRam, so `want - alive` converges instead of
+ * compounding: the same fraction asked for repeatedly is idempotent.
+ *
+ * The deficit is floored at zero. Share NEVER shrinks from here - lowering the
+ * fraction or turning share off is handled by the workers themselves, which
+ * re-read the marker between calls and exit. That keeps ns.kill out of the
+ * manager entirely (0.50 GB) and means a toggle works even when no manager is
+ * running.
+ */
+export function planShare(pool, ramPerThread, fraction, alive) {
+  if (!(fraction > 0) || !(ramPerThread > 0)) return { want: 0, deficit: 0 };
+  const want = Math.floor((pool.usableRam * fraction) / ramPerThread);
+  return { want, deficit: Math.max(0, want - alive) };
+}
+
+/**
+ * Launch the missing share threads.
+ *
+ * Two passes, and the first one is the point.
+ *
+ * PASS 1 gives every host the SAME fraction of ITSELF, so share scales the pool
+ * down uniformly instead of eating whole hosts. The first live run of this code
+ * did the opposite - it filled home first and to the brim - and on a 2PB home
+ * that swallowed the pool's largest host entirely for a benefit that is barely
+ * measurable: getCoreBonus is 1 + (cores - 1)/16, and because the bonus is
+ * ln(threads)/25, moving EVERY share thread onto an 8-core home is worth
+ * ln(1.4375)/25 = 1.45 points. Losing the biggest host from the volley costs
+ * more than that as soon as the volley is RAM-bound rather than window-bound.
+ * Home still goes first, so the rounding remainder lands where the cores are.
+ *
+ * PASS 2 places whatever pass 1 could not - hosts too small for their quota, or
+ * hosts that refuse the exec - anywhere it fits. Honouring the requested
+ * fraction matters more than the pool's shape, and SHARE_MAX_FRACTION still
+ * bounds the total.
+ *
+ * Hosts without the worker are checked with fileExists rather than discovered
+ * through a failed exec. It is free - prepper.js already pays for fileExists -
+ * and it turns a silent shortfall into a named cause. deploy.js only runs when
+ * root.js roots something new, so adding a worker file does not trigger it, and
+ * the whole fleet can be missing share.js with nothing to say so.
+ *
+ * Deliberately does NOT go through pool.allocate. A pool reservation is
+ * released at the end of the cycle, but a share worker outlives every cycle -
+ * it runs until the marker says stop. Reserving would leave `pending` set on a
+ * pool the caller then refreshes, and refresh() re-reads the game's used RAM
+ * without clearing it, so the same bytes would be subtracted twice. Placement
+ * tracks its own running total instead.
+ */
+export function topUpShare(ns, pool, ramPerThread, fraction, alive, aliveByHost = new Map()) {
+  const { want, deficit } = planShare(pool, ramPerThread, fraction, alive);
+  if (deficit <= 0) {
+    return { want, deficit: 0, launched: 0, placements: [], noFile: [], refused: [] };
+  }
+
+  // Home first purely so the rounding remainder lands on the multi-core host.
+  const order = [...pool.servers].sort((a, b) => {
+    if (a.hostname === b.hostname) return 0;
+    if (a.hostname === "home") return -1;
+    if (b.hostname === "home") return 1;
+    return b.freeRam - a.freeRam;
+  });
+
+  // Two failures, kept apart on purpose. Merging them into one "cannot run it"
+  // bucket is what wasted two live runs: deploy.js was current, had copied
+  // share.js to all 68 hosts, and the manager still reported them as missing the
+  // file - because the same list was also collecting hosts whose exec returned 0
+  // for entirely different reasons, and it was labelled with the deploy remedy.
+  // A diagnostic that names the wrong cause is worse than none.
+  const noFile = [];
+  const refused = [];
+  const ready = [];
+  for (const s of order) {
+    if (ns.fileExists(SHARE_WORKER, s.hostname)) ready.push(s);
+    else noFile.push(s.hostname);
+  }
+
+  // PLAN both passes first, exec once per host afterwards.
+  //
+  // Doing it the other way round left TWO share processes on home: pass 1 places
+  // each host's quota, but a sum of floors falls short of the floor of the sum,
+  // so pass 2 always has a handful of threads left over and home - being first -
+  // took them in a second exec. A 262142-thread process beside a 1-thread one is
+  // harmless arithmetic and confusing to read, and the stray process muddies the
+  // census for no gain.
+  const plan = new Map();
+  let remaining = deficit;
+
+  // freeRam comes from the pool's cached usage, which does not move while we are
+  // planning, so what this loop has already promised must be subtracted by hand.
+  const room = (s) => s.threadsFor(ramPerThread) - (plan.get(s.hostname) ?? 0);
+  const promise = (s, n) => {
+    if (n <= 0) return;
+    plan.set(s.hostname, (plan.get(s.hostname) ?? 0) + n);
+    remaining -= n;
+  };
+
+  for (const s of ready) {
+    if (remaining <= 0) break;
+    const quota = Math.floor((s.usableRam * fraction) / ramPerThread) - (aliveByHost.get(s.hostname) ?? 0);
+    promise(s, Math.min(quota, room(s), remaining));
+  }
+
+  for (const s of ready) {
+    if (remaining <= 0) break;
+    promise(s, Math.min(room(s), remaining));
+  }
+
+  let launched = 0;
+  const placements = [];
+
+  for (const s of ready) {
+    const n = plan.get(s.hostname) ?? 0;
+    if (n <= 0) continue;
+    if (ns.exec(SHARE_WORKER, s.hostname, n, SHARE_PORT) === 0) {
+      // fileExists already said the script IS here, so this is something else.
+      // Record what was asked for and what the pool believed was free, because
+      // those two numbers are the whole diagnosis: equal-ish means the pool's
+      // view is stale, wildly different means something outside this process is
+      // holding the host. Guessing at the cause is what cost two live runs.
+      //
+      // The threads this host was promised are simply not placed. They are not
+      // re-homed here, because doing so would mean a second exec somewhere and
+      // put the double process back. The next cycle re-measures and tops up -
+      // the top-up is idempotent, which is what makes that safe.
+      refused.push({ host: s.hostname, threads: n, freeGb: s.freeRam });
+      continue;
+    }
+    placements.push({ host: s.hostname, threads: n });
+    launched += n;
+  }
+
+  return { want, deficit, launched, placements, noFile, refused };
+}
+
+/**
+ * Read the marker, adopt what is running, launch what is missing, say so.
+ *
+ * Called at the top of a manager cycle and again at the top of each prep cycle:
+ * prep is where the pool sits most idle, and a prep can run for ten minutes, so
+ * waiting for it to finish would make a share toggle look broken.
+ *
+ * Silent when share is off and nothing is running, which is the normal case for
+ * the whole early game.
+ *
+ * @returns {{fraction: number, threads: number, launched: number} | null}
+ */
+function serviceShare(ns, pool, ramPerThread, log, prefix = INDENT) {
+  const fraction = shareFractionFrom(ns.read(SHARE_MARKER));
+
+  // Broadcast BEFORE anything is launched, and unconditionally - including when
+  // share is off, so any worker still running sees the 0 and retires.
+  //
+  // The marker is read here, on home, and republished on a port because that is
+  // the only channel the fleet can hear: ns.read resolves against the server the
+  // calling script runs on, so a worker on a purchased server reading
+  // /data/share.txt gets "" and stops dead. clear-then-write keeps exactly one
+  // value in the queue for the workers to peek at.
+  const gate = ns.getPortHandle(SHARE_PORT);
+  gate.clear();
+  gate.write(fraction);
+
+  const census = shareCensus(ns, pool.servers.map((s) => s.hostname));
+
+  if (fraction <= 0) {
+    if (census.threads === 0) return null;
+    // The workers are already on their way out - they poll the marker between
+    // 10s share calls. Nothing to do but report it, so the RAM appearing to be
+    // busy for one more cycle is not mistaken for a leak.
+    log(
+      `${prefix}share OFF - ${census.threads}t still winding down, gone within 10s ` +
+        `(${fmtRam(census.threads * ramPerThread)} returns to the pool next cycle)`,
+    );
+    return { fraction, threads: census.threads, launched: 0 };
+  }
+
+  const res = topUpShare(ns, pool, ramPerThread, fraction, census.threads, census.byHost);
+  const total = census.threads + res.launched;
+  const held = total * ramPerThread;
+  // Union, not a sum: a host that was already sharing and then took more would
+  // otherwise be counted twice, and the count would drift up every cycle.
+  const hosts = new Set([...census.hostList, ...res.placements.map((p) => p.host)]).size;
+
+  // Read AFTER the exec calls, so it still shows x1.0000 on the cycle that
+  // launches: the game only counts a worker's threads once its first ns.share()
+  // runs. Saying so beats printing a number that looks like share is doing
+  // nothing on the very cycle it started.
+  const power = ns.getSharePower();
+
+  log(
+    `${prefix}share ${total}t on ${hosts} host(s) ` +
+      `(${fmtRam(held)}, ${((held / pool.usableRam) * 100).toFixed(1)}% of pool)  ` +
+      (power > 1
+        ? `power x${power.toFixed(4)}`
+        : "power registers next cycle - workers count from their first share()") +
+      (res.launched > 0 ? `  +${res.launched}t this cycle` : ""),
+  );
+
+  // Report the two failures SEPARATELY, with the numbers behind each.
+  //
+  // This line has been wrong twice. First it said "pool is busy" when the fleet
+  // was missing share.js. Then it said hosts could not run share.js when
+  // deploy.js had demonstrably copied it to all 68 of them - because the same
+  // list collected both causes and carried the deploy remedy. Each cause now
+  // prints its own evidence, so the next run diagnoses itself instead of
+  // needing another round trip.
+  if (total < res.want) {
+    const some = (xs) => `${xs.slice(0, 3).join(", ")}${xs.length > 3 ? ", ..." : ""}`;
+    log(`${prefix}      short of ${res.want}t (asked for ${fraction * 100}% of the pool)`);
+
+    if (res.noFile.length) {
+      log(
+        `${prefix}      ${res.noFile.length} host(s) have no ${SHARE_WORKER}: ` +
+          `${some(res.noFile)}. Run scripts/deploy.js.`,
+      );
+    }
+    if (res.refused.length) {
+      // fileExists says the script IS on these hosts, so this is not a deploy
+      // problem and telling the user to deploy would send them the wrong way
+      // again. Print what was asked against what the pool thought was free.
+      const r = res.refused[0];
+      log(
+        `${prefix}      ${res.refused.length} host(s) HAVE ${SHARE_WORKER} but refused the exec: ` +
+          `${some(res.refused.map((x) => x.host))}`,
+      );
+      log(
+        `${prefix}      e.g. ${r.host}: asked ${r.threads}t x ${fmtRam(ramPerThread)} = ` +
+          `${fmtRam(r.threads * ramPerThread)}, pool saw ${fmtRam(r.freeGb)} free`,
+      );
+    }
+    if (!res.noFile.length && !res.refused.length) {
+      log(`${prefix}      every host is full; the next cycle retries`);
+    }
+  }
+
+  return { fraction, threads: total, launched: res.launched };
+}
+
 /**
  * @param {NS} ns
  * @param {object} math injected math implementation - see the math interface
@@ -628,8 +942,13 @@ export async function run(ns, math) {
   }
 
   const ram = workerRam(ns);
+  const shareGb = shareRam(ns);
   const log = (s) => ns.print(s);
   const buildPool = () => buildWorkerPool(ns);
+  // Passed into prepGroup so share is serviced on every prep cycle too - see
+  // serviceShare. Prep is where the pool sits most idle, and the whole point of
+  // the marker is that a toggle takes effect without restarting anything.
+  const onPrepCycle = (pool) => serviceShare(ns, pool, shareGb, log);
 
   // Stale entries would be attributed to this run's batch ids. Safe to clear:
   // this process owns the port.
@@ -729,6 +1048,7 @@ export async function run(ns, math) {
         math, ram, port: REPORT_PORT, buildPool, log, verbose,
         idPrefix: `prep${runId}`,
         extras: () => rankTargets(ns, math),
+        onCycle: onPrepCycle,
       });
       if (!res.ok) {
         ns.tprint(`ERROR: prep of ${target} failed - ${res.reason}. Manager stopping.`);
@@ -741,6 +1061,24 @@ export async function run(ns, math) {
     // -- plan ---------------------------------------------------------------
 
     const pool = buildPool();
+
+    // -- share --------------------------------------------------------------
+    // Before the volley is sized, and against the volley's own pool rather than
+    // one built for the purpose - the top-up is idempotent, so the only thing
+    // that matters is that it happens before anything plans against this pool.
+    //
+    // Share workers are exec'd outside the reservation system and outlive the
+    // cycle, so the RAM they take has to be gone from every measurement taken
+    // after this point. refresh() re-reads the game's used RAM, which now
+    // includes them: no reserve mechanism, nothing to release, and the volley
+    // sizes itself against what is genuinely left.
+    //
+    // Safe here and nowhere later in the cycle: the previous volley has fully
+    // resolved and released, so nothing of ours is in flight to be miscounted
+    // as free. During a prep the same job is done per prep cycle by onPrepCycle,
+    // because a prep can hold the manager for ten minutes.
+    serviceShare(ns, pool, shareGb, log, `cycle ${padL(cycle, 3)}  `);
+    pool.refresh();
 
     const timing = planTiming(math, m);
     const negative = BATCH_OPS.filter((op) => timing.land[op] - timing.opTime[op] < 0);

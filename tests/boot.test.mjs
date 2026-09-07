@@ -17,6 +17,7 @@ const TRANSIENT = ["scripts/root.js", "scripts/deploy.js", "scripts/calibrate.js
  */
 async function runBoot({
   args = [], files = {}, running = [], workers = [], ticks = 3, hasFormulas = false,
+  onTprint = () => {},
 }) {
   const { main } = (await loadScripts())["boot"];
   let procs = running.map((f, i) => ({ filename: f, host: "home", pid: i + 1, args: [], threads: 1 }));
@@ -34,7 +35,7 @@ async function runBoot({
 
   const ns = {
     args, disableLog: () => {}, ui: { openTail: () => {} },
-    print: () => {}, tprint: () => {},
+    print: () => {}, tprint: (msg) => onTprint(String(msg)),
     read: (f) => store[f] ?? "",
     write: (f, d) => { store[f] = d; },
     fileExists: (f, host = "home") => Boolean(store[`${host}:${f}`]),
@@ -72,6 +73,51 @@ const CALIB = JSON.stringify({
 });
 
 export const tests = {
+  // Adding a worker file roots nothing, so ROOT_MARKER never moves, so deploy
+  // never runs and the file sits on home while every host runs without it. The
+  // only symptom is exec returning a bare 0 far away - share.js ran on one host
+  // out of 69 that way, twice, the second time after a manual deploy.
+  "a changed worker set triggers a redeploy on its own": async () => {
+    const { DEPLOY_LIST, DEPLOY_MANIFEST } = (await loadScripts())["config"];
+
+    // Steady state: manifest already records exactly what boot wants.
+    const settled = await runBoot({
+      files: { "/data/calib.json": CALIB, [DEPLOY_MANIFEST]: DEPLOY_LIST.join(" ") },
+      hasFormulas: false, ticks: 3,
+    });
+    const deploys = settled.launched.filter((f) => f === "scripts/deploy.js").length;
+    assert(deploys === 1, `only the first pass should deploy, got ${deploys}`);
+
+    // A worker file was added since the last broadcast.
+    const stale = await runBoot({
+      files: { "/data/calib.json": CALIB, [DEPLOY_MANIFEST]: "scripts/hack.js" },
+      hasFormulas: false, ticks: 3,
+    });
+    assert(stale.launched.filter((f) => f === "scripts/deploy.js").length > 1,
+      "a manifest missing a worker should force a redeploy every tick until it is fixed");
+  },
+
+  // The failure that outlasted the first fix. deploy.js records the list it
+  // ACTUALLY broadcast, so a mismatch surviving a run means the copy of
+  // deploy.js inside the game is older than the one on disk - filesync has not
+  // delivered it, and re-running it cannot help. This repo's most expensive
+  // recurring failure, which until now had no detector at all.
+  "a stale in-game deploy.js is named rather than retried forever": async () => {
+    const { DEPLOY_MANIFEST } = (await loadScripts())["config"];
+    const said = [];
+
+    const r = await runBoot({
+      // deploy runs, but the manifest never catches up - exactly what an older
+      // deploy.js with a shorter DEPLOY_LIST would leave behind.
+      files: { "/data/calib.json": CALIB, [DEPLOY_MANIFEST]: "scripts/hack.js" },
+      hasFormulas: false, ticks: 2, onTprint: (s) => said.push(s),
+    });
+
+    assert(r.launched.includes("scripts/deploy.js"), "deploy should have been attempted");
+    assert(said.some((s) => /older than the one on disk/.test(s)),
+      `boot should name the stale copy, said: ${JSON.stringify(said)}`);
+  },
+
   "without Formulas, boot launches the analyze manager": async () => {
     const r = await runBoot({ files: { "/data/calib.json": CALIB }, hasFormulas: false });
     assert(r.launched.includes("scripts/manager.js"), `expected manager.js, launched: ${r.launched}`);
@@ -125,6 +171,24 @@ export const tests = {
     }
     assert(!r.procs.some((p) => p.filename.endsWith("hack.js")), "a worker survived the swap");
     assert(r.launched.includes("scripts/manager-formulas.js"), "the formulas manager should start");
+  },
+
+  // Share workers are NOT in WORKER_LIST, and that is deliberate: none of the
+  // reasoning behind killOrphanWorkers applies to them. They are tied to no
+  // target, so they cannot churn a server nobody owns; they hold a bounded
+  // fraction of the pool rather than a whole volley's worth; and the incoming
+  // manager adopts them through shareCensus instead of launching duplicates.
+  // Killing them would drop the reputation bonus for a tick and buy nothing.
+  "a manager swap spares the share workers": async () => {
+    const r = await runBoot({
+      files: { "/data/calib.json": CALIB }, hasFormulas: true,
+      running: ["scripts/manager.js"],
+      workers: [...ORPHANS, { filename: "scripts/share.js", host: "p1", threads: 2921 }],
+    });
+    assert(!r.killed.includes("scripts/share.js"),
+      `share workers must survive a build swap, killed: ${r.killed}`);
+    assert(r.procs.some((p) => p.filename === "scripts/share.js"),
+      "the share worker should still be running after the swap");
   },
 
   // The dangerous mistake is killing workers whenever a manager is killed:

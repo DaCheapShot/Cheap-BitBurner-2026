@@ -33,6 +33,27 @@ export function makeNs(o = {}) {
     write: (v) => { queue.push(v); if (queue.length > PORT_CAPACITY) { queue.shift(); dropped++; } },
   };
 
+  // Ports are keyed by NUMBER, because the real ones are. A getPortHandle that
+  // returned the same queue for every number would let the share gate (port 2)
+  // clear the report port (port 1) and nothing would notice until a live run.
+  // Port 1 stays the object above so `ns._port` keeps meaning the report port.
+  const ports = new Map([[1, port]]);
+  const portFor = (n) => {
+    const key = Number(n);
+    if (!ports.has(key)) {
+      let q = [];
+      ports.set(key, {
+        empty: () => q.length === 0,
+        full: () => q.length >= PORT_CAPACITY,
+        read: () => (q.length ? q.shift() : "NULL PORT DATA"),
+        peek: () => (q.length ? q[0] : "NULL PORT DATA"),
+        clear: () => { q = []; },
+        write: (v) => { q.push(v); if (q.length > PORT_CAPACITY) q.shift(); },
+      });
+    }
+    return ports.get(key);
+  };
+
   const srv = (h) => servers[h] ?? {};
 
   const ns = {
@@ -50,7 +71,7 @@ export function makeNs(o = {}) {
     write: (f, data, mode) => { files[f] = mode === "a" ? (files[f] ?? "") + data : data; },
     // Files may be keyed either bare or host-prefixed; fileExists checks both since that's what callers use
     fileExists: (f, host = "home") => Boolean(files[`${host}:${f}`] ?? files[f]),
-    getPortHandle: () => port,
+    getPortHandle: (n) => portFor(n),
 
     scan: (h) => (h === "home" ? [...Object.keys(hosts).filter((x) => x !== "home"), ...Object.keys(servers)] : []),
     hasRootAccess: (h) => srv(h).rooted !== false,
@@ -76,16 +97,30 @@ export function makeNs(o = {}) {
     exec: (file, host, threads, ...args) => {
       const filename = file.replace(/^\/+/, "");
       const pid = nextPid++;
-      processes.push({ filename, pid, args, threads });
+      processes.push({ filename, pid, args, threads, host });
       return pid;
     },
     run: (file, threads, ...args) => {
       const filename = file.replace(/^\/+/, "");
       const pid = nextPid++;
-      processes.push({ filename, pid, args, threads });
+      processes.push({ filename, pid, args, threads, host: "home" });
       return pid;
     },
-    ps: (host) => processes.filter(p => true).map(p => ({ ...p })),
+    // Host-aware, because the real one is. A ps that ignores its argument makes
+    // any per-host census see the whole network on every host and multiply its
+    // answer by the host count - which is exactly the arithmetic the share
+    // top-up depends on getting right.
+    ps: (host) => processes.filter((p) => p.host === host).map((p) => ({ ...p })),
+    // The game's own formula, from src/NetworkShare/Share.ts. The intelligence
+    // and core bonuses are not modelled: they scale the thread count before the
+    // log, and nothing here has a Player to read them from.
+    getSharePower: () => {
+      const t = processes
+        .filter((p) => p.filename === "scripts/share.js")
+        .reduce((n, p) => n + p.threads, 1);
+      return 1 + Math.log(t) / 25;
+    },
+    share: async () => {},
     kill: (pid) => {
       const idx = processes.findIndex(p => p.pid === pid);
       if (idx !== -1) processes.splice(idx, 1);

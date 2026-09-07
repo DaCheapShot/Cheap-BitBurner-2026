@@ -382,4 +382,45 @@ export const tests = {
     assert(/nothing fits/.test(res.reason), `expected a nothing-fits reason, got: ${res.reason}`);
     assert(ns._execs.length === 0, "nothing should have been launched");
   },
+
+  // The manager services share mode through this hook. Prep is where the pool
+  // sits most idle and a prep can run for ten minutes, so deferring a share
+  // toggle until prep finished would make the toggle look broken.
+  "the cycle hook runs before the wave is planned": async () => {
+    const { prepper, mathAnalyze } = await loadScripts();
+    const ns = wireFleet(fleetNs());
+    assert(mathAnalyze.prepare(ns).ok, "prepare failed");
+
+    let calls = 0;
+    let execsWhenCalled = -1;
+    await oneCycle(ns, prepper, mathAnalyze, {
+      onCycle: () => { calls++; execsWhenCalled = ns._execs.length; },
+    });
+
+    assert(calls === 1, `the hook should fire once per cycle, fired ${calls} time(s)`);
+    assert(execsWhenCalled === 0, "the hook must run before anything is launched");
+    assert(ns._execs.length > 0, "the prep wave should still have gone out");
+  },
+
+  // A hook that exec'd something has changed the game's used RAM, and the wave
+  // planned next must not be sized against bytes that are already gone.
+  "RAM the hook takes is gone from the wave that follows": async () => {
+    const { prepper, mathAnalyze } = await loadScripts();
+
+    const threadsWith = async (hook) => {
+      const ns = wireFleet(fleetNs());
+      assert(mathAnalyze.prepare(ns).ok, "prepare failed");
+      const execs = await oneCycle(ns, prepper, mathAnalyze, hook ? { onCycle: hook(ns) } : {});
+      return execs.reduce((n, e) => n + e.threads, 0);
+    };
+
+    const free = await threadsWith(null);
+    // Claim most of the fleet the way a share top-up does: straight into the
+    // game's used RAM, with no pool reservation to release.
+    const taken = await threadsWith((ns) => () => {
+      for (const h of Object.keys(ns._hosts)) ns._used[h] = ns._hosts[h] * 0.9;
+    });
+
+    assert(taken < free, `the hook took RAM but the wave was unchanged: ${taken} vs ${free} threads`);
+  },
 };

@@ -1,7 +1,7 @@
-import { WORKER_LIST } from "./config.js";
+import { WORKER_LIST, SHARE_WORKER, DEPLOY_LIST, DEPLOY_MANIFEST } from "./config.js";
 
 /**
- * Copy the three worker scripts to every rooted host with RAM.
+ * Copy the worker scripts to every rooted host with RAM.
  *
  * Must run before any exec: exec requires the script to already exist on the
  * target server. Re-run it after editing a worker, or after rooting new hosts -
@@ -28,6 +28,13 @@ import { WORKER_LIST } from "./config.js";
  */
 const REQUIRED_IN_WORKER = "r: result";
 
+/**
+ * The same idea for the share worker, which reports nothing and so cannot be
+ * checked the same way. Its one job is to call ns.share, and a copy on home
+ * without that call is a stale file rather than a working one.
+ */
+const REQUIRED_IN_SHARE = "ns.share(";
+
 /** @param {NS} ns */
 export async function main(ns) {
   const stale = [];
@@ -36,6 +43,10 @@ export async function main(ns) {
     if (!src) stale.push(`${file} (not on home at all)`);
     else if (!src.includes(REQUIRED_IN_WORKER)) stale.push(`${file} (no result reporting)`);
   }
+  const share = ns.read(SHARE_WORKER);
+  if (!share) stale.push(`${SHARE_WORKER} (not on home at all)`);
+  else if (!share.includes(REQUIRED_IN_SHARE)) stale.push(`${SHARE_WORKER} (does not call ns.share)`);
+
   if (stale.length) {
     ns.tprint(
       `ERROR: home's copies are stale, refusing to broadcast them:\n  ${stale.join("\n  ")}\n` +
@@ -67,13 +78,13 @@ export async function main(ns) {
       continue;
     }
     // scp takes the whole array; it returns false if ANY file failed.
-    if (ns.scp(WORKER_LIST, host, "home")) copied.push(host);
+    if (ns.scp(DEPLOY_LIST, host, "home")) copied.push(host);
     else failed.push(host);
   }
 
   // Routine copies go to the script's own log, not the terminal. boot.js runs
   // this on every network change, and a success line per run is pure noise.
-  ns.print(`workers: ${WORKER_LIST.join("  ")}`);
+  ns.print(`workers: ${DEPLOY_LIST.join("  ")}`);
   ns.print(`copied to ${copied.length} host(s): ${copied.join(", ") || "(none)"}`);
   ns.print(`skipped ${skipped} (no root or no RAM), scanned ${seen.size}`);
 
@@ -81,5 +92,20 @@ export async function main(ns) {
   // and every exec the batcher aims at them will silently return 0.
   if (failed.length) {
     ns.tprint(`ERROR: deploy failed on ${failed.length} host(s): ${failed.join(", ")}`);
+    return;
   }
+
+  // Record WHAT was broadcast, not merely that a broadcast happened. boot.js
+  // compares this against DEPLOY_LIST and re-runs deploy when a worker file has
+  // been added - which nothing else notices, because deploy is triggered by
+  // newly rooted hosts and adding a file roots nothing.
+  //
+  // Writing the file list rather than a timestamp is the whole point: if the
+  // copy of THIS script running in the game is older than the one on disk, it
+  // writes the older list, boot sees the mismatch persist across a deploy, and
+  // says so. A timestamp would look like success every time.
+  //
+  // One line, no timestamp: boot compares it as a whole string, and a second
+  // line would only be something to parse wrongly.
+  ns.write(DEPLOY_MANIFEST, DEPLOY_LIST.join(" "), "w");
 }
