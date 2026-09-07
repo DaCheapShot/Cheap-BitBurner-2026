@@ -1,6 +1,6 @@
 import { buildWorkerPool, shareRam } from "./prepper.js";
 import {
-  SHARE_MARKER, SHARE_FRACTION, SHARE_MAX_FRACTION,
+  SHARE_MARKER, SHARE_PORT, SHARE_FRACTION, SHARE_MAX_FRACTION,
   shareFractionFrom, shareBonusFor,
 } from "./config.js";
 
@@ -12,10 +12,14 @@ import {
  *   run scripts/sharemode.js off        every share thread exits within 10s
  *   run scripts/sharemode.js 0.5        half the pool, live
  *
- * All this does is write a fraction to SHARE_MARKER. The manager reads it at
- * the top of each cycle and tops the share thread count up to match; the share
- * workers read it between calls and retire themselves when it reaches 0. So a
- * change here needs no restart of the manager, and no kill.
+ * This writes a fraction to two places, and it needs both. SHARE_MARKER is the
+ * persistent setting - it survives a restart, and the manager reads it each
+ * cycle to size the top-up. SHARE_PORT is how that setting reaches the workers:
+ * ns.read resolves against the server the calling script runs on, so a worker on
+ * a purchased server cannot see a file that lives on home. Workers peek the port
+ * between share calls and retire themselves when it reads 0.
+ *
+ * So a change here needs no restart of the manager, and no kill.
  *
  * The value lives in a file rather than in config.js precisely so it can be
  * changed from the terminal: editing config.js means waiting on the filesync
@@ -78,7 +82,19 @@ export async function main(ns) {
       return;
     }
 
-    ns.write(SHARE_MARKER, `${wanted}\n${Date.now()}`, "w");
+    ns.write(SHARE_MARKER, String(wanted), "w");
+
+    // Publish to the gate port as well, not only to the file. The file is the
+    // persistent setting, but only home can read it - ns.read resolves against
+    // the server the calling script runs on, so a worker out on the fleet never
+    // sees it. The port is what they actually hear.
+    //
+    // Written here rather than left to the manager's next cycle: that is the
+    // difference between "off" taking 10 seconds and taking a whole volley,
+    // which on ecorp is nearly seven minutes.
+    const gate = ns.getPortHandle(SHARE_PORT);
+    gate.clear();
+    gate.write(wanted);
 
     const clamped = Number(word) > SHARE_MAX_FRACTION
       ? `  (clamped from ${word} - see SHARE_MAX_FRACTION)`

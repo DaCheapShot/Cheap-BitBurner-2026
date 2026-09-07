@@ -257,13 +257,26 @@ curve is the whole reason share takes a capped fraction rather than "whatever is
 
 **Three pieces**, and the split is not arbitrary:
 
-- `sharemode.js` writes a **fraction** to `/data/share.txt`. A fraction rather than an on/off
-  flag so the amount is retunable from the terminal — putting it in `config.js` would mean
-  waiting on the filesync extension, the least reliable link in the setup.
-- `share.js` loops `while (fraction > 0) await ns.share()`. `ns.share` resolves after 10 s, so
-  sharing continuously means looping — and that loop is also the **off switch**. Workers poll
-  the marker between calls and retire themselves, so `sharemode.js off` clears the network in
-  under 10 s with no `ns.kill` anywhere, and works even when no manager is running.
+- `sharemode.js` writes a **fraction** to `/data/share.txt` *and* publishes it on `SHARE_PORT`.
+  A fraction rather than an on/off flag so the amount is retunable from the terminal — putting it
+  in `config.js` would mean waiting on the filesync extension, the least reliable link here.
+- `share.js` loops `while (Number(gate.peek()) > 0) await ns.share()`. `ns.share` resolves after
+  10 s, so sharing continuously means looping — and that loop is also the **off switch**. Workers
+  peek the gate between calls and retire themselves, so `off` clears the network in under 10 s
+  with no `ns.kill` anywhere, and works even when no manager is running.
+
+  **The setting reaches workers on a PORT, never a file.** `ns.read` resolves against the server
+  the calling script runs on (`NetscriptFunctions.ts`: `const server = ctx.workerScript.getServer()`),
+  so a worker reading `/data/share.txt` — which exists on home alone — gets `""`, treats it as
+  off, and exits milliseconds after `exec` handed it a perfectly valid pid. The manager counted
+  66 hosts sharing while 65 had already quit. Ports are shared across every host; files are not.
+  `peek`, not `read`: `read` removes the message, so the first worker to wake would consume the
+  setting and stop all the others.
+
+  It also **imports nothing**, like the batch workers, taking the port number as `ns.args[0]`.
+
+  Two claims that look alike and are not: `exec` returned non-zero, and the worker is still
+  running. Only the second one matters, and only `shareCensus` measures it.
 - `managerCore.js` tops the thread count up against the volley's own pool, before the volley is
   sized, then `refresh()`es — so the RAM share took is simply gone from what the volley sees.
   It does the same per prep cycle through `prepGroup`'s `onCycle` hook, because prep is when the

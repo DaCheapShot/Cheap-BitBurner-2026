@@ -237,6 +237,29 @@ export const POOL_WAIT_CYCLES = 90;
  */
 export const SHARE_MARKER = "/data/share.txt";
 
+/**
+ * Port the share fraction is BROADCAST on, for the workers to read.
+ *
+ * The marker above cannot do this job, and assuming it could cost a live run.
+ * ns.read resolves against the server the calling script runs on - from
+ * NetscriptFunctions.ts, `const server = ctx.workerScript.getServer()` and then
+ * `server.getContentFile(path)?.content ?? ""`. /data/share.txt exists on home
+ * alone, so a share worker anywhere else read "", parsed it as OFF, and exited
+ * within milliseconds of starting. exec had returned a real pid, so the manager
+ * counted 66 hosts sharing while 65 of them had already quit.
+ *
+ * Ports are shared across every host and cost 0 GB to read or write, which makes
+ * them the only channel a worker on a purchased server can actually hear. The
+ * file stays the PERSISTENT setting - it survives a restart and is read by the
+ * manager and sharemode.js, both of which run on home - and the port is how that
+ * setting reaches the fleet. Both writers publish it, so turning share off takes
+ * effect within 10s instead of waiting a whole volley for the next cycle.
+ *
+ * Deliberately not REPORT_PORT: that one is drained with read(), which REMOVES
+ * the message. A setting has to be peeked, and peek leaves it in place.
+ */
+export const SHARE_PORT = 2;
+
 /** The share worker. A path only - importing it would cost 2.40 GB for ns.share. */
 export const SHARE_WORKER = "/scripts/share.js";
 
@@ -452,14 +475,16 @@ export const WORKER_LIST = Object.values(WORKER_FILES);
  * hard to see: fileExists said share.js WAS there, and it was.
  *
  * hack.js, grow.js and weaken.js import nothing at all, so this never came up
- * before. share.js imports config.js for the marker path, so it ran on home -
- * the one host that happens to have config.js - and returned 0 on all 68
- * others.
+ * before. share.js briefly imported config.js for one constant, ran on home -
+ * the one host that happens to have config.js - and returned 0 on all 68 others.
+ * It now takes the port number as an argument and imports nothing, which is why
+ * this list is empty again.
  *
- * Adding a worker that imports anything means adding that import here. The test
- * suite enforces it: DEPLOY_LIST must be closed under imports.
+ * It stays as a mechanism rather than being deleted: adding a worker that
+ * imports anything means adding that import here, and the test suite enforces
+ * it - DEPLOY_LIST must be closed under imports.
  */
-export const WORKER_DEPS = ["/scripts/config.js"];
+export const WORKER_DEPS = [];
 
 /**
  * Everything that must exist on a host before the manager can exec it there.

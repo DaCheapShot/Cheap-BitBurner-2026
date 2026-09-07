@@ -21,6 +21,7 @@ import {
   OP_WORKER,
   SHARE_MARKER,
   SHARE_WORKER,
+  SHARE_PORT,
   shareFractionFrom,
 } from "./config.js";
 import {
@@ -730,43 +731,59 @@ export function topUpShare(ns, pool, ramPerThread, fraction, alive, aliveByHost 
     else noFile.push(s.hostname);
   }
 
+  // PLAN both passes first, exec once per host afterwards.
+  //
+  // Doing it the other way round left TWO share processes on home: pass 1 places
+  // each host's quota, but a sum of floors falls short of the floor of the sum,
+  // so pass 2 always has a handful of threads left over and home - being first -
+  // took them in a second exec. A 262142-thread process beside a 1-thread one is
+  // harmless arithmetic and confusing to read, and the stray process muddies the
+  // census for no gain.
+  const plan = new Map();
   let remaining = deficit;
-  let launched = 0;
-  const placements = [];
-  const placedOn = new Map();
 
-  // freeRam is read from the pool's cached usage, which no longer moves once we
-  // start exec-ing, so what has already been placed has to be subtracted by hand.
-  const room = (s) => s.threadsFor(ramPerThread) - (placedOn.get(s.hostname) ?? 0);
-
-  const place = (s, n) => {
+  // freeRam comes from the pool's cached usage, which does not move while we are
+  // planning, so what this loop has already promised must be subtracted by hand.
+  const room = (s) => s.threadsFor(ramPerThread) - (plan.get(s.hostname) ?? 0);
+  const promise = (s, n) => {
     if (n <= 0) return;
-    if (ns.exec(SHARE_WORKER, s.hostname, n) === 0) {
-      // fileExists already said the script IS here, so this is something else.
-      // Record what was asked for and what the pool believed was free, because
-      // those two numbers are the whole diagnosis: equal-ish means the pool's
-      // view is stale, wildly different means something outside this process is
-      // holding the host. Guessing at the cause is what cost the last two runs.
-      if (!refused.some((r) => r.host === s.hostname)) {
-        refused.push({ host: s.hostname, threads: n, freeGb: s.freeRam });
-      }
-      return;
-    }
-    placedOn.set(s.hostname, (placedOn.get(s.hostname) ?? 0) + n);
-    placements.push({ host: s.hostname, threads: n });
+    plan.set(s.hostname, (plan.get(s.hostname) ?? 0) + n);
     remaining -= n;
-    launched += n;
   };
 
   for (const s of ready) {
     if (remaining <= 0) break;
     const quota = Math.floor((s.usableRam * fraction) / ramPerThread) - (aliveByHost.get(s.hostname) ?? 0);
-    place(s, Math.min(quota, room(s), remaining));
+    promise(s, Math.min(quota, room(s), remaining));
   }
 
   for (const s of ready) {
     if (remaining <= 0) break;
-    place(s, Math.min(room(s), remaining));
+    promise(s, Math.min(room(s), remaining));
+  }
+
+  let launched = 0;
+  const placements = [];
+
+  for (const s of ready) {
+    const n = plan.get(s.hostname) ?? 0;
+    if (n <= 0) continue;
+    if (ns.exec(SHARE_WORKER, s.hostname, n, SHARE_PORT) === 0) {
+      // fileExists already said the script IS here, so this is something else.
+      // Record what was asked for and what the pool believed was free, because
+      // those two numbers are the whole diagnosis: equal-ish means the pool's
+      // view is stale, wildly different means something outside this process is
+      // holding the host. Guessing at the cause is what cost two live runs.
+      //
+      // The threads this host was promised are simply not placed. They are not
+      // re-homed here, because doing so would mean a second exec somewhere and
+      // put the double process back. The next cycle re-measures and tops up -
+      // the top-up is idempotent, which is what makes that safe.
+      refused.push({ host: s.hostname, threads: n, freeGb: s.freeRam });
+      continue;
+    }
+    placements.push({ host: s.hostname, threads: n });
+    launched += n;
   }
 
   return { want, deficit, launched, placements, noFile, refused };
@@ -786,6 +803,19 @@ export function topUpShare(ns, pool, ramPerThread, fraction, alive, aliveByHost 
  */
 function serviceShare(ns, pool, ramPerThread, log, prefix = INDENT) {
   const fraction = shareFractionFrom(ns.read(SHARE_MARKER));
+
+  // Broadcast BEFORE anything is launched, and unconditionally - including when
+  // share is off, so any worker still running sees the 0 and retires.
+  //
+  // The marker is read here, on home, and republished on a port because that is
+  // the only channel the fleet can hear: ns.read resolves against the server the
+  // calling script runs on, so a worker on a purchased server reading
+  // /data/share.txt gets "" and stops dead. clear-then-write keeps exactly one
+  // value in the queue for the workers to peek at.
+  const gate = ns.getPortHandle(SHARE_PORT);
+  gate.clear();
+  gate.write(fraction);
+
   const census = shareCensus(ns, pool.servers.map((s) => s.hostname));
 
   if (fraction <= 0) {
@@ -807,10 +837,18 @@ function serviceShare(ns, pool, ramPerThread, log, prefix = INDENT) {
   // otherwise be counted twice, and the count would drift up every cycle.
   const hosts = new Set([...census.hostList, ...res.placements.map((p) => p.host)]).size;
 
+  // Read AFTER the exec calls, so it still shows x1.0000 on the cycle that
+  // launches: the game only counts a worker's threads once its first ns.share()
+  // runs. Saying so beats printing a number that looks like share is doing
+  // nothing on the very cycle it started.
+  const power = ns.getSharePower();
+
   log(
     `${prefix}share ${total}t on ${hosts} host(s) ` +
       `(${fmtRam(held)}, ${((held / pool.usableRam) * 100).toFixed(1)}% of pool)  ` +
-      `power x${ns.getSharePower().toFixed(4)}` +
+      (power > 1
+        ? `power x${power.toFixed(4)}`
+        : "power registers next cycle - workers count from their first share()") +
       (res.launched > 0 ? `  +${res.launched}t this cycle` : ""),
   );
 

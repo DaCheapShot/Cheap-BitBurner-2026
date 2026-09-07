@@ -74,6 +74,83 @@ export const tests = {
     assertClose(step, Math.log(2) / 25, 1e-12, "and that constant is ln(2)/25");
   },
 
+  // -------------------------------------------------------------- worker ----
+
+  /*
+   * Nothing here ever RAN share.js, and that is the gap this whole feature fell
+   * through. topUpShare counted a non-zero exec as "sharing", but on 65 hosts the
+   * worker exited milliseconds later - it read /data/share.txt, which exists on
+   * home alone, saw "", and stopped. The manager cheerfully reported 66 hosts
+   * sharing. exec succeeding and a worker still running are different claims.
+   */
+
+  "the worker shares while the gate port says so": async () => {
+    const { share, config } = await loadScripts();
+    const ns = makeNs({ args: [config.SHARE_PORT] });
+    ns.getPortHandle(config.SHARE_PORT).write(0.25);
+
+    let calls = 0;
+    ns.share = async () => {
+      // Turn the gate off from underneath it, the way sharemode.js would.
+      if (++calls >= 3) { ns.getPortHandle(config.SHARE_PORT).clear(); }
+    };
+
+    await share.main(ns);
+    assert(calls === 3, `expected 3 shares then a clean exit, got ${calls}`);
+  },
+
+  // The live failure, reproduced. An empty gate must stop the worker rather than
+  // let it run unbounded - but it must be the GATE that is empty, not a file.
+  "the worker exits at once when the gate is empty": async () => {
+    const { share, config } = await loadScripts();
+    const ns = makeNs({ args: [config.SHARE_PORT] });
+    let calls = 0;
+    ns.share = async () => { calls++; };
+
+    await share.main(ns);
+    assert(calls === 0, `an empty gate must share nothing, shared ${calls} time(s)`);
+  },
+
+  // The specific thing that broke: a host with no files at all. Every purchased
+  // server is this host. If the worker needs anything host-local, it dies here.
+  "the worker runs on a host that has no files at all": async () => {
+    const { share, config } = await loadScripts();
+    const ns = makeNs({ args: [config.SHARE_PORT], files: {} });
+    ns.getPortHandle(config.SHARE_PORT).write(config.SHARE_FRACTION);
+
+    let calls = 0;
+    ns.share = async () => { if (++calls >= 2) ns.getPortHandle(config.SHARE_PORT).clear(); };
+
+    await share.main(ns);
+    assert(calls === 2,
+      "a worker on a bare purchased server must still share - it may not depend on home's files");
+  },
+
+  // peek, not read. read() REMOVES the message, so the first worker to wake would
+  // consume the setting and every other worker on the network would see an empty
+  // port and stop - the same outage by a different route.
+  "one worker reading the gate does not stop the next": async () => {
+    const { share, config } = await loadScripts();
+    const gateOf = (ns) => ns.getPortHandle(config.SHARE_PORT);
+
+    const runOne = async (ns) => {
+      let calls = 0;
+      ns.share = async () => { if (++calls >= 1) gateOf(ns).clear(); };
+      await share.main(ns);
+      return calls;
+    };
+
+    const ns = makeNs({ args: [config.SHARE_PORT] });
+    gateOf(ns).write(0.25);
+    // First worker runs and stops only because ITS OWN callback cleared the gate.
+    assert(await runOne(ns) === 1, "the first worker should have shared once");
+
+    // Re-arm and confirm a second worker sees the same value - it would not if
+    // the first had consumed it with read().
+    gateOf(ns).write(0.25);
+    assert(await runOne(ns) === 1, "the second worker found the gate empty - peek was a read");
+  },
+
   // -------------------------------------------------------------- census ----
 
   "the census counts share threads and nothing else": async () => {

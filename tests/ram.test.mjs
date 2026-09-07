@@ -58,14 +58,34 @@ export const tests = {
 
   // Charged PER THREAD, and the manager places tens of thousands of them, so a
   // stray import costs more here than anywhere else in the repo: pulling in
-  // ram.js would add 0.35 GB to every single thread. config.js has no ns calls
-  // at all, which is the only reason importing it is safe.
-  "share.js is exactly 4.00 GB and imports only config.js": () => {
+  // ram.js would add 0.35 GB to every single thread.
+  //
+  // It must import NOTHING, like the three batch workers. A worker's imports have
+  // to exist on every host it runs on, and importing config.js for one constant
+  // made exec return 0 on all 68 hosts that lacked it. The port number arrives as
+  // an argument instead.
+  "share.js is exactly 4.00 GB and imports nothing": () => {
     const ram = ramOf("share");
     assert(Math.abs(ram - 4.00) < 0.011, `expected 4.00 GB, got ${ram.toFixed(2)}`);
-    const imports = [...readScript("share").matchAll(/from\s+"\.\/([\w-]+)\.js"/g)].map((m) => m[1]);
-    assert(imports.length === 1 && imports[0] === "config",
-      `share.js should import config.js and nothing else, got ${imports.join(", ") || "(none)"}`);
+    assert(!readScript("share").includes('from "./'),
+      "share.js must import nothing - its imports would have to exist on every host it runs on");
+  },
+
+  // The bug that survived every other check. ns.read resolves against the server
+  // the calling script runs on (NetscriptFunctions.ts: `const server =
+  // ctx.workerScript.getServer()`), so a worker reading /data/share.txt sees ""
+  // on every host but home, treats it as off, and exits milliseconds after exec
+  // returned it a perfectly valid pid. The manager counted 66 hosts sharing while
+  // 65 had already quit.
+  //
+  // No worker may read a file. Their settings arrive on ports, which are global.
+  "no worker depends on host-local files": () => {
+    for (const w of ["hack", "grow", "weaken", "share"]) {
+      const src = readScript(w).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+      assert(!/\bns\.read\s*\(/.test(src),
+        `${w}.js calls ns.read - that resolves on the host it RUNS on, so it reads "" ` +
+          `everywhere but home. Use a port; ports are shared across all servers.`);
+    }
   },
 
   // A hand-run toggle, so prepper.js's 2.00 GB is affordable - and it buys the
