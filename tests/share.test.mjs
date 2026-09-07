@@ -18,7 +18,7 @@ const SHARE = "/scripts/share.js";
 function poolNs(hosts = { home: 1024, p0: 4096, p1: 2048 }) {
   return makeNs({
     hosts,
-    files: { "/scripts/hack.js": "x" },
+    files: { "/scripts/hack.js": "x", "/scripts/share.js": "ns.share()" },
   });
 }
 
@@ -158,20 +158,77 @@ export const tests = {
 
   // -------------------------------------------------------------- top-up ----
 
-  // getCoreBonus is 1 + (cores - 1) / 16, and home is the only host with more
-  // than one core - so a home share thread is worth up to 1.44 of anyone else.
-  // It is the one placement in this codebase decided by host identity, not size.
-  "the top-up fills home first, then the biggest hosts": async () => {
+  // The first live run poured share into home and filled it to the brim: on a
+  // 2PB home that swallowed the pool's largest host whole. Every host gives the
+  // same fraction of ITSELF instead, so share scales the pool down uniformly.
+  // Home still goes first, but only for the rounding remainder - the core bonus
+  // it buys is ln(1.4375)/25 = 1.45 points even if EVERY thread sat there.
+  "share is spread proportionally, not poured into the biggest host": async () => {
     const { managerCore, prepper } = await loadScripts();
     const ns = poolNs();
     const pool = prepper.buildWorkerPool(ns);
 
     const res = managerCore.topUpShare(ns, pool, 4.0, 0.25, 0);
-    assert(res.placements[0].host === "home", `home must be first, got ${res.placements[0].host}`);
-    const rest = res.placements.slice(1).map((p) => p.host);
-    assert(rest.length <= 1 || rest.join(",") === "p0,p1",
-      `after home, largest first: got ${rest.join(",")}`);
+    assert(res.placements[0].host === "home", `home should lead, got ${res.placements[0].host}`);
     assert(res.launched === res.deficit, `launched ${res.launched} of ${res.deficit} wanted`);
+
+    for (const p of res.placements) {
+      const usable = pool.get(p.host).usableRam;
+      const share = (p.threads * 4.0) / usable;
+      assert(Math.abs(share - 0.25) < 0.02,
+        `${p.host} took ${(share * 100).toFixed(1)}% of itself, not the 25% every host owes`);
+    }
+    assert(res.placements.length === pool.servers.length,
+      `every host should contribute, only ${res.placements.length} did`);
+  },
+
+  // Exactly the first live failure. deploy.js runs only when root.js roots
+  // something new, so ADDING a worker file never triggers it - the whole fleet
+  // can be missing share.js. Every exec off home returned 0, share ran on one
+  // host out of the network, and the log blamed a busy pool.
+  "a fleet missing the worker is named, not silently under-shared": async () => {
+    const { managerCore, prepper } = await loadScripts();
+    // Bare keys in the mock exist everywhere; a host-prefixed key exists only
+    // there. So hack.js is fleet-wide and share.js reached home alone.
+    const ns = makeNs({
+      hosts: { home: 1024, p0: 4096, p1: 2048 },
+      files: { "/scripts/hack.js": "x", "home:/scripts/share.js": "ns.share()" },
+    });
+    const pool = prepper.buildWorkerPool(ns);
+
+    const res = managerCore.topUpShare(ns, pool, 4.0, 0.25, 0);
+    assert(res.missing.includes("p0") && res.missing.includes("p1"),
+      `both worker-less hosts should be named, got ${JSON.stringify(res.missing)}`);
+    assert(res.placements.every((p) => p.host === "home"),
+      "nothing should have been placed where the worker does not exist");
+    assert(res.launched < res.want, "this fixture is meant to under-share");
+  },
+
+  // Pass 2. Honouring the requested fraction matters more than the pool's shape,
+  // and SHARE_MAX_FRACTION still bounds the total.
+  "hosts that cannot take their quota spill onto the ones that can": async () => {
+    const { managerCore, prepper } = await loadScripts();
+    const ns = makeNs({
+      hosts: { home: 1024, p0: 4096, p1: 2048 },
+      files: { "/scripts/hack.js": "x", "home:/scripts/share.js": "ns.share()",
+               "p0:/scripts/share.js": "ns.share()" },
+    });
+    const pool = prepper.buildWorkerPool(ns);
+
+    // p1 cannot run it, so its quota has to come from home and p0.
+    const res = managerCore.topUpShare(ns, pool, 4.0, 0.25, 0);
+    assert(res.launched === res.deficit,
+      `the fraction should still be met: launched ${res.launched} of ${res.deficit}`);
+    // Someone had to exceed their own quota to cover p1's. Which one is an
+    // ordering detail (home leads, so it absorbs the remainder first); that a
+    // host went over at all is the behaviour being pinned.
+    const over = res.placements.some((p) => {
+      const quota = Math.floor((pool.get(p.host).usableRam * 0.25) / 4.0);
+      const got = res.placements.filter((q) => q.host === p.host).reduce((n, q) => n + q.threads, 0);
+      return got > quota;
+    });
+    assert(over, "no host covered the shortfall, so the fraction was quietly abandoned");
+    assert(!res.placements.some((p) => p.host === "p1"), "p1 cannot run the worker");
   },
 
   "the top-up hands the same bytes to only one host": async () => {

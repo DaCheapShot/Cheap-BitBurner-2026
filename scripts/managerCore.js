@@ -615,15 +615,21 @@ const normPath = (p) => String(p).replace(/^\/+/, "");
  * worth - but scanning the whole network again to catch it would cost another
  * 0.20 GB to fix a case that requires losing root on a host mid-run.
  *
+ * byHost is what lets the top-up size each host against its OWN quota rather
+ * than against a single network-wide number, so a host that already carries its
+ * share is not handed more.
+ *
  * @param {NS} ns
  * @param {string[]} hosts
- * @returns {{threads: number, hosts: number, procs: number}}
+ * @returns {{threads: number, hosts: number, procs: number,
+ *            hostList: string[], byHost: Map<string, number>}}
  */
 export function shareCensus(ns, hosts) {
   const want = normPath(SHARE_WORKER);
   let threads = 0;
   let procs = 0;
   const live = [];
+  const byHost = new Map();
 
   for (const host of hosts) {
     let n = 0;
@@ -632,10 +638,13 @@ export function shareCensus(ns, hosts) {
       n += p.threads;
       procs++;
     }
-    if (n > 0) live.push(host);
+    if (n > 0) {
+      live.push(host);
+      byHost.set(host, n);
+    }
     threads += n;
   }
-  return { threads, hosts: live.length, procs, hostList: live };
+  return { threads, hosts: live.length, procs, hostList: live, byHost };
 }
 
 /**
@@ -663,56 +672,92 @@ export function planShare(pool, ramPerThread, fraction, alive) {
 /**
  * Launch the missing share threads.
  *
- * Placed HOME FIRST, then by free RAM. The game multiplies a share worker's
- * threads by getCoreBonus (1 + (cores - 1) / 16) before adding them to its
- * global counter, and home is the only host with more than one core - so an
- * 8-core home makes each of its share threads worth 1.44 of anyone else's. It
- * is the one placement decision in this codebase where the host identity, not
- * its size, is what matters.
+ * Two passes, and the first one is the point.
+ *
+ * PASS 1 gives every host the SAME fraction of ITSELF, so share scales the pool
+ * down uniformly instead of eating whole hosts. The first live run of this code
+ * did the opposite - it filled home first and to the brim - and on a 2PB home
+ * that swallowed the pool's largest host entirely for a benefit that is barely
+ * measurable: getCoreBonus is 1 + (cores - 1)/16, and because the bonus is
+ * ln(threads)/25, moving EVERY share thread onto an 8-core home is worth
+ * ln(1.4375)/25 = 1.45 points. Losing the biggest host from the volley costs
+ * more than that as soon as the volley is RAM-bound rather than window-bound.
+ * Home still goes first, so the rounding remainder lands where the cores are.
+ *
+ * PASS 2 places whatever pass 1 could not - hosts too small for their quota, or
+ * hosts that refuse the exec - anywhere it fits. Honouring the requested
+ * fraction matters more than the pool's shape, and SHARE_MAX_FRACTION still
+ * bounds the total.
+ *
+ * Hosts without the worker are checked with fileExists rather than discovered
+ * through a failed exec. It is free - prepper.js already pays for fileExists -
+ * and it turns a silent shortfall into a named cause. deploy.js only runs when
+ * root.js roots something new, so adding a worker file does not trigger it, and
+ * the whole fleet can be missing share.js with nothing to say so.
  *
  * Deliberately does NOT go through pool.allocate. A pool reservation is
  * released at the end of the cycle, but a share worker outlives every cycle -
- * it runs until the marker says stop. Reserving would therefore leak `pending`
- * against RAM the game already reports as used, and double-count it. Instead
- * these exec straight into the pool and the caller re-reads usage afterwards,
- * so the volley sizes itself against what is genuinely left.
+ * it runs until the marker says stop. Reserving would leave `pending` set on a
+ * pool the caller then refreshes, and refresh() re-reads the game's used RAM
+ * without clearing it, so the same bytes would be subtracted twice. Placement
+ * tracks its own running total instead.
  */
-export function topUpShare(ns, pool, ramPerThread, fraction, alive) {
+export function topUpShare(ns, pool, ramPerThread, fraction, alive, aliveByHost = new Map()) {
   const { want, deficit } = planShare(pool, ramPerThread, fraction, alive);
-  if (deficit <= 0) return { want, deficit: 0, launched: 0, placements: [] };
+  if (deficit <= 0) {
+    return { want, deficit: 0, launched: 0, placements: [], missing: [] };
+  }
 
-  const candidates = [...pool.servers].sort((a, b) => {
+  // Home first purely so the rounding remainder lands on the multi-core host.
+  const order = [...pool.servers].sort((a, b) => {
     if (a.hostname === b.hostname) return 0;
     if (a.hostname === "home") return -1;
     if (b.hostname === "home") return 1;
     return b.freeRam - a.freeRam;
   });
 
+  const missing = [];
+  const ready = [];
+  for (const s of order) {
+    if (ns.fileExists(SHARE_WORKER, s.hostname)) ready.push(s);
+    else missing.push(s.hostname);
+  }
+
   let remaining = deficit;
   let launched = 0;
   const placements = [];
+  const placedOn = new Map();
 
-  for (const s of candidates) {
+  // freeRam is read from the pool's cached usage, which no longer moves once we
+  // start exec-ing, so what has already been placed has to be subtracted by hand.
+  const room = (s) => s.threadsFor(ramPerThread) - (placedOn.get(s.hostname) ?? 0);
+
+  const place = (s, n) => {
+    if (n <= 0) return;
+    if (ns.exec(SHARE_WORKER, s.hostname, n) === 0) {
+      // fileExists said yes, so this is something else - out of RAM by a sliver,
+      // or the process limit. Drop the host rather than the whole top-up.
+      if (!missing.includes(s.hostname)) missing.push(s.hostname);
+      return;
+    }
+    placedOn.set(s.hostname, (placedOn.get(s.hostname) ?? 0) + n);
+    placements.push({ host: s.hostname, threads: n });
+    remaining -= n;
+    launched += n;
+  };
+
+  for (const s of ready) {
     if (remaining <= 0) break;
-    const fit = Math.min(s.threadsFor(ramPerThread), remaining);
-    if (fit <= 0) continue;
-    // A failed exec means the worker is not on that host yet - deploy.js has
-    // not reached it. Skip rather than abort: the rest of the fleet can still
-    // share, and the next cycle retries this host.
-    if (ns.exec(SHARE_WORKER, s.hostname, fit) === 0) continue;
-    // No pool.reserveThreads here, and it is not an omission. Each host is
-    // visited exactly once, so nothing can be handed the same bytes twice - and
-    // a reservation would be actively wrong: the caller refreshes the pool
-    // afterwards, which re-reads the game's used RAM but does NOT clear
-    // `pending`, so these bytes would be subtracted once as used and again as
-    // reserved. The prep wave planned next would then be sized against a pool
-    // short by the whole share allocation.
-    remaining -= fit;
-    launched += fit;
-    placements.push({ host: s.hostname, threads: fit });
+    const quota = Math.floor((s.usableRam * fraction) / ramPerThread) - (aliveByHost.get(s.hostname) ?? 0);
+    place(s, Math.min(quota, room(s), remaining));
   }
 
-  return { want, deficit, launched, placements };
+  for (const s of ready) {
+    if (remaining <= 0) break;
+    place(s, Math.min(room(s), remaining));
+  }
+
+  return { want, deficit, launched, placements, missing };
 }
 
 /**
@@ -743,7 +788,7 @@ function serviceShare(ns, pool, ramPerThread, log, prefix = INDENT) {
     return { fraction, threads: census.threads, launched: 0 };
   }
 
-  const res = topUpShare(ns, pool, ramPerThread, fraction, census.threads);
+  const res = topUpShare(ns, pool, ramPerThread, fraction, census.threads, census.byHost);
   const total = census.threads + res.launched;
   const held = total * ramPerThread;
   // Union, not a sum: a host that was already sharing and then took more would
@@ -754,11 +799,23 @@ function serviceShare(ns, pool, ramPerThread, log, prefix = INDENT) {
     `${prefix}share ${total}t on ${hosts} host(s) ` +
       `(${fmtRam(held)}, ${((held / pool.usableRam) * 100).toFixed(1)}% of pool)  ` +
       `power x${ns.getSharePower().toFixed(4)}` +
-      (res.launched > 0 ? `  +${res.launched}t this cycle` : "") +
-      // want is what the fraction asked for; a shortfall means the RAM was not
-      // there, which is worth saying rather than silently under-sharing.
-      (total < res.want ? `  (short of ${res.want}t - pool is busy)` : ""),
+      (res.launched > 0 ? `  +${res.launched}t this cycle` : ""),
   );
+
+  // A shortfall used to be reported as "pool is busy", which was a guess and on
+  // the first live run a wrong one: the fleet was missing share.js entirely and
+  // every exec off home returned 0, so share ran on ONE host out of the whole
+  // network while the log blamed RAM. Name the cause, and name the remedy.
+  if (total < res.want) {
+    log(
+      `${prefix}      short of ${res.want}t` +
+        (res.missing.length
+          ? ` - ${res.missing.length} host(s) cannot run ${SHARE_WORKER} ` +
+            `(${res.missing.slice(0, 3).join(", ")}${res.missing.length > 3 ? ", ..." : ""}). ` +
+            `Run scripts/deploy.js.`
+          : ` - the pool is busy; the next cycle retries`),
+    );
+  }
 
   return { fraction, threads: total, launched: res.launched };
 }

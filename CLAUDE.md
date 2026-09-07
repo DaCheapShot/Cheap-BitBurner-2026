@@ -253,10 +253,22 @@ curve is the whole reason share takes a capped fraction rather than "whatever is
 outlive the process that started them, so a manager that did not count them would launch a
 second full set on top — doubling the RAM share holds to buy 2.77 points of a logarithm.
 
-Share threads are placed **home first**, then by free RAM. `getCoreBonus` is
-`1 + (cores - 1) / 16` and home is the only multi-core host, so an 8-core home makes each of its
-share threads worth 1.44 of anyone else's. It is the one placement in this codebase decided by
-host identity rather than host size.
+Placement is **proportional**: every host gives the same fraction of *itself*, so share scales
+the pool down uniformly instead of eating whole hosts. The first live run did the opposite — it
+filled home first and to the brim — and on a 2 PB home that swallowed the pool's largest host for
+a benefit that barely registers. `getCoreBonus` is `1 + (cores - 1) / 16`, and since the bonus is
+`ln(threads)/25`, moving *every* share thread onto an 8-core home is worth `ln(1.4375)/25` =
+**1.45 points**. Home still goes first so the rounding remainder lands where the cores are. A
+second pass places whatever the first could not — hosts too small for their quota, or hosts that
+cannot run the worker — because honouring the requested fraction matters more than the pool's
+shape.
+
+**`deploy.js` only runs when `root.js` roots something new, so adding a worker file never
+triggers it.** The whole fleet can be missing `share.js`, and the first live run was: every
+`exec` off home returned 0, share ran on one host out of the network, and the log blamed a busy
+pool. `topUpShare` now checks `fileExists` per host — free, since `prepper.js` already pays for
+it — and names both the hosts and the remedy (`run scripts/deploy.js`). **After adding or
+changing a worker, run `deploy.js` by hand.**
 
 ### Invariants that look arbitrary but aren't
 

@@ -51,6 +51,7 @@ function volleyNs({ formulas = false, share = null } = {}) {
         written: Date.now(), hosts: {},
       }),
       "/scripts/hack.js": "x",
+      "/scripts/share.js": "ns.share()",
       ...(share === null ? {} : { "/data/share.txt": String(share) }),
     },
   });
