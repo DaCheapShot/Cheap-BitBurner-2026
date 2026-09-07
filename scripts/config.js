@@ -441,13 +441,34 @@ export const OP_WORKER = { H: "hack", W1: "weaken", G: "grow", W2: "weaken" };
 export const WORKER_LIST = Object.values(WORKER_FILES);
 
 /**
+ * Modules the workers IMPORT, which must be copied alongside them.
+ *
+ * This list is not an optimisation, it is a correctness requirement, and
+ * omitting it cost three live runs. Bitburner resolves a script's imports on
+ * the server it is being started on, and RamCalculations.ts returns
+ * `ImportError: "<module>" does not exist on server: <host>` when one is
+ * missing. exec cannot price the script, so it returns a bare 0 - the same
+ * value it returns when the script itself is absent, which is what made this so
+ * hard to see: fileExists said share.js WAS there, and it was.
+ *
+ * hack.js, grow.js and weaken.js import nothing at all, so this never came up
+ * before. share.js imports config.js for the marker path, so it ran on home -
+ * the one host that happens to have config.js - and returned 0 on all 68
+ * others.
+ *
+ * Adding a worker that imports anything means adding that import here. The test
+ * suite enforces it: DEPLOY_LIST must be closed under imports.
+ */
+export const WORKER_DEPS = ["/scripts/config.js"];
+
+/**
  * Everything that must exist on a host before the manager can exec it there.
  *
  * Lives here rather than in deploy.js so boot.js can compare it against
  * DEPLOY_MANIFEST without importing deploy.js and paying 0.90 GB (scp, scan,
  * hasRootAccess, getServerMaxRam) for a list of strings.
  */
-export const DEPLOY_LIST = [...WORKER_LIST, SHARE_WORKER];
+export const DEPLOY_LIST = [...WORKER_LIST, SHARE_WORKER, ...WORKER_DEPS];
 
 /**
  * Written by deploy.js recording WHICH files it actually broadcast.

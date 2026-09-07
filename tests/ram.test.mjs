@@ -1,4 +1,4 @@
-import { readScript, assert } from "./harness.mjs";
+import { readScript, assert, loadScripts } from "./harness.mjs";
 
 // Verified against src/Netscript/RamCostGenerator.ts in this fork.
 const COST = {
@@ -73,6 +73,29 @@ export const tests = {
   "sharemode.js costs 3.80 GB": () => {
     const ram = ramOf("sharemode");
     assert(Math.abs(ram - 3.80) < 0.011, `expected 3.80 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // Bitburner resolves imports on the server a script STARTS on, and
+  // RamCalculations.ts returns ImportError when one is missing - so exec returns
+  // a bare 0, indistinguishable from the script itself being absent.
+  //
+  // share.js imports config.js, config.js was not deployed, and share therefore
+  // ran on home alone (the one host that has config.js) while every other host
+  // refused. Three live runs went into finding that, two of them chasing a
+  // diagnostic that blamed deploy. This test is the fix for the CLASS: anything
+  // the workers import must ship with them.
+  "DEPLOY_LIST is closed under imports": async () => {
+    const { DEPLOY_LIST } = (await loadScripts())["config"];
+    const deployed = new Set(DEPLOY_LIST.map((f) => f.replace(/^\/+/, "")));
+
+    for (const file of DEPLOY_LIST) {
+      const bare = file.replace(/^\/+/, "").replace(/^scripts\//, "").replace(/\.js$/, "");
+      for (const m of readScript(bare).matchAll(/from\s+"\.\/([\w-]+)\.js"/g)) {
+        assert(deployed.has(`scripts/${m[1]}.js`),
+          `${file} imports ${m[1]}.js, which is not in DEPLOY_LIST - exec will return 0 on ` +
+            `every host but home, and fileExists will insist the worker is there`);
+      }
+    }
   },
 
   // The manager reaches SHARE_WORKER as a STRING from config.js and must never

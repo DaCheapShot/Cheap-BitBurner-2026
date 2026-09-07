@@ -84,6 +84,15 @@ A symptom of hop 1 failing is code that "obviously" ran but behaved like an olde
 `deploy.js` guards hop 2 by refusing to broadcast home's workers unless they carry result
 reporting.
 
+**A worker's imports must be deployed with it.** Bitburner resolves imports on the server a
+script *starts* on, and `RamCalculations.ts` returns `ImportError: "<module>" does not exist on
+server: <host>` when one is missing — so `exec` cannot price the script and returns a bare `0`,
+**the same value it returns when the script itself is absent**. `hack.js` / `grow.js` /
+`weaken.js` import nothing, so this never arose until `share.js` imported `config.js`: share ran
+on home, the one host that has `config.js`, and returned 0 on all 68 others while `fileExists`
+correctly insisted the worker was there. `WORKER_DEPS` carries the imports and
+`tests/ram.test.mjs` asserts `DEPLOY_LIST` is closed under them.
+
 **Adding a worker file needs no manual deploy, and must not.** `deploy.js` runs only when
 `root.js` roots something new — adding a file roots nothing, so the trigger never fires and the
 file sits on home while the whole fleet runs without it. The only symptom is `exec` returning a
