@@ -84,6 +84,19 @@ A symptom of hop 1 failing is code that "obviously" ran but behaved like an olde
 `deploy.js` guards hop 2 by refusing to broadcast home's workers unless they carry result
 reporting.
 
+**Adding a worker file needs no manual deploy, and must not.** `deploy.js` runs only when
+`root.js` roots something new — adding a file roots nothing, so the trigger never fires and the
+file sits on home while the whole fleet runs without it. The only symptom is `exec` returning a
+bare `0` somewhere far away. So `deploy.js` writes `DEPLOY_MANIFEST` recording *which* files it
+broadcast, and `boot.js` re-runs it whenever that differs from `DEPLOY_LIST`.
+
+The manifest records the **file list, not a timestamp**, and that is the point. If the copy of
+`deploy.js` inside the game is older than the one on disk, it broadcasts the older list, boot
+sees the mismatch survive a deploy, and says so — naming filesync as the cause. A timestamp would
+look like success every time. This is the only detector in the repo for a stale in-game file,
+which is its most expensive recurring failure: a manager running `main`-era code, a `SyntaxError`
+for an export that existed on disk, and `share.js` reaching one host out of 69 twice.
+
 ## Verification
 
 Run the test suite with `node tests/run.mjs`. Filter by name: `node tests/run.mjs boot`, or list
