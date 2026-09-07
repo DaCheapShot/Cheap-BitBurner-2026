@@ -1,6 +1,7 @@
 import { loadCalibration, calibAgeMs } from "./calib.js";
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
-         FORMULAS_PROGRAM, FORMULAS_MARKER, WORKER_LIST } from "./config.js";
+         FORMULAS_PROGRAM, FORMULAS_MARKER, WORKER_LIST,
+         DEPLOY_LIST, DEPLOY_MANIFEST } from "./config.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -38,6 +39,8 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
  *
  * RAM: 1.60 base + run 1.00 + ps 0.20 + kill 0.50 + fileExists 0.10
  *      + scan 0.20 (killOrphanWorkers must reach the whole network) = 3.60 GB
+ * (the deploy manifest check is ns.read/ns.write, 0 GB, and DEPLOY_LIST is a
+ * plain array of strings from config.js)
  * (calib.js is 0 GB, ns.read/ns.write are 0 GB, and root.js is imported only
  * for the marker path constant - a plain string, so it adds nothing.)
  */
@@ -286,13 +289,46 @@ export async function main(ns) {
     await runToCompletion(ns, ROOT, ["--quiet"], log);
 
     // -- 2. deploy ----------------------------------------------------------
-    // Only when the network actually changed. Deploying every tick would scp to
-    // every rooted host for nothing; the marker makes it event-driven.
+    // Two triggers, and the second one exists because the first is not enough.
+    //
+    // Newly rooted hosts are the obvious case, and the marker makes that
+    // event-driven rather than scp-ing to every host once a minute for nothing.
+    //
+    // A new WORKER FILE is the case that bit. Adding one roots nothing, so the
+    // root marker never moves, so deploy never runs, and the file sits on home
+    // while every host runs without it. The only symptom is exec returning a
+    // bare 0 far away: share.js ran on one host out of 69 that way.
     const stamp = ns.read(ROOT_MARKER);
-    if (firstPass || stamp !== lastRootStamp) {
+    const wantWorkers = DEPLOY_LIST.join(" ");
+    const haveWorkers = ns.read(DEPLOY_MANIFEST).trim();
+    const workersChanged = haveWorkers !== wantWorkers;
+
+    if (firstPass || stamp !== lastRootStamp || workersChanged) {
       lastRootStamp = stamp;
-      log(firstPass ? "deploying workers (first pass)" : "new servers rooted - redeploying");
+      log(
+        firstPass
+          ? "deploying workers (first pass)"
+          : workersChanged
+            ? `worker set changed - redeploying (${haveWorkers || "nothing recorded"} -> ${wantWorkers})`
+            : "new servers rooted - redeploying",
+      );
       await runToCompletion(ns, DEPLOY, [], log);
+
+      // Ran deploy, and it STILL did not record the file set this boot expects.
+      // deploy.js writes the list it actually broadcast, so a mismatch that
+      // survives a run means the copy of deploy.js inside the game is older than
+      // the one on disk - the filesync extension has not delivered it. Re-running
+      // it cannot help, and without this the loop above would try once a minute
+      // forever while the batcher quietly ran short of workers.
+      const broadcast = ns.read(DEPLOY_MANIFEST).trim();
+      if (broadcast !== wantWorkers) {
+        ns.tprint(
+          `ERROR: deploy.js ran but broadcast "${broadcast || "nothing"}" ` +
+            `instead of "${wantWorkers}". The copy of deploy.js IN THE GAME is older than the one ` +
+            `on disk - filesync has not delivered it. Re-save scripts/deploy.js with the extension ` +
+            `connected, or the batcher will keep exec-ing workers that are not there.`,
+        );
+      }
     }
 
     // -- 3. calibrate -------------------------------------------------------

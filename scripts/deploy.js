@@ -1,4 +1,4 @@
-import { WORKER_LIST, SHARE_WORKER } from "./config.js";
+import { WORKER_LIST, SHARE_WORKER, DEPLOY_LIST, DEPLOY_MANIFEST } from "./config.js";
 
 /**
  * Copy the worker scripts to every rooted host with RAM.
@@ -34,9 +34,6 @@ const REQUIRED_IN_WORKER = "r: result";
  * without that call is a stale file rather than a working one.
  */
 const REQUIRED_IN_SHARE = "ns.share(";
-
-/** Everything that must exist on a host before the manager can exec it there. */
-const DEPLOY_LIST = [...WORKER_LIST, SHARE_WORKER];
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -95,5 +92,20 @@ export async function main(ns) {
   // and every exec the batcher aims at them will silently return 0.
   if (failed.length) {
     ns.tprint(`ERROR: deploy failed on ${failed.length} host(s): ${failed.join(", ")}`);
+    return;
   }
+
+  // Record WHAT was broadcast, not merely that a broadcast happened. boot.js
+  // compares this against DEPLOY_LIST and re-runs deploy when a worker file has
+  // been added - which nothing else notices, because deploy is triggered by
+  // newly rooted hosts and adding a file roots nothing.
+  //
+  // Writing the file list rather than a timestamp is the whole point: if the
+  // copy of THIS script running in the game is older than the one on disk, it
+  // writes the older list, boot sees the mismatch persist across a deploy, and
+  // says so. A timestamp would look like success every time.
+  //
+  // One line, no timestamp: boot compares it as a whole string, and a second
+  // line would only be something to parse wrongly.
+  ns.write(DEPLOY_MANIFEST, DEPLOY_LIST.join(" "), "w");
 }

@@ -437,8 +437,34 @@ export const BATCH_OPS = ["H", "W1", "G", "W2"];
 /** Which worker file runs each slot. */
 export const OP_WORKER = { H: "hack", W1: "weaken", G: "grow", W2: "weaken" };
 
-/** Every worker path, for scp. */
+/** The three batch workers - the ones that report on REPORT_PORT. */
 export const WORKER_LIST = Object.values(WORKER_FILES);
+
+/**
+ * Everything that must exist on a host before the manager can exec it there.
+ *
+ * Lives here rather than in deploy.js so boot.js can compare it against
+ * DEPLOY_MANIFEST without importing deploy.js and paying 0.90 GB (scp, scan,
+ * hasRootAccess, getServerMaxRam) for a list of strings.
+ */
+export const DEPLOY_LIST = [...WORKER_LIST, SHARE_WORKER];
+
+/**
+ * Written by deploy.js recording WHICH files it actually broadcast.
+ *
+ * Exists because adding a worker file is invisible to everything else. deploy.js
+ * runs only when root.js roots something new, so a new file sits on home while
+ * every host runs without it - and the only symptom is exec returning a bare 0
+ * somewhere far away. That is exactly how share.js reached one host out of 69.
+ *
+ * It also catches the failure that outlasted the first fix. If boot runs
+ * deploy.js and the manifest still does not match DEPLOY_LIST, then the copy of
+ * deploy.js INSIDE THE GAME is older than the one on disk - the filesync
+ * extension has not delivered it - and no amount of re-running it will help.
+ * That is this repo's most expensive recurring failure and it has never had a
+ * detector; this is one.
+ */
+export const DEPLOY_MANIFEST = "/data/deployed.txt";
 
 // ------------------------------------------------------------ supervisor ----
 
