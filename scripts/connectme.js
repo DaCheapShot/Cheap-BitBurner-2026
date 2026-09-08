@@ -20,7 +20,7 @@
  * Usage:  run scripts/connectme.js CSEC
  *         run scripts/connectme.js csec              case does not matter
  *         run scripts/connectme.js CSEC avmnite-02h  several at once
- *         run scripts/connectme.js --factions        every backdoor-gated faction
+ *         run scripts/connectme.js --factions        every backdoor worth having
  *
  * RAM: 1.60 base + scan 0.20 + getServer 2.00 + getHackingLevel 0.05 = 3.85 GB
  *      (tprint, args and string work are 0)
@@ -33,17 +33,25 @@
  */
 
 /**
- * The servers whose backdoor grants a faction invite.
+ * The servers worth backdooring, and what each one is for.
  *
- * Taken from src/Faction/FactionInfo.tsx - every faction whose inviteReqs
- * contain haveBackdooredServer, and nothing else. Two mistakes are easy here,
- * and both were in an earlier connect.js in this repo:
+ * The first four come from src/Faction/FactionInfo.tsx - every faction whose
+ * inviteReqs are a haveBackdooredServer and NOTHING else, so the backdoor alone
+ * earns the invite. Two entries that look like they belong here do not:
  *
- *   - w0r1d_d43m0n grants NO faction. It is the endgame server, and it sits in
- *     SpecialServers.ts beside the real ones, which is how it creeps in.
- *   - fulcrumassets is easy to miss because Fulcrum Secret Technologies is a
- *     megacorp faction rather than a hacking one, so it is declared far from
- *     the others in the file.
+ *   - fulcrumassets gates Fulcrum Secret Technologies, but its inviteReqs are
+ *     employedBy + haveCompanyRep + haveBackdooredServer. The backdoor never
+ *     invites you on its own, so a route to it answers a question this report
+ *     does not ask.
+ *   - w0r1d_d43m0n grants no faction at all. It is here anyway because it is
+ *     the one route you actually want printed late in a BitNode: backdooring it
+ *     ends the node. It is listed as what it is, not as a faction.
+ *
+ * w0r1d_d43m0n is also the only entry that can be absent. Prestige.ts only
+ * links it to The-Cave once The Red Pill is installed (`if
+ * (Player.hasAugmentation(AugmentationName.TheRedPill, true))`), so before that
+ * the server exists but no scan reaches it - which is why the report drops
+ * unreachable rows instead of calling them an error.
  *
  * Order here is arbitrary; the report sorts by required hacking level, which is
  * the order you can actually reach them in.
@@ -53,7 +61,7 @@ export const FACTION_SERVERS = [
   { faction: "NiteSec", host: "avmnite-02h" },
   { faction: "The Black Hand", host: "I.I.I.I" },
   { faction: "BitRunners", host: "run4theh111z" },
-  { faction: "Fulcrum Secret Technologies", host: "fulcrumassets" },
+  { faction: "BitNode exit - backdoor ENDS the node", host: "w0r1d_d43m0n" },
 ];
 
 /**
@@ -211,28 +219,26 @@ export async function main(ns) {
       const name = resolveHost(parents, host);
       return name
         ? { faction, host: name, server: serverOf(name), path: pathTo(parents, name) }
-        : { faction, host, server: null, path: null };
-    });
+        : null;
+    // w0r1d_d43m0n is off the network until The Red Pill is installed, and a
+    // row saying so every run would be noise for the whole BitNode. The other
+    // four exist from the first tick, so a missing one here means the constant
+    // is wrong, not the save - and that shows up as a short report.
+    }).filter(Boolean);
 
     // Required hacking level is the order you can actually reach these in, and
-    // it is usually the number you are waiting on. Anything unreachable sorts
-    // last rather than to the front as a level of 0.
-    rows.sort((a, b) =>
-      (a.server?.requiredHackingSkill ?? Infinity) - (b.server?.requiredHackingSkill ?? Infinity));
+    // it is usually the number you are waiting on. w0r1d_d43m0n's 3000 puts it
+    // last on its own, which is also where it belongs.
+    rows.sort((a, b) => a.server.requiredHackingSkill - b.server.requiredHackingSkill);
 
     const level = ns.getHackingLevel();
     let earned = 0;
 
     for (const row of rows) {
-      if (!row.server) {
-        out.push(`${row.faction} via ${row.host}\n  ERROR  not on the network`);
-        continue;
-      }
-
       let status;
       if (row.server.backdoorInstalled) {
         earned++;
-        status = "backdoored - invite earned";
+        status = "backdoored";
       } else {
         const blockers = backdoorBlockers(row.server, level);
         status = blockers.length === 0
@@ -248,7 +254,7 @@ export async function main(ns) {
     }
 
     ns.tprint(
-      `\nbackdoor-gated factions - ${earned}/${rows.length} earned, hacking level ${level}\n\n` +
+      `\nbackdoor targets - ${earned}/${rows.length} backdoored, hacking level ${level}\n\n` +
       `${out.join("\n\n")}\n`,
     );
     return;

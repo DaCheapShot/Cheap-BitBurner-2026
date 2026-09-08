@@ -92,21 +92,22 @@ export const tests = {
     assert(connectme.resolveHost(p, "nope") === null, "an unknown host must resolve to null");
   },
 
-  // Pinned against src/Faction/FactionInfo.tsx: exactly the five factions whose
-  // inviteReqs contain haveBackdooredServer. An earlier connect.js in this repo
-  // got this wrong in both directions at once, which is why the list is asserted
-  // whole rather than just spot-checked.
-  "the faction list is exactly the backdoor-gated factions": async () => {
+  // Pinned against src/Faction/FactionInfo.tsx: the four factions whose
+  // inviteReqs are a haveBackdooredServer and nothing else, plus w0r1d_d43m0n,
+  // which grants no faction and is listed for the route alone. An earlier
+  // connect.js got the faction half wrong in both directions at once, which is
+  // why the list is asserted whole rather than spot-checked.
+  //
+  // fulcrumassets is deliberately absent: Fulcrum Secret Technologies also
+  // wants employedBy + haveCompanyRep, so the backdoor alone never invites you.
+  "the backdoor target list is exactly the four invites plus the daemon": async () => {
     const { connectme } = await loadScripts();
     const hosts = connectme.FACTION_SERVERS.map((f) => f.host);
     assert(
-      hosts.join(",") === "CSEC,avmnite-02h,I.I.I.I,run4theh111z,fulcrumassets",
-      `faction hosts drifted: ${hosts.join(",")}`,
+      hosts.join(",") === "CSEC,avmnite-02h,I.I.I.I,run4theh111z,w0r1d_d43m0n",
+      `backdoor target hosts drifted: ${hosts.join(",")}`,
     );
-    // w0r1d_d43m0n is the endgame server and grants no faction, but it lives in
-    // SpecialServers.ts next to the real four and keeps getting swept in.
-    assert(!hosts.includes("w0r1d_d43m0n"), "w0r1d_d43m0n grants no faction invite");
-    assert(connectme.FACTION_SERVERS.every((f) => f.faction), "every entry needs a faction name");
+    assert(connectme.FACTION_SERVERS.every((f) => f.faction), "every entry needs a label");
   },
 
   // backdoor.ts checks admin rights first and returns, so a doubly-blocked

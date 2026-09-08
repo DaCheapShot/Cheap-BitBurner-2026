@@ -189,9 +189,13 @@ Layers, bottom up:
 `connectme.js` (3.80) prints the terminal `connect` chain to a host. It trims the
 chain wherever `src/Terminal/commands/connect.ts` permits a direct jump - that is,
 to any host with `backdoorInstalled` or `purchasedByPlayer` - which is the only
-reason it pays for `getServer`. `--factions` reports the five servers whose backdoor
-grants an invite, sourced from `haveBackdooredServer` in `src/Faction/FactionInfo.tsx`
-and pinned by a test - `w0r1d_d43m0n` is NOT one of them.
+reason it pays for `getServer`. `--factions` reports the four servers whose backdoor
+ALONE grants an invite, sourced from `haveBackdooredServer` in
+`src/Faction/FactionInfo.tsx` and pinned by a test, plus `w0r1d_d43m0n` for the route -
+it grants no faction. `fulcrumassets` is excluded: Fulcrum also requires employment
+and company rep, so its backdoor never invites on its own. `w0r1d_d43m0n` is off the
+network until The Red Pill is installed (`Prestige.ts` links it to `The-Cave` there),
+so unreachable rows are dropped rather than reported as an error.
 
 `capacity.js` (~7.75) is the surviving diagnostic. It ranks targets by real throughput, which
 the manager does not do — `pickTarget` chooses the richest *hackable* server, not the most
