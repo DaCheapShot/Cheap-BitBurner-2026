@@ -42,12 +42,16 @@
  * on a 400-batch volley at 400ms spacing that is W + 160s against W. Roughly
  * three times the exposure for the same nominal fraction.
  *
- * The tolerance formula is unchanged:
+ * The tolerance formula is no longer read in that direction. It used to be
  *
  *     tolerance = ((GROW_MARGIN - 1) / GROW_MARGIN) * (1 - steal) / steal
  *
- * and past ~0.95 the trade goes bad on efficiency alone, before safety is even
- * considered. Income is linear in steal; grow threads scale with
+ * with the margin fixed, which made the headroom collapse to 0.25% here. It is
+ * now inverted - the headroom is fixed at GROW_DRIFT_TOLERANCE and the margin
+ * is solved for - so this ceiling bounds RAM and income, not survival.
+ *
+ * Past ~0.95 the trade still goes bad on efficiency alone, before safety is
+ * even considered. Income is linear in steal; grow threads scale with
  * ln(1/(1-steal)):
  *
  *     steal   tolerance   income   grow RAM    income/RAM
@@ -68,32 +72,22 @@
 export const MAX_STEAL_FRACTION = 0.95;
 
 /**
- * Fraction of a target's MAX money one batch's hack takes - the STARTING value
- * for the adaptive controller, not a fixed setting.
+ * Seed fraction, used only before the first rescan has calculated one.
  *
- * Starts AT the ceiling and descends. The controller only ever needs to find
- * the point where a target stops behaving, and starting at the top finds it in
- * one weaken window rather than climbing to it in six.
+ * The steal fraction is CALCULATED per target now, not configured - chooseSteal
+ * in lib/plan.js derives the largest fraction whose RAM fits that target's
+ * budget, capped by MAX_STEAL_FRACTION. Income is linear in steal with no
+ * interior optimum, so "largest that fits" IS the optimum; there is no yield
+ * curve to search the way the shotgun has to.
  *
- * The trade is explicit and worth stating: the first window's batches are
- * dispatched before any evidence exists about this target. If the ceiling is
- * too high for it, roughly one depth's worth of batches under-restore before
- * the first report lands, the drain detector fires, and the target is stopped
- * and re-prepped. That costs a prep cycle, once, against saving five weaken
- * windows of climbing on every target that is fine - and on the evidence so far
- * most are. A conservative start pays its cost every single time.
+ * This value therefore matters for about one tick. It sits at the ceiling
+ * because the first rescan runs immediately and will replace it, and starting
+ * high means a target that can afford the ceiling never has to climb to it.
  *
- * Two things make it recoverable rather than merely fast: the drain shows up in
- * the reports as a negative `over` (see nextSteal), and prep is non-blocking, so
- * one target backing off does not stall the others.
- *
- * A measured 10-minute run at 10%: 1255 batches, 1255 ok, 0 bad, 94% hit rate,
- * $114m/s - and 42 TB of an 11,284 TB pool. Income is linear in steal, so
- * sitting at 10% was leaving roughly 9x on the table.
+ * `--steal F` pins the fraction and disables the calculator. That is for
+ * controlled measurement only: a self-sizing, self-adjusting fraction is
+ * exactly what confounds a sweep.
  */
-// Declared AFTER MAX_STEAL_FRACTION on purpose: `const` is not hoisted, so
-// reading it above its declaration is a temporal-dead-zone error at import
-// time - which takes down every file in the folder at once.
 export const STEAL_FRACTION = MAX_STEAL_FRACTION;
 
 /**
@@ -124,12 +118,31 @@ export const STEAL_MIN_SAMPLES = 8;
  * Fraction of the drift tolerance that counts as "comfortably clean".
  *
  * A step up is only taken when the worst measured overshoot is inside this much
- * of the tolerance for the CURRENT fraction. Stepping up while already near the
- * limit would be raising the stake precisely when the margin is thinnest, and
- * the tolerance shrinks as the fraction rises - so the next step would start
- * over the line.
+ * of the tolerance. Stepping up from the edge would be raising the stake
+ * precisely when the margin is thinnest.
+ *
+ * 0.25 came from the era of a FLAT grow margin, where the tolerance was a
+ * property of the fraction alone and had nothing to do with what the target had
+ * been measured to do. It is incoherent now, and provably so. The budget is
+ * DRIFT_SAFETY times the measured drift and the margin is derived from the
+ * budget, so in steady state
+ *
+ *     worstOver / tolerance  ~=  1 / DRIFT_SAFETY  =  0.667
+ *
+ * whatever the fraction, whatever the target, however well it is behaving. A
+ * threshold of 0.25 is therefore one no healthy stream can ever meet: it does
+ * not mean "climb when comfortable", it means "never climb". A live run pinned
+ * phantasy at 30.4% under an 87% ceiling and iron-gym at 28.0% under 66% for a
+ * whole run at $700m/s, with `bad 0` and `hit 98%` throughout.
+ *
+ * 0.8 restores the intent against the number that is actually being compared.
+ * The steady-state 0.667 passes, so a stream whose drift is flat or falling
+ * climbs; a window where drift has grown to within 20% of the budget holds; one
+ * that exceeds the budget backs off, as before. The real protection against a
+ * step up was never this ratio - it is DRIFT_SAFETY, which sizes every batch to
+ * survive half again the worst drift yet seen.
  */
-export const STEAL_HEADROOM = 0.25;
+export const STEAL_HEADROOM = 0.8;
 
 /**
  * How many overlapping batches the instantaneous money floor allows for.
@@ -200,6 +213,29 @@ export const MIN_STEAL_FRACTION = 0.005;
 export const SPACER_MS = 100;
 
 /**
+ * How many thread counts the steal calculator probes per target.
+ *
+ * A SWEEP rather than a binary search, and the reason is that the objective
+ * stopped being monotonic the moment the cadence became a variable. At a fixed
+ * cadence income is maxMoney * steal / cadence - linear, so the best fraction is
+ * simply the largest that fits and a binary search over "does it fit" is valid.
+ * Once a target too big for its budget widens its cadence instead of shrinking
+ * its bite, income is
+ *
+ *     budget * maxMoney * steal / batchRamSeconds(steal)
+ *
+ * and batchRamSeconds carries a fixed floor (one hack thread, the weakens that
+ * cancel it) on top of a grow count that grows like ln(1/(1-steal)). So income
+ * rises off the floor, peaks, and falls away again - a binary search on a
+ * predicate cannot find that, and would return a wrong answer in silence.
+ *
+ * Log-spaced, because the interesting range of thread counts spans orders of
+ * magnitude and the peak is flat near the top. 20 probes over a 300-thread
+ * ceiling step by ~1.35x, which is finer than the curvature.
+ */
+export const STEAL_PROBES = 20;
+
+/**
  * Gap between the anchors of consecutive batches, ms. The stream's heartbeat.
  *
  * This is the constant that makes the batcher a stream rather than a shotgun:
@@ -215,6 +251,10 @@ export const SPACER_MS = 100;
  * Tightening it buys more concurrent batches and more income, and spends
  * safety margin against jitter. Start at the floor and widen if Phase 4
  * reports jitter approaching SPACER_MS.
+ *
+ * A FLOOR, not a fixed value. chooseSteal widens it per target when the target's
+ * pipeline does not fit its RAM budget at this rate - see STEAL_PROBES. Nothing
+ * ever runs faster than this.
  */
 export const CADENCE_MS = 4 * SPACER_MS;
 
@@ -231,6 +271,182 @@ export const CADENCE_MS = 4 * SPACER_MS;
  * the game clamps money at moneyMax, so surplus grow threads do nothing.
  */
 export const GROW_MARGIN = 1.05;
+
+/**
+ * How much a hack may overshoot its plan and still be fully repaired by its own
+ * grow. The margin is DERIVED from this - see growMarginFor in lib/plan.js.
+ *
+ * This inverts the relationship a flat GROW_MARGIN gives you, and the inversion
+ * is the whole point. A constant margin means a constant COST and a tolerance
+ * that collapses as the fraction rises: 42% of headroom at 10% steal, 0.27% at
+ * 94.7%. So the setting was generous exactly where nothing could go wrong and
+ * absent exactly where everything could.
+ *
+ * Measured, not assumed. A live run took the-hub from $4723.8m to $9.4m in 18
+ * landed batches - net x0.708 each - at a planned 94.7% with margin 1.05. Solve
+ * `(1 - actual) * 1.05 / (1 - 0.947) = 0.708` and the actual take was 96.4%: an
+ * overshoot of 1.8% against 0.27% of headroom. Nothing exotic happened. The
+ * hack got 1.8% better between dispatch and landing, which over one weaken
+ * window is ordinary, and the target was gone in three minutes.
+ *
+ * Fixing the tolerance instead makes the cost scale with the risk. Grow threads
+ * go as ln(multiplier), so the headroom is cheap: at 94.9% steal, 2% costs ~13%
+ * more grow threads and 4% costs ~19%.
+ *
+ * 6% because it is the PRE-EVIDENCE default now, not a floor - a stream that
+ * has landed hacks budgets from its own measurements instead (see
+ * DRIFT_SAFETY), so this only has to cover the first weaken window, which is
+ * precisely the window that cannot be measured. nova-med committed 1200
+ * batches at 94.3% before its first report and drained on a 4.50% drift; at 6%
+ * the ceiling would have held it to 91.7%, which costs 2.8% of income and is
+ * the difference between $11039.16b and nothing.
+ *
+ * 4% rather than 2% because 2% was measured to be too tight. A later run on the
+ * same fleet stepped all three targets down within seconds of each other -
+ * "overshoot 2.16% past the 2.00% tolerance", 2.13%, 2.13% - so the real drift
+ * over one weaken window on this fleet is a little over 2%, and a budget set at
+ * exactly the observed value has no margin at all. At 94.9% steal a 2.16%
+ * overshoot against a 2.00% budget nets x0.933 per batch, and with 1061 batches
+ * in flight the targets were at $0.1m of $17482.0m before the controller's
+ * correction could reach a single landing.
+ *
+ * The drift is hacking level moving between a batch's dispatch and its landing,
+ * so it scales with the weaken window rather than being a constant of the
+ * fleet. A target with a 20-minute window will drift further than one with a
+ * 7-minute window, and a per-target budget derived from `times.weaken` would be
+ * the honest version of this number. Not built: one constant with real headroom
+ * is enough until a run says otherwise.
+ */
+export const GROW_DRIFT_TOLERANCE = 0.06;
+
+/**
+ * Ceiling on the derived margin. As steal approaches 1 the algebra asks for a
+ * margin no number of grow threads can deliver, and an unbounded value would
+ * size a batch nothing can place.
+ *
+ * It is not only a guard. Together with GROW_DRIFT_TOLERANCE it DEFINES the
+ * highest steal fraction that can still be protected - see maxStealForDrift in
+ * lib/plan.js - so raising it buys a higher usable ceiling and costs grow
+ * threads, and lowering it does the reverse. At 3.0 and a 4% budget the
+ * fraction tops out at 94.3%, which is what MAX_STEAL_FRACTION used to assert
+ * on its own with nothing behind it.
+ */
+export const GROW_MARGIN_CAP = 3.0;
+
+/**
+ * Money floor, as a share of one batch's post-hack level.
+ *
+ * MONEY_FLOOR_BATCHES alone is not enough at the top of the range. `(1-s)^2` is
+ * 0.28% of max at 94.7% steal, so a target could lose 99.7% of its money before
+ * the check noticed - and in the live run above it did, reporting OFF BASELINE
+ * at $9.4m of $4723.8m. A healthy stream's true minimum is `maxMoney * (1-s)`,
+ * the instant after a hack lands, so half of that is a floor with real meaning
+ * however high the fraction goes.
+ *
+ * Taken as the MAX of the two, not a replacement: `(1-s)^2` is the tighter of
+ * the pair below ~50% steal and stays in charge there.
+ */
+export const MONEY_FLOOR_SHARE = 0.5;
+
+/**
+ * Bad batches tolerated in one evidence window before the fraction backs off.
+ *
+ * Zero was too strict, and measurably: a live run had alpha-ent judge ONE batch
+ * out of 223 badly and cut itself from 94.8% to 56.9%, where it stayed for the
+ * remaining ten minutes. rho-construction took the same 1-in-536 and held its
+ * fraction, so the two ended a run of near-identical targets 40 points apart on
+ * a single event.
+ *
+ * The response was also aimed at the wrong thing. A bad batch is a SEQUENCING
+ * fault - the ops landed in the wrong order or too far apart - and the run that
+ * produced it was carrying 132ms of jitter against a 100ms spacer. A smaller
+ * steal does not make landings more punctual; it just earns less.
+ *
+ * A real breakdown is still caught, and by the mechanism built for it:
+ * DESYNC_STRIKES consecutive bad batches stop the stream outright for re-prep.
+ * This only stops an isolated one from being read as a trend.
+ */
+export const BAD_BATCH_TOLERANCE = 1;
+
+/**
+ * Cap on the anchor's allowance for op times stretching before its ops launch.
+ *
+ * The allowance is real - a streaming target is at minimum security only about
+ * half the time, so an op time measured at the minimum understates what the op
+ * will meet. But it was `min(1, (hackSec + growSec) / minSec)`, and 1 means the
+ * anchor is placed a whole EXTRA weaken window into the future:
+ *
+ *     earliest = now + W + MIN_LEAD + W * swing
+ *
+ * That fraction reaches 1 exactly when a target has drained, because grow is
+ * then sized to climb back from almost nothing and `growSec` explodes with it.
+ * So a drain does not merely stop the money - it schedules every subsequent
+ * batch two weaken windows out, and at 480s per window a live run froze
+ * rho-construction and alpha-ent completely: `done` stuck at 970 and 1031 while
+ * `sent` kept climbing, depth pinned at MAX_IN_FLIGHT, and pool free RAM rising
+ * because nothing was due to launch for sixteen minutes.
+ *
+ * A quarter is a generous allowance for the real effect and cannot produce that
+ * failure. A target that genuinely wants more than this is not prepped, which
+ * is the baseline check's business, not the anchor's.
+ */
+export const MAX_ANCHOR_SWING = 0.25;
+
+/**
+ * How much of the drift a target has actually shown to budget for, and how fast
+ * a past reading fades.
+ *
+ * GROW_DRIFT_TOLERANCE is a floor, not an answer: drift is hacking level moving
+ * between a batch's dispatch and its landing, so it scales with the weaken
+ * window and differs per target. One run measured 4.41% on a 266s window and
+ * 6.37% on a 473s one, against a 4.00% budget - and the 473s target, nova-med,
+ * earned $49.97b while holding a third of the RAM budget that alpha-ent turned
+ * into $17271.56b.
+ *
+ * So the budget is measured instead of assumed. `worstOver` is already recorded
+ * every window for the controller; this reuses it. The safety factor is the
+ * margin between "the drift we saw" and "the drift the next window will bring",
+ * and the decay stops one bad window pinning a target low forever.
+ */
+export const DRIFT_SAFETY = 1.5;
+export const DRIFT_DECAY = 0.9;
+
+/**
+ * Floor under a MEASURED budget, so one lucky window cannot claim a target has
+ * no drift at all. MAX_STEAL_FRACTION bounds the ceiling anyway; this stops the
+ * arithmetic from being asked a degenerate question.
+ */
+export const MIN_DRIFT_TOLERANCE = 0.005;
+
+/**
+ * Ceiling on a MEASURED budget, and not decoration either.
+ *
+ * The budget is DRIFT_SAFETY times the worst overshoot yet seen, and the grow
+ * margin is derived from the budget - so a single absurd window widens the
+ * tolerance to match, and the back-off that would have caught the NEXT one
+ * cannot fire. The budget grows to excuse the very thing it exists to detect.
+ *
+ * 0.25 is three times the worst drift ever measured on this fleet (9.7%), so it
+ * cannot bind on real evidence. Past it the arithmetic has stopped describing
+ * drift anyway: at a 25% budget maxStealForDrift already holds the fraction
+ * under 73%, and a batch overshooting by more than a quarter is a broken batch,
+ * to be judged bad rather than accommodated.
+ */
+export const MAX_DRIFT_TOLERANCE = 0.25;
+
+/**
+ * Where the supervisor mirrors its log.
+ *
+ * The in-game log window holds a bounded number of lines, so by the time a run
+ * has produced something worth reading it has already thrown away its own
+ * start - the rescan that chose the targets, the first OFF BASELINE, the ramp.
+ * ns.write is 0 GB, so keeping the whole thing costs nothing but disk.
+ *
+ * Overwritten at startup rather than appended to: a file that grows across
+ * every run is one nobody reads. `--log <path>` picks another, `--log ""`
+ * turns it off.
+ */
+export const CONT_LOG_FILE = "/data/continuous.log.txt";
 
 /**
  * Ops of a batch, in LANDING order.
@@ -378,17 +594,30 @@ export const WORKER_RAM_FALLBACK = { hack: 1.70, grow: 1.75, weaken: 1.75 };
 /**
  * Hard ceiling on concurrent in-flight batches per target.
  *
- * The natural depth is weakenTime / cadence, and on a late-game target that is
- * enormous - a 6.4 minute weaken at a 400ms cadence wants 959 batches in the
- * air at once. That is not automatically wrong, but it is a lot of state, a lot
- * of reservations, and a lot of reports to keep straight, and the marginal
- * batch at that depth is worth the same as the first.
+ * A stream needs weakenTime / cadence batches in the air to land continuously.
+ * Below that it does not merely earn less - it stops being a stream. A measured
+ * run on a 360s-weaken target capped at 400 dispatched its 400 batches over
+ * 160s, then STALLED for ~200s with nothing left to land and no free slot to
+ * dispatch into, and repeated. That is shotgun behaviour, arrived at from the
+ * inside, and it is what this whole design exists to avoid.
  *
- * This caps the count without changing the cadence: the stream simply stops
- * adding depth once it is this deep, and the RAM it does not take is available
- * to the next target.
+ * 1200 covers a weaken of 480s at the current 400ms cadence. Targets slower
+ * than that - computek's weaken is ~20 minutes - still cap, and still fall back
+ * into waves; the honest fix for those is a wider cadence for that target, not
+ * a bigger number here.
+ *
+ * Raised from 400 once two things made depth cheap. JIT: a queued op reserves
+ * nothing, so depth costs bookkeeping rather than RAM - a live run held ~1000
+ * batches across five targets against 0.00TB reserved. And retire() no longer
+ * walks the whole in-flight map every tick, which at this depth across several
+ * streams would have been hundreds of thousands of iterations a second inside a
+ * game loop.
+ *
+ * What still bounds it is RAM, and the steal calculator already enforces that -
+ * it sizes each target's fraction to fit the budget, so a deeper pipeline
+ * arrives as a smaller bite rather than as an over-commitment.
  */
-export const MAX_IN_FLIGHT = 400;
+export const MAX_IN_FLIGHT = 1200;
 
 /**
  * Minimum head start between deciding a batch's landing time and its hack
@@ -414,6 +643,62 @@ export const MIN_LEAD_MS = 2 * SPACER_MS;
  * spacer.
  */
 export const STREAM_TICK_MS = 25;
+
+/**
+ * How often the JIT scheduler re-measures op times for its due-ness scan, ms.
+ *
+ * The scan runs every tick against every queue head, and a fresh snapshot per
+ * stream per tick is 40/s per target - on the formulas backend that is a
+ * getServer each time. So the SCAN uses a cached reading.
+ *
+ * The delay an op actually launches with is measured fresh regardless. A stale
+ * value there would reintroduce exactly the error JIT exists to remove, and
+ * launches are only ~4 per cadence per target, so measuring them properly is
+ * cheap.
+ */
+export const OPTIME_REFRESH_MS = 250;
+
+/**
+ * How late an op may land before its batch is abandoned, ms.
+ *
+ * NOT zero, which is what the first JIT build effectively used - it aborted on
+ * any negative slack at all. A batch is expensive to lose and a few ms of
+ * lateness costs nothing: the ops are a spacer apart, so the sequence only
+ * breaks when lateness approaches SPACER_MS. Abandoning a whole batch to avoid
+ * landing 3ms late is the wrong trade by a wide margin.
+ *
+ * Half a spacer keeps a clear margin against reordering while absorbing the
+ * op-time drift that made the strict check fire constantly.
+ */
+export const LATE_TOLERANCE_MS = SPACER_MS / 2;
+
+/**
+ * How early an op may be launched ahead of its computed due time, ms.
+ *
+ * The scheduler can only act on a tick, and its due-ness scan uses a cached op
+ * time, so it cannot hit `land - opTime` exactly. It launches slightly early
+ * and additionalMsec absorbs the difference - which is exact, because the game
+ * fixes an op's duration at the moment of the call.
+ *
+ * This is the only RAM the JIT dispatcher wastes: each op holds its bytes for
+ * its own duration plus at most this. Against a weaken window measured in
+ * minutes it does not register.
+ *
+ * Sized against how fast op times MOVE, not against tick granularity, which is
+ * what a first attempt at 300ms got wrong. calculateHackingTime is proportional
+ * to hackDifficulty, and a streaming target's security oscillates - so on a
+ * target with a 160s weaken (hack 40s) a 1% security swing is 400ms. Launch
+ * with less slack than that and the fresh measurement at launch comes out past
+ * the landing, which cost a live run ~1450 abandoned batches out of 1826.
+ *
+ * Larger than MIN_LEAD_MS on purpose, which has a visible consequence: the
+ * anchor sits at `now + W + MIN_LEAD_MS`, so weaken-1 (due at A - W) is inside
+ * this window the instant its batch is planned and goes out immediately. That
+ * is not a bug and not a regression - the all-at-once dispatcher launched it at
+ * exactly the same moment, with delay 0. Weaken-1 holds RAM for a full weaken
+ * either way; it is hack and grow that JIT actually saves.
+ */
+export const LAUNCH_LEAD_MS = 2000;
 
 /**
  * Extra time past a batch's last landing before it is given up for lost, ms.
@@ -536,12 +821,12 @@ export const REPREP_GRACE_MS = 2000;
 export const RESCAN_MS = 60000;
 
 /**
- * How many unprepped targets to prep at once, alongside the running streams.
+ * MAXIMUM unprepped targets to prep at once, alongside the running streams.
  *
- * Prep waves are sized by need and so are individually small, but each one
- * competes with the streams for pool RAM. This bounds that competition without
- * a separate RAM budget: the streams commit TARGET_RAM_BUDGET, and prep works
- * in the headroom left over.
+ * A ceiling, not a target - see PREP_SPARE_SHARE for what actually decides the
+ * number. "Prep waves are sized by need and so are individually small" is true
+ * only relative to the pool they are placed in, and that assumption was written
+ * against a 26 PB one.
  *
  * Prep runs CONCURRENTLY with streaming, never before it. Blocking the whole
  * run until every target was prepped meant the already-prepped ones - the good
@@ -549,6 +834,24 @@ export const RESCAN_MS = 60000;
  * dirty target was brought up. That is backwards.
  */
 export const PREP_CONCURRENCY = 4;
+
+/**
+ * How much of the pool must be FREE to earn each prep slot beyond the first.
+ *
+ * The flat PREP_CONCURRENCY above is right on a large pool and ruinous on a
+ * small one, because a wave sized "by need" takes whatever the pool has when
+ * need exceeds it. On a 1.6 TB pool four queued preps reserved 1.58 TB, held it
+ * for a weaken window each, and left `pool 0.00TB free` on every report - the
+ * one live stream aborted 169 of 170 batches for want of RAM, and none of the
+ * four targets finished prepping either, because each was crawling at a quarter
+ * of the rate one alone would have had.
+ *
+ * So: one prep always, and one more per quarter of the pool that is genuinely
+ * idle. That reproduces today's behaviour exactly where it was measured - an
+ * idle pool at startup still grants all four - and collapses to serial prep
+ * when the pool is full, which is the case that was broken.
+ */
+export const PREP_SPARE_SHARE = 0.25;
 
 /** Money must be within this fraction of max for a target to count as prepped. */
 export const MONEY_TOLERANCE = 0.999;

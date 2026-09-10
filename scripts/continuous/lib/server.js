@@ -83,9 +83,22 @@ export class Server {
     this.pending = 0;
   }
 
-  /** Re-read the game's used RAM. Cheap (0.05 GB, already paid for). */
-  refresh() {
+  /**
+   * Re-read the game's view of this host.
+   *
+   * `deep` also re-reads maxRam, which the constructor otherwise samples ONCE
+   * and never revisits. That was a real hole: scripts/cloud.js upgrades
+   * purchased servers while the manager runs, and the pool went on planning
+   * against whatever those hosts were worth at startup - a live run bought RAM
+   * for ten minutes and the slice never moved off 12.73TB.
+   *
+   * Shallow by default because the supervisor calls this every tick and maxRam
+   * moves on the scale of minutes, not milliseconds. ServerPool.sync does the
+   * deep pass, at rescan cadence.
+   */
+  refresh(deep = false) {
     this.usedRam = this.ns.getServerUsedRam(this.hostname);
+    if (deep) this.maxRam = this.ns.getServerMaxRam(this.hostname);
   }
 
   /** GB of this host the pool will plan against at all, before any usage. */
@@ -208,7 +221,13 @@ export class ServerPool {
       );
     }
 
-    return new ServerPool(servers);
+    const pool = new ServerPool(servers);
+    // Remembered so sync() can admit a host on the same terms this build did.
+    // Passing them back in at every rescan would mean two places that have to
+    // agree about what counts as a usable host, and they would eventually not.
+    pool.ns = ns;
+    pool.buildOpts = { homeReserve, includeHome, exclude, safetyFraction };
+    return pool;
   }
 
   /** Every hostname reachable from home, home included. */
@@ -226,8 +245,64 @@ export class ServerPool {
     return [...seen];
   }
 
-  refresh() {
-    for (const s of this.servers) s.refresh();
+  refresh(deep = false) {
+    for (const s of this.servers) s.refresh(deep);
+  }
+
+  /**
+   * Pick up RAM that did not exist when the pool was built.
+   *
+   * TWO things change under a running manager and neither was being seen:
+   * scripts/cloud.js upgrades purchased servers, so an existing host's maxRam
+   * grows; and it buys new ones, so hosts appear that were not on the network
+   * at build time. root.js does the same for foreign hosts. The constructor
+   * samples maxRam once and refresh() only ever re-read usedRam, so a live run
+   * spent ten minutes buying RAM the batcher never planned against - the slice
+   * sat at 12.73TB from the first rescan to the last.
+   *
+   * Called at RESCAN cadence, not per tick. It walks the whole network and
+   * re-reads every host, which is far too much to do forty times a second for a
+   * number that changes when a purchase happens.
+   *
+   * A new host is admitted on exactly the terms build() used, from the options
+   * it recorded. The CALLER still has to deploy the workers there - see
+   * lib/deploy.js - because exec returns a bare 0 for a missing script, which is
+   * the same value it returns for a refused one.
+   *
+   * @param {(host: string) => number} [coresFor] cpuCores for a host the pool
+   *   has not seen before. Omitted, new hosts are treated as single-core, which
+   *   only ever under-states them.
+   * @returns {{added: string[], grewGb: number}}
+   */
+  sync(coresFor = null) {
+    const ns = this.ns;
+    if (!ns) return { added: [], grewGb: 0 };
+
+    const opts = this.buildOpts ?? {};
+    const before = this.usableRam;
+
+    for (const s of this.servers) s.refresh(true);
+
+    const known = new Set(this.servers.map((s) => s.hostname));
+    const excluded = new Set(opts.exclude ?? []);
+    const added = [];
+
+    for (const host of ServerPool.scanAll(ns)) {
+      if (known.has(host) || excluded.has(host)) continue;
+      if (host === "home" && opts.includeHome === false) continue;
+      if (!ns.hasRootAccess(host)) continue;
+      if (ns.getServerMaxRam(host) <= 0) continue;
+      this.servers.push(
+        new Server(ns, host, {
+          staticReserve: host === "home" ? (opts.homeReserve ?? 0) : 0,
+          cores: coresFor ? coresFor(host) : 1,
+          safetyFraction: opts.safetyFraction ?? RAM_SAFETY_FRACTION,
+        }),
+      );
+      added.push(host);
+    }
+
+    return { added, grewGb: this.usableRam - before };
   }
 
   /** Sum of maxRam across the pool (before any reserve or safety fraction). */
@@ -268,6 +343,41 @@ export class ServerPool {
     if (order === "coresDesc") return copy.sort((a, b) => b.cores - a.cores || byRam(a, b));
     if (order === "coresAsc") return copy.sort((a, b) => a.cores - b.cores || byRam(a, b));
     return copy.sort(byRam);
+  }
+
+  /**
+   * Pool CAPACITY in bytes that can actually hold threads of this size.
+   *
+   * Not the same as usableRam, and the difference is the whole point.
+   * threadsFor() above floors per host, and allocateEffective fails when the
+   * SUM OF THOSE FLOORS is short - so a 60 GB host contributes 34 weaken
+   * threads and wastes 0.5 GB, and across a network of many small servers that
+   * rounding is a real fraction of the total. The byte total therefore
+   * overstates what can be placed, by construction.
+   *
+   * A live run proved it the expensive way. The steal calculator budgeted
+   * against usableRam * 0.85, chose 84.9%, and then 402 of 439 dispatches
+   * failed with "no room" - the bytes existed and the threads did not fit.
+   * (CLAUDE.md states the same rule for the shotgun, which is corroboration
+   * rather than the reason: the flooring is in this file.)
+   *
+   * This is a WEAKER remedy than simulating placement. It models per-host
+   * flooring, which is exactly the failure above, but not four ops competing
+   * for the same hosts nor fragmentation shifting as batches land. If "no room"
+   * survives this, capacity.js already has simulateStream for the real thing.
+   *
+   * Deliberately based on CAPACITY, not on freeRam: a budget computed from free
+   * RAM shrinks as the streams fill it, which would evict the very streams
+   * doing the filling. This is still an over-estimate - it ignores per-batch
+   * placement, which needs the threads of one op to fit alongside each other -
+   * but it is bounded by the same flooring the real placement does.
+   */
+  placeableRam(ramPerThread) {
+    if (!(ramPerThread > 0)) return 0;
+    return this.servers.reduce(
+      (n, s) => n + Math.floor(s.usableRam / ramPerThread) * ramPerThread,
+      0,
+    );
   }
 
   /** How many threads of this cost the whole pool could hold right now. */
