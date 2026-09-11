@@ -3093,29 +3093,42 @@ export const tests = {
     const { mods } = await loadContinuous();
     const { admitTargets } = mods["core"];
 
+    const { CADENCE_MS } = mods["config"];
+
     const t = (host, gb, weaken) => ({ host, gb, times: { weaken } });
     const priced = [t("a", 100, 40000), t("b", 100, 40000), t("c", 100, 40000)];
 
-    // depth = ceil(40000/400) = 100, so each target wants 10000GB.
-    const { admitted, committed } = admitTargets(priced, 25000, 12);
+    // Depth is weakenTime / cadence, so every figure here moves when the spacer
+    // is tuned. Derived rather than written out: the literals were 100 and
+    // 10000GB at a 400ms cadence, and they failed the day the cadence became
+    // 320 - for no reason except that they were literals.
+    const depth = Math.ceil(40000 / CADENCE_MS);
+    const want = depth * 100;
+
+    // Budget for two and a half targets, so the third is refused on RAM.
+    const { admitted, committed } = admitTargets(priced, want * 2.5, 12);
     assert(admitted.length === 2, `expected 2 admitted, got ${admitted.length}`);
-    assert(committed === 20000, `committed ${committed}`);
-    assert(admitted[0].depth === 100 && admitted[0].want === 10000, "depth/want recorded");
+    assert(committed === want * 2, `committed ${committed}, expected ${want * 2}`);
+    assert(admitted[0].depth === depth && admitted[0].want === want, "depth/want recorded");
   },
 
   "a cheap target still gets in behind one that did not fit": async () => {
     const { mods } = await loadContinuous();
     const { admitTargets } = mods["core"];
 
+    const { CADENCE_MS } = mods["config"];
+    const depth = Math.ceil(40000 / CADENCE_MS);
+
     const priced = [
-      { host: "rich", gb: 100, times: { weaken: 40000 } },  // wants 10000
-      { host: "huge", gb: 5000, times: { weaken: 40000 } }, // wants 500000
-      { host: "cheap", gb: 10, times: { weaken: 40000 } },  // wants 1000
+      { host: "rich", gb: 100, times: { weaken: 40000 } },  // wants depth * 100
+      { host: "huge", gb: 5000, times: { weaken: 40000 } }, // wants depth * 5000
+      { host: "cheap", gb: 10, times: { weaken: 40000 } },  // wants depth * 10
     ];
 
     // `continue`, not `break`: one unaffordable entry must not end the search,
     // or a cheap target that fits comfortably in the leftovers is lost.
-    const { admitted } = admitTargets(priced, 12000, 12);
+    // Budget: rich plus a fifth, which huge cannot touch and cheap fits inside.
+    const { admitted } = admitTargets(priced, depth * 100 * 1.2, 12);
     assert(admitted.map((a) => a.host).join(",") === "rich,cheap", `got ${admitted.map((a) => a.host)}`);
   },
 
@@ -3624,10 +3637,17 @@ export const tests = {
     };
 
     // A prepped target small enough to leave most of the budget unused.
+    //
+    // Its op times are stated in CADENCE_MS, not in ms. What decides the slots
+    // is how much the stream COMMITS, which is its depth - weakenTime / cadence
+    // - so a fixture with fixed ms times quietly gets a deeper pipeline every
+    // time the spacer is tightened, and stops being the small target the test
+    // needs. Five cadences of weaken is that target at any spacer.
+    const { CADENCE_MS } = (await loadContinuous()).mods["config"];
     const { preps: wide, mods } = await run({
       moneyMax: 1e7, moneyAvailable: 1e7, minDifficulty: 5, hackDifficulty: 5,
       hackPercentPerThread: 0.003, growBase: 1.0018,
-      weakenTime: 2000, growTime: 1600, hackTime: 500,
+      weakenTime: 5 * CADENCE_MS, growTime: 4 * CADENCE_MS, hackTime: 1.25 * CADENCE_MS,
     });
     const { PREP_CONCURRENCY } = mods["config"];
     assert(
@@ -3975,5 +3995,44 @@ export const tests = {
 
     assert(sent && sent.includes(SHARE_WORKER),
       `a newly bought host must get ${SHARE_WORKER}, got ${JSON.stringify(sent)}`);
+  },
+
+  // servers.js is a report, so the only thing worth pinning is that its rows
+  // carry the prep verdict and a real fraction from the calculator, and that
+  // they come back richest first - a table that ranks differently from the
+  // thing it describes gets misread.
+  "servers.js reports prep state, a steal fraction and income order": async () => {
+    const { mods } = await loadContinuous();
+    const { ns, math, ram } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        rich: {
+          moneyMax: 1e10, moneyAvailable: 1e10, minDifficulty: 5, hackDifficulty: 5,
+          hackPercentPerThread: 0.003, growBase: 1.0018,
+          weakenTime: 20000, growTime: 16000, hackTime: 5000,
+        },
+        poor: {
+          moneyMax: 1e7, moneyAvailable: 2e6, minDifficulty: 5, hackDifficulty: 40,
+          hackPercentPerThread: 0.003, growBase: 1.0018,
+          weakenTime: 20000, growTime: 16000, hackTime: 5000,
+        },
+      },
+    });
+
+    const snaps = ["poor", "rich"].map((h) => math.snapshot(ns, h));
+    const rows = mods["servers"].buildRows(math, snaps, ram, 1e6);
+
+    assert(rows.length === 2, `expected 2 rows, got ${rows.length}`);
+    assert(rows[0].snap.host === "rich", `richest target must sort first, got ${rows[0].snap.host}`);
+    assert(rows[0].prepped === true, "rich is at max money and min security");
+    assert(rows[1].prepped === false, "poor is drained and dirty");
+    for (const r of rows) {
+      assert(r.fit.steal > 0 && r.fit.steal <= 1, `steal out of range: ${r.fit.steal}`);
+      assert(r.fit.hack >= 1, `hack threads must be at least 1, got ${r.fit.hack}`);
+    }
+    assert(
+      mods["servers"].incomePerSec(rows[0]) >= mods["servers"].incomePerSec(rows[1]),
+      "rows must be sorted by income",
+    );
   },
 };

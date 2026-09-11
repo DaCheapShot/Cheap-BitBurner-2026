@@ -204,13 +204,23 @@ export const MIN_STEAL_FRACTION = 0.005;
  * batch, not its absolute lateness. Whole batches land tens of ms late
  * together, and a common offset cannot reorder anything.
  *
- * 100ms carried over from the shotgun, where it was measured: a single batch
- * jittered 6-7ms but a 2-batch volley jittered 48ms, because jitter scales with
- * how many workers land at once. A stream lands FEWER workers per instant than
- * a volley does by construction, so this should prove generous here. Do not
- * shrink it before Phase 4 reports real jitter.
+ * Started at 100ms, carried over from the shotgun where it was measured: a
+ * single batch jittered 6-7ms but a 2-batch volley jittered 48ms, because
+ * jitter scales with how many workers land at once. A stream lands FEWER
+ * workers per instant than a volley does by construction, and a live run
+ * confirmed it - 10-11ms of jitter against the 100ms spacer, `bad 0`.
+ *
+ * 80ms spends that measured headroom on cadence: CADENCE_MS is 4 * SPACER_MS,
+ * so the stream's heartbeat drops 400ms -> 320ms and in-flight depth (and with
+ * it income per target) rises by 25% for the same steal fraction. 80 still
+ * leaves ~7x the measured jitter, and LATE_TOLERANCE_MS follows it down to 40ms
+ * automatically, so a late op is still caught before it can reorder anything.
+ *
+ * If jitter ever climbs toward the spacer - more targets, more workers landing
+ * per instant - widen this again rather than widening CADENCE_MS alone: the
+ * spacer is what protects op ORDER inside a batch.
  */
-export const SPACER_MS = 100;
+export const SPACER_MS = 80;
 
 /**
  * How many thread counts the steal calculator probes per target.
