@@ -91,7 +91,7 @@ export const SPACER_MS = 100;
  * which no realistic RAM pool here can fill - so the window is never the real
  * limit and this can be raised freely for safety.
  */
-export const BATCH_SPACING_MS = 4 * SPACER_MS;
+export const BATCH_SPACING_MS = 3 * SPACER_MS;
 
 /**
  * Force a batch's hack threads onto a SINGLE host.
