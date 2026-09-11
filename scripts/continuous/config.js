@@ -220,7 +220,7 @@ export const MIN_STEAL_FRACTION = 0.005;
  * per instant - widen this again rather than widening CADENCE_MS alone: the
  * spacer is what protects op ORDER inside a batch.
  */
-export const SPACER_MS = 80;
+export const SPACER_MS = 100;
 
 /**
  * How many thread counts the steal calculator probes per target.
@@ -266,7 +266,7 @@ export const STEAL_PROBES = 20;
  * pipeline does not fit its RAM budget at this rate - see STEAL_PROBES. Nothing
  * ever runs faster than this.
  */
-export const CADENCE_MS = 4 * SPACER_MS;
+export const CADENCE_MS = 3 * SPACER_MS;
 
 /**
  * Grow safety margin, as a fraction of MONEY - not of threads.
