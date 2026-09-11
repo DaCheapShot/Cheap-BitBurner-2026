@@ -4,18 +4,23 @@ import { deployWorkers, describeDeploy } from "scripts/continuous/lib/deploy";
 import { clear } from "scripts/continuous/lib/report";
 import { isPrepped, rankTargets } from "scripts/continuous/lib/target";
 import { launchPrepWave, placePrepWave, prepTargets } from "scripts/continuous/lib/prep";
+import { serviceShare } from "scripts/continuous/lib/share";
 import { createStream } from "scripts/continuous/lib/stream";
 import {
+  avgConcurrentRam,
   baselineDrift,
   batchRam,
+  chooseSteal,
   clampSteal,
+  heldAllAtOnce,
   moneyPerGbSec,
   planThreads,
-  weaken2For,
 } from "scripts/continuous/lib/plan";
 import {
   CADENCE_MS,
+  CONT_LOG_FILE,
   CONT_REPORT_PORT,
+  GROW_DRIFT_TOLERANCE,
   HOME_RESERVE_GB,
   MAX_IN_FLIGHT,
   MAX_STEAL_FRACTION,
@@ -24,9 +29,12 @@ import {
   POOL_WAIT_MS,
   PREP_CONCURRENCY,
   PREP_MAX_CYCLES,
+  PREP_SPARE_SHARE,
   PROMOTE_PREP_FIRST,
   REPREP_GRACE_MS,
   RESCAN_MS,
+  SHARE_RAM_FALLBACK,
+  SHARE_WORKER,
   STEAL_FRACTION,
   STREAM_TICK_MS,
   TARGET_RAM_BUDGET,
@@ -110,6 +118,18 @@ export function workerRam(ns) {
   return out;
 }
 
+/**
+ * Per-thread RAM of the share worker, measured if it is here.
+ *
+ * NOT added to workerRam.missing: share.js belongs to the shotgun's deploy and
+ * a save that has never run it simply does not have the file. That is a reason
+ * for share to report nothing, not a reason for the batcher to refuse to start.
+ * The fallback keeps the arithmetic sane in the meantime.
+ */
+export function shareWorkerRam(ns) {
+  return ns.getScriptRam(SHARE_WORKER, "home") || SHARE_RAM_FALLBACK;
+}
+
 // -------------------------------------------------------------- admission ---
 
 /**
@@ -140,8 +160,16 @@ export function admitTargets(priced, budget, maxTargets, opts = {}) {
   for (const p of priced) {
     if (admitted.length >= maxTargets) break;
 
-    const depth = Math.min(Math.ceil(p.times.weaken / cadence), maxInFlight);
-    const want = depth * p.gb;
+    // The target's OWN pace, when the calculator has picked one. A target too
+    // big for its budget widens its cadence rather than shrinking its bite, so
+    // its depth is a fraction of what the configured rate would ask for -
+    // pricing it at the configured rate over-states it by exactly that factor.
+    const pace = p.fit?.cadence ?? cadence;
+    const depth = Math.min(Math.ceil(p.times.weaken / pace), maxInFlight);
+    // avgConcurrentRam when the caller priced it, `depth * gb` otherwise. The
+    // two agree under the all-at-once dispatcher; they diverge under JIT, where
+    // an op holds RAM for its own duration rather than the whole window.
+    const want = p.avgRam ?? depth * p.gb;
 
     if (committed + want > budget && admitted.length > 0) continue;
 
@@ -173,22 +201,41 @@ export async function run(ns, math) {
   const verbose = args.includes("--verbose");
   const maxTargets = Number(flag("--targets", MAX_TARGETS));
   const forced = flag("--target", null);
-  const askedSteal = flag("--steal", STEAL_FRACTION);
-  const steal = clampSteal(askedSteal);
-  // --fixed-steal pins the fraction where it starts. Useful for a controlled
-  // sweep, where an adapting controller would confound the measurement.
-  const adaptive = !args.includes("--fixed-steal");
+  // No --steal means the fraction is CALCULATED per target from the server and
+  // the RAM it can have; see chooseSteal. Passing one pins it, which is for
+  // controlled measurement - an adapting or self-sizing fraction confounds a
+  // sweep. STEAL_FRACTION survives only as the seed used before the first
+  // rescan has run its calculation.
+  const askedSteal = flag("--steal", null);
+  const pin = askedSteal === null ? null : clampSteal(askedSteal);
+  const steal = pin ?? clampSteal(STEAL_FRACTION);
+  // A pinned fraction also stops the controller moving it, for the same reason.
+  const adaptive = pin === null && !args.includes("--fixed-steal");
 
-  const log = (s = "") => ns.print(s);
-  const say = (s = "") => { ns.print(s); ns.tprint(s); };
+  // The in-game log window keeps a bounded number of lines, so a run long
+  // enough to be interesting has already discarded its own start - including
+  // the rescan that chose the targets and every OFF BASELINE line but the last
+  // few. Mirroring to a file costs nothing: ns.write is 0 GB, which
+  // tests/ram.test.mjs pins by asserting the entry's total is unchanged.
+  const logFile = flag("--log", CONT_LOG_FILE);
+  if (logFile) ns.write(logFile, `=== ${new Date().toISOString()} ===\n`, "w");
+  const toFile = (s) => { if (logFile) ns.write(logFile, s + "\n", "a"); };
+
+  const log = (s = "") => { ns.print(s); toFile(s); };
+  const say = (s = "") => { ns.print(s); ns.tprint(s); toFile(s); };
 
   log(`=== continuous batcher [${math.NAME}] ===`);
+  // Named out loud because the file is written to the GAME's filesystem, not to
+  // disk - the filesync extension only pushes the other way. Without the terminal
+  // command spelled out, a log that is being written perfectly reads as one that
+  // is not being written at all.
+  if (logFile) log(`${INDENT}logging to ${logFile}  (terminal: download ${logFile})`);
 
   if (steal === null) {
     say(`ABORT: --steal "${askedSteal}" is not a usable fraction. Wants (0, ${MAX_STEAL_FRACTION}].`);
     return;
   }
-  if (steal !== Number(askedSteal)) {
+  if (askedSteal !== null && steal !== Number(askedSteal)) {
     say(
       `NOTE: --steal ${askedSteal} clamped to ${steal} (MAX_STEAL_FRACTION). ` +
         `Above it a batch cannot survive the hacking level rising while it is in flight.`,
@@ -301,14 +348,16 @@ export async function run(ns, math) {
   const minutes = Number(flag("--minutes", 0));
   say("");
   say(
-    `supervising up to ${maxTargets} target(s), steal ${(steal * 100).toFixed(1)}% ` +
-      `${adaptive ? `climbing toward ${(MAX_STEAL_FRACTION * 100).toFixed(0)}%` : "FIXED"}, ` +
+    `supervising up to ${maxTargets} target(s), steal ` +
+      `${pin === null ? "CALCULATED per target" : `PINNED at ${(pin * 100).toFixed(1)}%`}` +
+      `${adaptive ? ", adaptive" : ", fixed"}, ` +
       `cadence ${CADENCE_MS}ms, rescan every ${(RESCAN_MS / 1000).toFixed(0)}s`,
   );
   if (minutes > 0) say(`${INDENT}stopping after ${minutes} minute(s)`);
 
   await supervise(ns, math, {
-    pool, ram, steal, adaptive, maxTargets, forced, log, say, minutes, verbose,
+    pool, ram, steal, pin, adaptive, maxTargets, forced, log, say, minutes, verbose,
+    shareRam: shareWorkerRam(ns),
   });
 }
 
@@ -343,16 +392,35 @@ export async function run(ns, math) {
  * from the ranking, wound down, and recreated from scratch at the default steal
  * every time - the adaptive controller resetting itself for no reason.
  *
- * So a streaming host is judged by the same baselineDrift the dispatch gate
- * uses, whose tolerance is derived from the batch in flight.
+ * So a streaming host is judged the same way the dispatch gate judges it - and
+ * a money snapshot alone is not enough for either. At 95% steal a healthy
+ * target sits at 5% of max for half of every cadence, so a snapshot says
+ * "drained" a good fraction of the time whatever the stream is really doing. A
+ * live run dropped rho-construction ($31.79b/s) and catalyst ($29.92b/s) in one
+ * rescan and handed their slots to the-hub ($11.21b/s) and omega-net
+ * ($3.55b/s): they were not outranked, they were not PRICED, because the
+ * snapshot happened to land in the dip. The stream's own reports measure the
+ * same thing at the instant a hack landed, which is the only moment the balance
+ * has to be right.
  *
  * @param {Set<string>} [streaming] hosts that already have a live stream
+ * @param {Set<string>} [drained] of those, the ones whose own reports say the
+ *   target really is not being refilled.
+ * @param {Map<string, number>} [driftFor] per-host drift budget the stream has
+ *   MEASURED. Without it the calculator prices every target at the conservative
+ *   pre-evidence default, which is a ceiling of 91.7% - so a target that has
+ *   proved itself steady at 0.22% drift stays pinned there for the whole run,
+ *   because the stream's own ceiling can never exceed the base the calculator
+ *   hands it. Only these may be dropped on money.
  * @param {Map<string, number>} [stealFor] per-host fraction the controller has
  *   actually reached. Pricing a stream that has backed off to 30% as though it
  *   were still at the 95% start over-states its RAM by an order of magnitude,
  *   and admission would then refuse targets that comfortably fit.
  */
-export function priceTargets(ns, math, ram, steal, ranked, streaming = new Set(), stealFor = new Map()) {
+export function priceTargets(
+  ns, math, ram, steal, ranked, streaming = new Set(), stealFor = new Map(),
+  slice = Infinity, pin = null, drained = new Set(), driftFor = new Map(),
+) {
   const priced = [];
 
   for (const entry of ranked) {
@@ -362,7 +430,10 @@ export function priceTargets(ns, math, ram, steal, ranked, streaming = new Set()
     if (!th) continue;
 
     if (streaming.has(entry.host)) {
-      if (baselineDrift(snap, th).off) continue;
+      const off = baselineDrift(snap, th);
+      // Security is additive and its ceiling already carries the batch's own
+      // transient, so a snapshot of it means what it says. Money does not.
+      if (off.secOff || (off.moneyOff && drained.has(entry.host))) continue;
     } else if (!isPrepped(snap)) {
       continue;
     }
@@ -371,12 +442,55 @@ export function priceTargets(ns, math, ram, steal, ranked, streaming = new Set()
     // weaken-2 is priced from grow's EFFECTIVE count, since nothing is placed
     // yet. That over-states it - placement uses fewer raw threads - but it
     // biases every candidate the same way, so the ordering holds.
-    const gb = batchRam(th, ram, weaken2For(math, th.grow));
+    const gb = batchRam(th, ram, th.weaken2);
+
+    // What the target actually ties up in steady state, as opposed to what one
+    // batch costs. Under the all-at-once dispatcher every op is held ~W, so
+    // this reduces to gb * depth - the figure admission has always used - but
+    // stating it this way means the JIT dispatcher changes only the held times.
+    const avgRam = avgConcurrentRam(
+      th, ram, heldAllAtOnce(times), th.weaken2,
+    );
+
+    const chance = entry.chance ?? 1;
+
+    // Rank on the income this target would actually produce inside its RAM
+    // slice, not on RAM efficiency.
+    //
+    // moneyPerGbSec - money per GB-second - is the right metric when the budget
+    // binds. It is the wrong one when it does not, and it cost a live run its
+    // best target: alpha-ent, earning $8.1b/s, was evicted for one earning
+    // $2.1b/s while 19 PB of the pool sat free. Two errors compounded. It
+    // optimised RAM efficiency in a situation where RAM was not scarce, and it
+    // divides by weaken time, which penalises exactly the long-weaken targets a
+    // deep pipeline had just made viable.
+    //
+    // Income within the slice unifies both cases. With RAM to spare every
+    // target reaches the ceiling and this reduces to maxMoney * chance. When
+    // RAM binds, chooseSteal hands an expensive-to-grow target a smaller
+    // fraction, so its income falls out low on its own - which means the
+    // foodnstuff trap is caught by the calculator rather than by the metric.
+    const fit = chooseSteal(math, snap, ram, slice, { pin, drift: driftFor.get(entry.host) });
+
+    // Landings per second, which is NOT simply one per configured cadence. Two
+    // separate things slow a target below it: the calculator widening its pace
+    // to fit the RAM budget, and a pipeline needing more depth than
+    // MAX_IN_FLIGHT allows - it lands cap/W instead. Scoring at the configured
+    // rate over-states precisely the targets that are constrained, which on a
+    // live run were the two biggest.
+    const byCadence = 1000 / (fit?.cadence ?? CADENCE_MS);
+    const byCap = (MAX_IN_FLIGHT * 1000) / times.weaken;
+    const rate = Math.min(byCadence, byCap);
+    const score = fit ? fit.threads.take * chance * rate : 0;
 
     priced.push({
-      host: entry.host, snap, th, times, gb,
-      chance: entry.chance ?? 1,
-      score: moneyPerGbSec(th.take, entry.chance ?? 1, gb, times.weaken),
+      // The calculator's own figure once it has one: it prices the target at
+      // the pace it will really run, where avgRam above assumes the configured
+      // cadence and so over-states a target that had to slow down.
+      host: entry.host, snap, th, times, gb, avgRam: fit?.gb ?? avgRam, chance, fit, score,
+      // Kept for the log: what the target costs per unit of income is still
+      // worth seeing, it is just not what admission sorts on.
+      perGbSec: moneyPerGbSec(th.take, chance, gb, times.weaken),
     });
   }
 
@@ -431,7 +545,7 @@ export function pricePotential(ns, math, ram, steal, ranked) {
     const times = math.opTimes(ideal);
     if (!(times.weaken > 0)) continue;
 
-    const gb = batchRam(th, ram, weaken2For(math, th.grow));
+    const gb = batchRam(th, ram, th.weaken2);
     priced.push({
       host: entry.host, snap, th, times, gb,
       chance: entry.chance ?? 1,
@@ -461,8 +575,9 @@ export function pricePotential(ns, math, ram, steal, ranked) {
  */
 export async function supervise(ns, math, opts) {
   const {
-    pool, ram, steal, maxTargets, forced, log, say, adaptive = true,
+    pool, ram, steal, pin = null, maxTargets, forced, log, say, adaptive = true,
     minutes = 0, verbose = false, tick = STREAM_TICK_MS, rescanMs = RESCAN_MS,
+    shareRam = SHARE_RAM_FALLBACK,
   } = opts;
 
   const port = ns.getPortHandle(CONT_REPORT_PORT);
@@ -500,12 +615,17 @@ export async function supervise(ns, math, opts) {
       nextRescan = now + rescanMs;
       for (const s of streams) learned.set(s.host, s.steal);
       streams = rescan(ns, math, {
-        pool, ram, steal, adaptive, maxTargets, forced, streams, preps, learned, log, verbose,
+        pool, ram, steal, pin, adaptive, maxTargets, forced,
+        streams, preps, learned, log, verbose, shareRam,
       });
     }
 
     for (const s of streams) {
       if (s.isDue(now)) s.dispatch(now);
+      // Launch whatever has come due. Separate from dispatch on purpose: a
+      // dispatch only PLANS a batch now, and its four ops go out at their own
+      // times - which is what stops a worker holding RAM it is not using.
+      s.tick(now);
     }
 
     if (port.full()) sawFull = true;
@@ -560,28 +680,175 @@ export async function supervise(ns, math, opts) {
  */
 export function rescan(ns, math, opts) {
   const {
-    pool, ram, steal, adaptive = true, maxTargets, forced,
+    pool, ram, steal, pin = null, adaptive = true, maxTargets, forced,
     streams, preps, learned = new Map(), log, verbose,
+    shareRam = SHARE_RAM_FALLBACK,
   } = opts;
 
   const live = new Set(streams.filter((s) => !s.retiring).map((s) => s.host));
 
+  // Take in RAM that did not exist when the pool was built. cloud.js upgrades
+  // purchased servers and buys new ones while this runs, and root.js roots more
+  // hosts; without this the pool plans for ever against the network as it stood
+  // at startup. A live run watched the slice sit at 12.73TB while RAM was being
+  // bought the whole time.
+  //
+  // The deploy is not optional and not a tidy-up: exec returns a bare 0 for a
+  // script that is not on the host, which is the same value it returns for one
+  // the host refused - so a new server without the workers would read as a RAM
+  // problem for ever. See lib/deploy.js.
+  const grown = pool.sync((h) => coreMap(ns, [h])[h]);
+  if (grown.added.length > 0) {
+    const sent = deployWorkers(ns, grown.added);
+    const complaint = describeDeploy(sent, grown.added.length);
+    if (complaint) log("  " + complaint.split("\n").join("\n  "));
+    log(
+      `  pool +${grown.added.length} host(s): ${grown.added.slice(0, 6).join(", ")}` +
+        (grown.added.length > 6 ? `, +${grown.added.length - 6} more` : "") +
+        `, workers on ${sent.copied}`,
+    );
+  }
+  if (grown.grewGb > 1) {
+    log(`  pool grew ${(grown.grewGb / 1024).toFixed(2)}TB since the last rescan`);
+  }
+
+  // Share BEFORE the budget, and the order is not cosmetic. Share workers exec
+  // outside the reservation system and are never released, so a budget measured
+  // first would price RAM share is about to take - and the calculator would then
+  // commit a steal fraction it cannot place, which reads in the log as "no room
+  // for batch" against a pool that looked fine one line earlier.
+  //
+  // refresh() rather than sync(): sync's job is to find hosts and capacity that
+  // did not exist, and neither changed. What changed is used RAM, on hosts we
+  // already know, which is exactly the shallow pass.
+  const share = serviceShare(ns, pool, log, { ramPerThread: shareRam });
+  if (share && share.launched > 0) pool.refresh();
+
   const ranked = rankTargets(ns, math, { steal });
   const candidates = forced ? ranked.filter((t) => t.host === forced) : ranked;
+  // Priced against the slice a FULL complement of targets would each get, so
+  // ranking does not depend on how many happen to be admitted this pass.
+  // Admission then re-slices among the ones actually taken.
+  const provisional = (pool.placeableRam(ram.grow) * TARGET_RAM_BUDGET) / Math.max(1, maxTargets);
+  const sick = new Set(streams.filter((s) => s.drained).map((s) => s.host));
+  const drifts = new Map(streams.map((s) => [s.host, s.drift]));
   const priced = priceTargets(
     ns, math, ram, steal, candidates.slice(0, maxTargets * 3), live, learned,
+    provisional, pin, sick, drifts,
   );
 
   // Budget off the pool's CAPACITY, not its free RAM. Free RAM shrinks as the
   // streams fill it, so budgeting from it would shrink the budget every rescan
   // and evict the very streams that were using it - a feedback loop that
   // ratchets the target count to zero.
-  const budget = pool.usableRam * TARGET_RAM_BUDGET;
-  const { admitted } = admitTargets(priced, budget, maxTargets);
+  //
+  // placeableRam, not usableRam: every host floors its own thread count, so the
+  // raw byte total overstates what can be placed. A live run budgeted against
+  // usableRam, chose 84.9% steal, and then failed 402 of 439 dispatches with
+  // "no room" - the bytes were there and the threads would not fit.
+  const budget = pool.placeableRam(ram.grow) * TARGET_RAM_BUDGET;
+  const { admitted: feasible } = admitTargets(priced, budget, maxTargets);
+
+  // Each admitted target gets an equal SHARE of the budget, not the whole of it.
+  //
+  // Sizing every target against the full budget was harmless while the pool was
+  // far larger than three targets could spend - and stopped being harmless the
+  // moment it was not. On a 145 TB pool the top target calculated 84.9% steal
+  // needing 122 TB, which left nothing for the other two and nothing for prep,
+  // and then failed 402 of 439 dispatches.
+  //
+  // ---------------------------------------------------------------------------
+  // How MANY targets is a profit question, not a capacity one
+  //
+  // Running the most targets that fit is only right when the budget is not the
+  // constraint. When it is, every extra target narrows the slice for all of
+  // them, and income is close to linear in the slice - so the third target does
+  // not add its income, it buys it by taking a third of the budget away from
+  // the best one. A live run on a 1.6 TB pool measured the trade exactly:
+  //
+  //     phantasy alone, 1403 GB          $2.84m/s
+  //     phantasy + iron-gym + joesguns   $0.94 + $0.54 + $0.48 = $1.96m/s
+  //
+  // 45% given away for diversification nobody asked for. So the count is chosen
+  // by evaluating each one and taking the best total - which comes out at 1 on a
+  // small pool and rises to MAX_TARGETS on its own as the pool grows, because
+  // once every target can reach its ceiling a narrower slice costs nothing. That
+  // ramp needs no threshold and no new setting.
+  const evaluate = (n) => {
+    const take = feasible.slice(0, n);
+    if (take.length < n) return null;
+    const width = budget / n;
+    const picks = new Map();
+    let total = 0;
+    for (const p of take) {
+      const fit = chooseSteal(math, p.snap, ram, width, { pin, drift: drifts.get(p.host) });
+      if (!fit) return null;
+      picks.set(p.host, fit);
+      // A target whose single batch cannot fit its slice earns NOTHING - it
+      // places weakens and never places its grow. Scoring it at its arithmetic
+      // income would have it justify the slice it is about to waste.
+      if (fit.fitsPeak) total += fit.income * 1000 * (p.chance ?? 1);
+    }
+    return { admitted: take, slice: width, picks, total };
+  };
+
+  let plan = null;
+  const totals = [];
+  for (let n = 1; n <= feasible.length; n++) {
+    const cand = evaluate(n);
+    if (!cand) continue;
+    totals.push(`${n}:$${(cand.total / 1e6).toFixed(2)}m/s`);
+    if (!plan || cand.total > plan.total) plan = cand;
+  }
+
+  const admitted = plan ? plan.admitted : [];
+  const slice = plan ? plan.slice : budget;
   const want = new Set(admitted.map((p) => p.host));
+  if (verbose && totals.length > 1) {
+    log(`  target count by income: ${totals.join("  ")} -> taking ${admitted.length}`);
+  }
 
   const byHost = new Map(streams.map((s) => [s.host, s]));
   const next = [];
+
+  const baseFor = new Map();
+  // What the admitted streams will really occupy, at the fraction and pace the
+  // calculator settled on. admitTargets' own `committed` is priced against the
+  // PROVISIONAL slice - budget / maxTargets - so on a pool where one target is
+  // admitted it under-states the commitment threefold, and prep would read the
+  // other two thirds as spare when the one live stream is about to take it.
+  let spent = 0;
+
+  for (const p of admitted) {
+    const picked = plan.picks.get(p.host);
+    if (!picked) continue;
+    // Re-stated at the slice this plan actually gives out. admitTargets priced
+    // depth against the provisional slice, which is a different number whenever
+    // the chosen count is not maxTargets.
+    p.depth = Math.min(Math.ceil(p.times.weaken / picked.cadence), MAX_IN_FLIGHT);
+    baseFor.set(p.host, picked.steal);
+    spent += picked.gb;
+    // Re-state the admission figures at the fraction actually chosen. Leaving
+    // them at the seed fraction used for ranking would have the log report a
+    // batch size the stream never uses.
+    p.picked = picked;
+    p.want = picked.gb;
+    if (verbose) {
+      log(
+        `  =${p.host}: steal ${(picked.steal * 100).toFixed(1)}% ` +
+          // The plan's OWN income, not p.score - that was priced against the
+          // provisional slice and disagrees with this one whenever the chosen
+          // count is not maxTargets, which is exactly when it is read.
+          `($${((picked.income * 1000 * (p.chance ?? 1)) / 1e6).toFixed(2)}m/s, ${picked.hack}t hack, ` +
+          `${(picked.gb / 1024).toFixed(2)}TB of a ${(slice / 1024).toFixed(2)}TB slice` +
+          `${picked.capped ? ", at the ceiling" : ""}` +
+          // Not an error any more. A target too big for its budget slows down
+          // instead of shrinking to one hack thread, so this line reports the
+          // pace it settled on rather than announcing a failure.
+          `${picked.fits ? "" : `, paced at ${(picked.cadence / 1000).toFixed(1)}s`})`,
+      );
+    }
+  }
 
   for (const p of admitted) {
     const existing = byHost.get(p.host);
@@ -594,6 +861,11 @@ export function rescan(ns, math, opts) {
         existing.reinstate();
         log(`  =${p.host}: back in the top ${maxTargets}, wind-down cancelled`);
       }
+      // A ceiling, not an assignment - a stream that has backed off after a
+      // fault keeps its reduced fraction and climbs back toward this.
+      const base = baseFor.get(p.host);
+      if (base !== undefined) existing.setBase(base);
+      if (p.picked) existing.setCadence(p.picked.cadence);
       next.push(existing);
       continue;
     }
@@ -602,14 +874,24 @@ export function rescan(ns, math, opts) {
     // target dropped for RAM and re-admitted later should not have to re-climb
     // from the default - that is minutes of measurement thrown away, one weaken
     // window per step.
-    const start = learned.get(p.host) ?? steal;
+    // Start at the calculated optimum, so the controller descends from it
+    // rather than climbing to it. `learned` still wins when this target has run
+    // before and backed off - that measurement is worth more than the
+    // calculator's RAM-only view.
+    const base = baseFor.get(p.host) ?? steal;
+    const start = Math.min(learned.get(p.host) ?? base, base);
     log(
-      `  +${p.host}: batch ${(p.gb / 1024).toFixed(2)}TB x depth ${p.depth} = ` +
+      // The picked plan's batch, not the seed fraction's. Printing the seed's
+      // made a live log read `batch 9.29TB x depth 1 = 0.5TB`, which is three
+      // numbers that cannot all be true at once.
+      `  +${p.host}: batch ${((p.picked?.peak ?? p.gb) / 1024).toFixed(2)}TB x depth ${p.depth} = ` +
         `${(p.want / 1024).toFixed(1)}TB, $${(p.score / 1e3).toFixed(2)}k/GB-s` +
-        (start !== steal ? `, resuming at ${(start * 100).toFixed(1)}% steal` : ""),
+        `, steal ${(start * 100).toFixed(1)}%` +
+        (start < base ? ` (resuming below the ${(base * 100).toFixed(1)}% optimum)` : ""),
     );
     next.push(createStream(ns, math, {
-      host: p.host, pool, ram, steal: start, adaptive, log,
+      host: p.host, pool, ram, steal: start, cap: base, adaptive, log,
+      cadence: p.picked?.cadence,
       idPrefix: `${p.host.slice(0, 6)}${Date.now() % 1000}-`,
     }));
   }
@@ -649,13 +931,31 @@ export function rescan(ns, math, opts) {
     ...candidates.slice(0, maxTargets * 2).map((t) => ({ host: t.host, why: "next in line" })),
   ];
 
-  let slots = PREP_CONCURRENCY - preps.size;
+  // Prep one target at a time unless the pool has real room to spare.
+  //
+  // A wave is sized by NEED, which is only small relative to the pool it is
+  // placed in - and that assumption was written against 26 PB. On a 1.6 TB pool
+  // four queued preps reserved 1.58 TB, held it for a weaken window each, and
+  // left `pool 0.00TB free` on every report: the one live stream aborted 169 of
+  // 170 batches for want of RAM, and none of the four finished prepping either,
+  // because each was crawling at a quarter of the rate one alone would have had.
+  //
+  // Spare is what the ADMITTED STREAMS will not use, NOT what happens to be free
+  // this instant. Free RAM was the first attempt and it is wrong at exactly the
+  // moment that matters: at startup nothing is placed yet, so the pool reads
+  // 100% idle and every slot is granted - whereupon the preps take it and the
+  // streams never get a look in. `committed` is the calculator's own figure for
+  // what the streams will occupy in steady state, which is the honest answer.
+  const capacity = pool.placeableRam(ram.grow);
+  const idle = Math.max(0, budget - spent);
+  const spare = capacity > 0 ? Math.floor(idle / (capacity * PREP_SPARE_SHARE)) : 0;
+  let slots = Math.min(PREP_CONCURRENCY, 1 + spare) - preps.size;
   for (const t of queue) {
     if (slots <= 0) break;
     if (prepped.has(t.host) || streaming.has(t.host) || preps.has(t.host)) continue;
-    // Marked with a null wave: servicePreps picks it up on the next tick and
-    // places the actual wave, so rescan never does placement work.
-    preps.set(t.host, null);
+    // Marked with no wave: servicePreps picks it up on the next tick and places
+    // the actual wave, so rescan never does placement work.
+    preps.set(t.host, freshPrep());
     slots--;
     // Promotions are worth saying out loud - they are the only reason a target
     // that is already streaming will ever be replaced.
@@ -665,6 +965,15 @@ export function rescan(ns, math, opts) {
 
   return next;
 }
+
+/**
+ * A queued prep with no wave placed yet.
+ *
+ * Always an object, never a bare null, because `waves` has to survive the gaps
+ * BETWEEN waves - the entry is cleared every time one lands, and a give-up
+ * condition needs a count that outlives that.
+ */
+const freshPrep = () => ({ wave: null, deadline: 0, waves: 0 });
 
 /**
  * Advance every prep in flight by one tick: place a wave, wait for it to land,
@@ -678,7 +987,7 @@ export function rescan(ns, math, opts) {
  * waves. The first would eat live batches' reports; the second would freeze
  * every other stream for a whole weaken window - minutes - to fix one target.
  */
-function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
+export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
   let finished = 0;
   const now = Date.now();
   const byHost = new Map(streams.map((s) => [s.host, s]));
@@ -691,19 +1000,21 @@ function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
     // Wait for its own batches to clear first: measuring a target while its
     // last hacks are still landing reads the transient as the drift.
     if (s.depth > 0) continue;
-    if (!preps.has(s.host)) preps.set(s.host, null);
+    if (!preps.has(s.host)) preps.set(s.host, freshPrep());
   }
 
   for (const [host, active] of [...preps]) {
-    if (active && now < active.deadline) continue;
+    if (active.wave && now < active.deadline) continue;
 
-    if (active) {
+    if (active.wave) {
       // The wave has landed. Its reservations were never committed - a prep
       // waits for its own landings rather than racing ahead - so release is the
       // right verb.
       pool.release(active.wave.grow.placements);
       pool.release(active.wave.weaken.placements);
-      preps.set(host, null);
+      // Cleared in place rather than replaced, so the wave COUNT survives to the
+      // next pass. Without that there is no give-up condition at all.
+      active.wave = null;
     }
 
     const snap = math.snapshot(ns, host);
@@ -720,41 +1031,121 @@ function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
       continue;
     }
 
+    // Give up on a target that will not converge.
+    //
+    // prepTargets has always had this bound; the supervisor path never did, and
+    // four concurrent slots hid the omission - one stuck target still left three
+    // working. With prep serialised on a small pool it would block every other
+    // prep for the whole run, so the cap has to exist here too.
+    //
+    // A wave is sized by need, so a healthy prep converges in a handful of them.
+    // Hitting this means something else is draining the target, or grow is too
+    // weak to outrun the security it adds.
+    if (active.waves >= PREP_MAX_CYCLES) {
+      preps.delete(host);
+      log(
+        `  ${host}: prep ABANDONED after ${active.waves} waves - ` +
+          `$${(snap.money / 1e6).toFixed(2)}m of $${(snap.maxMoney / 1e6).toFixed(2)}m, ` +
+          `sec ${snap.sec.toFixed(2)} of ${snap.minSec.toFixed(2)}. Slot released.`,
+      );
+      continue;
+    }
+
     const wave = placePrepWave(pool, ram, math, snap);
     if (!wave) continue; // pool busy - try again next tick
 
     const times = math.opTimes(snap);
     const res = launchPrepWave(ns, snap, wave, `pr${Date.now() % 100000}:${host}`, { times, log });
-    preps.set(host, { wave, deadline: res.landAt + REPREP_GRACE_MS });
+    active.wave = wave;
+    active.deadline = res.landAt + REPREP_GRACE_MS;
+    active.waves++;
   }
 
   return finished;
 }
 
 function report({ streams, preps, pool, started, orphans, sawFull, repaired, log, verbose }) {
-  const secs = Math.max(1, (Date.now() - started) / 1000);
+  const now = Date.now();
+  const secs = Math.max(1, (now - started) / 1000);
   let totalStolen = 0;
+  let totalRecent = 0;
 
   for (const s of streams) {
     totalStolen += s.stats.stolen;
     const st = s.stats;
+
+    // Income since the LAST report, not since the run started.
+    //
+    // A cumulative average includes prep, the ramp, and any stopped period, so
+    // a target that only recently reached depth reads roughly an order of
+    // magnitude below what it is currently earning - and stays that way. That
+    // made the reported rate disagree with the admission score by ~100x and
+    // sent two separate investigations after phantom regressions. The rate now
+    // is the number worth looking at; the cumulative one is kept because it is
+    // what the totals are actually made of.
+    const since = st.reportedAt ? Math.max(0.001, (now - st.reportedAt) / 1000) : secs;
+    const recent = (st.stolen - (st.reportedStolen ?? 0)) / since;
+    st.reportedAt = now;
+    st.reportedStolen = st.stolen;
+    totalRecent += recent;
     const avgJitter = st.retired > 0 ? st.jitterSum / st.retired : 0;
     const hitRate = st.hackTries > 0 ? (st.hackHits / st.hackTries) * 100 : 0;
 
     log(
-      `${INDENT}${s.host.padEnd(18)}steal ${(s.steal * 100).toFixed(1).padStart(4)}%  ` +
+      `${INDENT}${s.host.padEnd(18)}steal ${(s.steal * 100).toFixed(1).padStart(4)}%` +
+        // The ceiling too when the controller has backed off below it - the
+        // gap is the whole story of what the run has learned about this target.
+        `${s.steal < s.cap - 1e-9 ? `/${(s.cap * 100).toFixed(0)}%` : "    "}  ` +
         `depth ${String(s.depth).padStart(4)}  ` +
         `sent ${String(st.dispatched).padStart(5)}  done ${String(st.retired).padStart(5)}  ` +
         `ok ${String(st.ok).padStart(5)}  bad ${String(st.bad).padStart(4)}  ` +
         `hit ${hitRate.toFixed(0)}%  ` +
-        `$${(st.stolen / 1e9).toFixed(2)}b  $${(st.stolen / secs / 1e6).toFixed(2)}m/s`,
+        `$${(st.stolen / 1e9).toFixed(2)}b  $${(recent / 1e6).toFixed(2)}m/s now` +
+        `  ($${(st.stolen / secs / 1e6).toFixed(2)}m/s avg)`,
     );
     log(
       `${INDENT}${" ".repeat(18)}jitter avg ${avgJitter.toFixed(0)}ms max ${st.jitterMax.toFixed(0)}ms` +
         (st.intrusions > 0 ? `   intrusions ${st.intrusions}` : "") +
+        // Aborted batches leave flight WITHOUT being retired, so without this
+        // they are invisible: `sent` climbs, `done` does not, and nothing says
+        // why. A live run abandoned 1450 of 1826 batches silently.
+        (st.aborted > 0 ? `   aborted ${st.aborted}` : "") +
+        (st.lateLaunches > 0 ? `   late ${st.lateLaunches}` : "") +
+        // What the pipeline still owes the pool: ops planned but not yet placed.
+        // Without it, a stream that has stopped dispatching against a pool with
+        // free RAM on the same line looks broken. It is not - the free RAM is
+        // spoken for by grows that have not come due yet.
+        (s.queuedRam > 0 ? `   queued ${(s.queuedRam / 1024).toFixed(2)}TB` : "") +
+        // Only when it is not the configured rate. A widened cadence is the
+        // single most important number for reading a small-pool run - it is why
+        // depth is low, why `sent` climbs slowly, and why income is what it is.
+        (s.cadence > CADENCE_MS + 1e-9
+          ? `   paced ${(s.cadence / 1000).toFixed(1)}s`
+          : "") +
+        // jitterMax is a LIFETIME maximum and says nothing about whether the
+        // tail is fattening. This does: batches whose spread came within half a
+        // spacer of reordering. One outlier is noise; a rising count is the
+        // signal to widen SPACER_MS before `bad` starts moving.
+        (st.nearMiss > 0 ? `   near-miss ${st.nearMiss}/${st.retired}` : "") +
         (s.strikes > 0 ? `   bad-batch strikes ${s.strikes}` : "") +
         (s.baselineStrikes > 0 ? `   baseline strikes ${s.baselineStrikes}` : "") +
+        // Only once it has learned something. A target sitting on the floor
+        // budget has nothing to say; one that has raised it is explaining why
+        // its ceiling is below what the calculator offered.
+        (s.drift > GROW_DRIFT_TOLERANCE + 1e-9
+          ? `   drift budget ${(s.drift * 100).toFixed(1)}%`
+          : "") +
+        // How full the target was when its last hack landed. A stop for "money
+        // off baseline" is not actionable without it - it separates a real
+        // drain from a snapshot taken during a healthy post-hack dip.
+        (st.hackHits > 0 && s.lastUnder < -0.01
+          ? `   last hack found it ${((1 + s.lastUnder) * 100).toFixed(0)}% full`
+          : "") +
         (s.stopped ? `   STOPPED: ${s.stopped}` : "") +
+        // Without this a draining stream is indistinguishable from a broken
+        // one: `sent` freezes while `depth` falls, which reads as a dispatcher
+        // that has quietly died rather than a target being handed over.
+        (s.retiring ? `   DRAINING (replaced, ${s.depth} batches still to land)` : "") +
         (preps?.has(s.host) ? "   (prep wave in flight)" : ""),
     );
 
@@ -762,12 +1153,20 @@ function report({ streams, preps, pool, started, orphans, sawFull, repaired, log
     if (verbose && skips.length) {
       log(`${INDENT}${" ".repeat(18)}skips: ${skips.map(([k, n]) => `${k} x${n}`).join(", ")}`);
     }
+    // Aborts have their own list because they are a different failure: a skip
+    // means a batch was never planned, an abort means one was planned, part
+    // launched, and then abandoned - which is far more expensive.
+    const aborts = Object.entries(st.abortReasons).filter(([, n]) => n > 0);
+    if (verbose && aborts.length) {
+      log(`${INDENT}${" ".repeat(18)}aborts: ${aborts.map(([k, n]) => `${k} x${n}`).join(", ")}`);
+    }
   }
 
   if (streams.length > 1) {
     log(
       `${INDENT}${"TOTAL".padEnd(18)}$${(totalStolen / 1e9).toFixed(2)}b  ` +
-        `$${(totalStolen / secs / 1e6).toFixed(2)}m/s across ${streams.length} target(s)`,
+        `$${(totalRecent / 1e6).toFixed(2)}m/s now  ` +
+        `($${(totalStolen / secs / 1e6).toFixed(2)}m/s avg) across ${streams.length} target(s)`,
     );
   }
 

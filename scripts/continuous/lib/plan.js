@@ -1,8 +1,13 @@
 import {
   BASELINE_SLACK_BATCHES,
   BATCH_OPS,
+  CADENCE_MS,
   DRAIN_UNDER,
   GROW_MARGIN,
+  BAD_BATCH_TOLERANCE,
+  GROW_DRIFT_TOLERANCE,
+  GROW_MARGIN_CAP,
+  MONEY_FLOOR_SHARE,
   MAX_STEAL_FRACTION,
   MIN_LEAD_MS,
   MIN_STEAL_FRACTION,
@@ -10,6 +15,7 @@ import {
   NO_ROOM_TOLERANCE,
   SPACER_MS,
   STEAL_HEADROOM,
+  STEAL_PROBES,
   STEAL_MIN_SAMPLES,
   STEAL_STEP_DOWN,
   STEAL_STEP_UP,
@@ -117,7 +123,31 @@ export function reachable(land, opTime, now) {
 export function clampSteal(steal, cap = MAX_STEAL_FRACTION) {
   const n = Number(steal);
   if (!Number.isFinite(n) || n <= 0) return null;
-  return Math.min(n, cap);
+  // Two ceilings, and the derived one usually binds first. MAX_STEAL_FRACTION
+  // is a judgement about income per unit of RAM; maxStealForDrift is arithmetic
+  // about whether the batch can repair itself at all.
+  return Math.min(n, cap, maxStealForDrift());
+}
+
+/**
+ * The highest steal fraction whose drift budget the margin can actually buy.
+ *
+ * growMarginFor asks for `(1 - p) / (1 - p(1 + d))`, which diverges as `p`
+ * approaches `1 / (1 + d)`. Clamping that at GROW_MARGIN_CAP does not make the
+ * fraction safe - it silently hands back less headroom than was asked for, at
+ * exactly the fractions where the shortfall drains a target in one window. So
+ * the fraction is bounded instead. Inverting `margin <= cap`:
+ *
+ *     p <= (cap - 1) / (cap * (1 + d) - 1)
+ *
+ * At cap 3.0 and a 4% budget that is 94.3%. This is what MAX_STEAL_FRACTION was
+ * asserting by hand, now with the arithmetic behind it: the ceiling is wherever
+ * the drift budget stops being affordable, and it moves when either input does.
+ */
+export function maxStealForDrift(drift = GROW_DRIFT_TOLERANCE, marginCap = GROW_MARGIN_CAP) {
+  const denom = marginCap * (1 + drift) - 1;
+  if (!(denom > 0)) return 1;
+  return Math.min(1, (marginCap - 1) / denom);
 }
 
 /**
@@ -128,13 +158,50 @@ export function clampSteal(steal, cap = MAX_STEAL_FRACTION) {
  *
  *     tolerance = ((growMargin - 1) / growMargin) * (1 - steal) / steal
  *
- * The headroom collapses as steal rises - 19% at 20%, 0.25% at 95% - which is
- * why the top of the range is where a batcher dies rather than merely
- * underperforms.
+ * With a FLAT margin the headroom collapses as steal rises - 19% at 20%, 0.25%
+ * at 95% - which is why the top of the range is where a batcher dies rather
+ * than merely underperforms. That is no longer how batches are sized: the
+ * margin is derived from the fraction so the tolerance stays put and the cost
+ * moves instead. Pass an explicit `growMargin` to ask the old question.
  */
-export function stealTolerance(steal, growMargin = GROW_MARGIN) {
+export function stealTolerance(steal, growMargin = null, drift = GROW_DRIFT_TOLERANCE) {
   if (!(steal > 0) || !(steal < 1)) return 0;
-  return ((growMargin - 1) / growMargin) * ((1 - steal) / steal);
+  // The drift the batches were REALLY sized for, not the pre-evidence default.
+  // Without it the controller judged a stream against a 6% tolerance while its
+  // batches carried 9%, so the measurement sat permanently above the climb
+  // threshold and the fraction froze - a live run held phantasy at 30.4% under
+  // an 87% ceiling and iron-gym at 28.0% under 66% for the whole run.
+  const m = growMargin ?? growMarginFor(steal, drift);
+  return ((m - 1) / m) * ((1 - steal) / steal);
+}
+
+/**
+ * The grow margin that buys `drift` of hack overshoot at this steal fraction.
+ *
+ * The inverse of stealTolerance, and the direction the causality actually runs.
+ * A batch is safe when its own grow can undo its own hack even if the hack came
+ * out `drift` stronger than planned:
+ *
+ *     margin * (1 - steal * (1 + drift)) / (1 - steal) >= 1
+ *     margin >= (1 - steal) / (1 - steal * (1 + drift))
+ *
+ * Fixing the margin and reading the tolerance off it - what a flat GROW_MARGIN
+ * did - puts the constant on the wrong side. A flat margin hands out headroom
+ * in inverse proportion to how much is needed. See GROW_DRIFT_TOLERANCE for the
+ * live run that measured what that costs.
+ *
+ * GROW_MARGIN survives as the FLOOR. At low fractions the algebra asks for
+ * almost nothing - 1.002 at 10% steal - and there is no reason to trust the
+ * model that precisely when the threads are cheap anyway.
+ */
+export function growMarginFor(steal, drift = GROW_DRIFT_TOLERANCE) {
+  if (!(steal > 0) || !(steal < 1)) return GROW_MARGIN;
+  const room = 1 - steal * (1 + drift);
+  // Asking for more drift than the fraction leaves behind. No finite number of
+  // grow threads repairs that, so hand back the cap and let the caller's own
+  // limits bind.
+  if (room <= 0) return GROW_MARGIN_CAP;
+  return Math.min(GROW_MARGIN_CAP, Math.max(GROW_MARGIN, (1 - steal) / room));
 }
 
 /**
@@ -174,8 +241,10 @@ export function nextSteal(steal, window, cap = MAX_STEAL_FRACTION, opts = {}) {
     minSamples = STEAL_MIN_SAMPLES,
     headroom = STEAL_HEADROOM,
     floor = MIN_STEAL_FRACTION,
-    growMargin = GROW_MARGIN,
+    growMargin = null,
+    drift = GROW_DRIFT_TOLERANCE,
     drainUnder = DRAIN_UNDER,
+    badTolerance = BAD_BATCH_TOLERANCE,
     noRoomTol = NO_ROOM_TOLERANCE,
   } = opts;
 
@@ -183,17 +252,23 @@ export function nextSteal(steal, window, cap = MAX_STEAL_FRACTION, opts = {}) {
   // of the signals still gets sane decisions from the ones it does track.
   window = { batches: 0, bad: 0, worstOver: 0, worstUnder: 0, attempts: 0, noRoom: 0, ...window };
 
-  const tol = stealTolerance(steal, growMargin);
+  const tol = stealTolerance(steal, growMargin, drift);
   const hold = (reason) => ({ steal, reason, changed: false });
   const back = (reason) => {
-    const next = Math.max(floor, steal * down);
+    // Never UP. chooseSteal hands back a one-hack-thread plan when even that is
+    // over budget, and that fraction can sit BELOW the floor - at which point
+    // `max(floor, steal * down)` raises it, on evidence that said to cut. A live
+    // run logged `steal 0.3% -> 0.5% (400/400 dispatches found no room)`.
+    const next = Math.min(steal, Math.max(floor, steal * down));
     return { steal: next, reason, changed: next !== steal };
   };
 
-  // A bad batch is a sequencing fault, not a sizing one, but the response is
-  // the same: a smaller steal makes every subsequent batch cheaper to get wrong
-  // and buys back tolerance while the cause is still unknown.
-  if (window.bad > 0) return back(`${window.bad} bad batch(es)`);
+  // A bad batch is a sequencing fault, not a sizing one. Backing off is still
+  // the right response to a PATTERN of them - a smaller steal makes every
+  // subsequent batch cheaper to get wrong while the cause is unknown - but not
+  // to a single one, which on a stream carrying jitter close to the spacer is
+  // ordinary. See BAD_BATCH_TOLERANCE for the run this cost 40 points.
+  if (window.bad > badTolerance) return back(`${window.bad} bad batch(es)`);
 
   // Took MORE than the grow was sized to put back. Since money clamps at
   // maxMoney, a positive `over` can only come from hack effectiveness rising
@@ -254,22 +329,46 @@ export function nextSteal(steal, window, cap = MAX_STEAL_FRACTION, opts = {}) {
  * @returns {object|null} null when the target cannot be hacked at all
  */
 export function planThreads(math, snap, rawSteal, opts = {}) {
-  const { growMargin = GROW_MARGIN } = opts;
-
   const steal = clampSteal(rawSteal);
   if (steal === null) return null;
 
   const perThread = math.hackFractionPerThread(snap);
   if (!(perThread > 0)) return null;
 
-  const weakenPer = math.weakenPerThread();
-  if (!(weakenPer > 0)) return null;
-
   // FLOOR, not ceil. Rounding up would steal slightly more than planned, and
   // the grow is sized for the planned figure - so the batch would end a hair
   // below where it started, every time, and compound.
   const hack = Math.max(1, Math.floor(steal / perThread));
+
+  return planThreadsForHack(math, snap, hack, perThread, opts);
+}
+
+/**
+ * The same batch, sized from a HACK THREAD COUNT rather than a fraction.
+ *
+ * Split out for chooseSteal, which searches over thread counts. Going through
+ * planThreads instead would mean turning a thread count into a fraction and
+ * letting the floor above turn it back, and at the boundary that does not
+ * round-trip - a probe for h threads can come back as h-1 and the search reads
+ * it as "does not fit". The shotgun's managerCore.js carries the same split for
+ * the same reason.
+ *
+ * @param {number} hack thread count, already >= 1
+ * @param {number} perThread math.hackFractionPerThread(snap), passed in so a
+ *   search does not re-measure it on every probe
+ */
+export function planThreadsForHack(math, snap, hack, perThread, opts = {}) {
+  const { growMargin = null, drift = GROW_DRIFT_TOLERANCE } = opts;
+
+  const weakenPer = math.weakenPerThread();
+  if (!(weakenPer > 0)) return null;
+
   const actualSteal = Math.min(hack * perThread, 0.99);
+
+  // Derived from the fraction this batch really takes, not the one that was
+  // asked for: the floor in planThreads can move them apart, and it is the real
+  // take that grow has to undo.
+  const margin = growMargin ?? growMarginFor(actualSteal, drift);
 
   const hackSec = hack * math.securityPerHackThread();
   const weaken1 = Math.ceil(hackSec / weakenPer);
@@ -282,17 +381,32 @@ export function planThreads(math, snap, rawSteal, opts = {}) {
   // restore but 0.5% at x1.11 - so the protection would evaporate exactly where
   // a small steal fraction needs it.
   const remaining = snap.maxMoney * (1 - actualSteal);
-  const from = remaining / growMargin;
+  const from = remaining / margin;
 
-  // Sized at the security prep holds the target at, not at whatever it reads
-  // right now, because grow lands after its weaken. The formulas backend
-  // honours this; the analyze backend cannot and answers for current security.
-  const grow = math.growThreadsToRestore(snap, from, snap.maxMoney, snap.minSec);
+  // Sized at the security the grow will really meet, which is minimum ONLY
+  // while the stream is holding the target there. Grow lands after its own
+  // weaken, so minimum is the intent - but a live run measured alpha-ent at
+  // 24.54 against a 17.00 minimum with a weaken window 45% longer than the one
+  // it was ranked on, and grow priced at the intent under-restores by whatever
+  // the gap is worth.
+  //
+  // Taking the max is free in the healthy case and self-correcting in the sick
+  // one: surplus grow threads clamp at max money, so over-pricing costs RAM and
+  // nothing else, while under-pricing compounds. It also closes the gap between
+  // the backends - the analyze backend cannot honour `atSecurity` and always
+  // answers for current security, which is why it survived a run that the
+  // formulas build, sizing faithfully for the minimum, did not.
+  const atSec = Math.max(snap.sec ?? snap.minSec, snap.minSec);
+  const grow = math.growThreadsToRestore(snap, from, snap.maxMoney, atSec);
 
   return {
     hack,
     weaken1,
     grow,
+    // Sized here, at PLAN time, from grow's EFFECTIVE count - not after
+    // placement from its raw one. See weaken2For for why that costs something
+    // and why it is nonetheless required.
+    weaken2: weaken2For(math, grow),
     actualSteal,
     perThread,
     hackSec,
@@ -309,18 +423,27 @@ export function planThreads(math, snap, rawSteal, opts = {}) {
 }
 
 /**
- * Effective weaken threads needed to cancel a grow that placed `growRaw` raw
- * threads.
+ * Effective weaken threads needed to cancel a grow of `growThreads`.
  *
- * Raw, not effective, and that distinction is the whole reason this is a
- * separate function called after placement. processSingleServerGrowth fortifies
+ * Exact when handed grow's RAW placed count: processSingleServerGrowth fortifies
  * by `2 * ServerFortifyAmount * usedCycles` with usedCycles clamped to the
  * call's own thread count, so security tracks raw threads while money tracks
  * core-weighted ones.
  *
- * Using the effective count here would over-weaken, not under-weaken - coreBonus
- * is always >= 1 - which is safe but wastes up to 44% of the weaken RAM on an
- * 8-core host. Raw is exact.
+ * A BATCH cannot hand it the raw count, and that is forced rather than chosen.
+ * Under JIT the ops launch in the order W1, W2, G, H - weaken-2 goes out before
+ * grow does, because due_W2 = A + 2s - W and due_G = A + s - 0.8W, and the
+ * difference s - 0.2W is negative for any weaken over half a second. So the raw
+ * count does not exist yet when weaken-2 has to be sized.
+ *
+ * Handed the EFFECTIVE count instead it over-weakens, never under-weakens -
+ * coreBonus is always >= 1, so raw <= effective - and weaken clamps at minimum
+ * security, so the surplus does nothing. The cost is up to 44% more weaken-2
+ * threads on an 8-core pool; weaken-2 is ~6.4% of batch RAM, so ~2.8% of the
+ * batch against the ~27% JIT saves. A deliberate trade, not an oversight.
+ *
+ * PREP still passes the raw count, and should: a prep wave launches its grow
+ * and weaken together and places grow first, so the exact figure is available.
  */
 export function weaken2For(math, growRaw) {
   const sec = growRaw * math.securityPerGrowThread();
@@ -346,6 +469,219 @@ export function batchRam(threads, ram, weaken2 = 0) {
 }
 
 /**
+ * How long each op of a batch HOLDS its RAM, under the current all-at-once
+ * dispatcher.
+ *
+ * Every op execs at the same instant and waits out its own additionalMsec, so
+ * each one holds RAM from the launch until its own landing - a hack thread sits
+ * on 1.70 GB doing nothing for nearly a whole weaken window.
+ *
+ * Exists as a separate function because the JIT dispatcher will hand
+ * avgConcurrentRam a different set of held times (each op's own duration) and
+ * nothing else has to change. Keeping the two side by side is what makes that
+ * swap a one-line change rather than a rewrite of the calculator.
+ */
+export function heldAllAtOnce(times, spacer = SPACER_MS) {
+  return {
+    H: times.weaken - spacer,
+    W1: times.weaken,
+    G: times.weaken + spacer,
+    W2: times.weaken + 2 * spacer,
+  };
+}
+
+/**
+ * GB-milliseconds one batch occupies, given how long each op holds its RAM.
+ *
+ * @param {object} threads {hack, weaken1, grow} in EFFECTIVE threads
+ * @param {object} ram     {hack, grow, weaken} GB per thread
+ * @param {object} held    {H, W1, G, W2} ms each op holds its RAM
+ * @param {number} weaken2 effective threads for the second weaken
+ */
+export function batchRamSeconds(threads, ram, held, weaken2 = 0) {
+  return (
+    threads.hack * ram.hack * held.H +
+    threads.weaken1 * ram.weaken * held.W1 +
+    threads.grow * ram.grow * held.G +
+    weaken2 * ram.weaken * held.W2
+  );
+}
+
+/**
+ * Steady-state RAM a target ties up, in GB.
+ *
+ * Little's law: one batch is launched per cadence and each occupies
+ * batchRamSeconds GB-ms, so the average concurrent occupancy is that over the
+ * cadence.
+ *
+ * Sanity check on the reduction, because it is what makes this a drop-in
+ * replacement for the old model: under heldAllAtOnce every op is held ~W, so
+ * this becomes batchRam * W / cadence = batchRam * depth - which is exactly
+ * `depth * gb`, the figure admission has always used. A test pins that so the
+ * equivalence is demonstrated rather than assumed.
+ */
+export function avgConcurrentRam(threads, ram, held, weaken2, cadence = CADENCE_MS) {
+  if (!(cadence > 0)) return Infinity;
+  return batchRamSeconds(threads, ram, held, weaken2) / cadence;
+}
+
+/**
+ * The best steal fraction AND cadence for a target, given the server and the RAM
+ * it may have. Calculated, not configured.
+ *
+ * ---------------------------------------------------------------------------
+ * Two knobs, because one was not enough
+ *
+ * At a FIXED cadence income is linear in steal with no interior optimum - one
+ * batch lands per cadence, so income/sec is maxMoney * steal * chance / cadence
+ * and depth does not appear. The best fraction is then just the largest that
+ * fits, which is what this used to binary-search for.
+ *
+ * That answer is useless when the pool is small, and a live run showed how
+ * badly. A pipeline needs weakenTime / cadence batches in the air, so on a 1.6
+ * TB pool iron-gym (160s weaken, 400 batches deep) had to shrink its bite until
+ * ONE HACK THREAD was the answer - 0.3% steal, still 38x over budget - and the
+ * stream earned $0.14m/s while refusing 816 dispatches to land 3. Shrinking the
+ * bite cannot fix a DEPTH problem: the floor of a batch is one hack thread plus
+ * the weakens that cancel it, and 400 of those still do not fit.
+ *
+ * The other knob does fix it. Little's law says avgConcurrent = ramSeconds /
+ * cadence, so the cadence at which a batch of ANY size exactly fills its budget
+ * is ramSeconds / budget. Widening costs landings per second and buys the whole
+ * fraction back, and since grow threads scale as ln(1/(1-steal)) while income
+ * scales linearly, that trade is strongly favourable on a contended pool.
+ *
+ * So the objective is INCOME, not fit:
+ *
+ *     cadence(h) = max(CADENCE_MS, batchRamSeconds(h) / budget)
+ *     income(h)  = take(h) / cadence(h)
+ *
+ * On a pool with room this reduces exactly to the old answer - every cadence
+ * comes out at the floor, income is linear in the thread count, and the ceiling
+ * wins.
+ *
+ * ---------------------------------------------------------------------------
+ * The average is not the constraint when only one batch is in the air
+ *
+ * Little's law gives a MEAN occupancy, and a mean is only what the pool has to
+ * hold when enough batches overlap to smooth it. Widening the cadence pushes
+ * depth DOWN - depth is weakenTime / cadence - so the arithmetic that justifies
+ * averaging is exactly what the widening destroys. Past depth 1 there is no
+ * overlap left to average over and the pool has to hold one whole batch at once.
+ *
+ * The first build of this missed that and a live run said so plainly:
+ *
+ *     =iron-gym: steal 27.4% (94t hack, 0.46TB of a 0.46TB slice, paced at 363.9s)
+ *     +iron-gym: batch 9.29TB x depth 1
+ *
+ * A perfectly reasonable 0.46 TB average, made of a 9.29 TB batch on a 1.6 TB
+ * pool. It never placed a single grow: `sent 2 done 0`, `no room for G`.
+ *
+ * So a plan has to satisfy BOTH bounds - the mean through the cadence, and the
+ * peak through the thread count. Only the second can bind on a small pool, and
+ * no cadence in the world relieves it.
+ *
+ * Searched by a log-spaced sweep rather than a binary search, because income is
+ * NOT monotonic in the thread count once the cadence moves. See STEAL_PROBES.
+ *
+ * @param {number} budgetGb steady-state RAM this target may occupy
+ * @param {object} [opts.pin] a fraction to use instead of searching (--steal)
+ * @returns {{steal, hack, threads, gb, cadence, income, fits, capped}|null} null
+ *   when the target cannot be hacked at all. `fits` false means the target had
+ *   to widen its cadence past CADENCE_MS to stay inside the budget - worth
+ *   reporting, but no longer a reason to refuse it.
+ */
+export function chooseSteal(math, snap, ram, budgetGb, opts = {}) {
+  const {
+    cadence = CADENCE_MS,
+    cap = MAX_STEAL_FRACTION,
+    held = null,
+    growMargin = null,
+    drift = GROW_DRIFT_TOLERANCE,
+    pin = null,
+    probes = STEAL_PROBES,
+  } = opts;
+
+  // The calculator answers a RAM question, and RAM has nothing to say about
+  // whether a fraction can repair itself. Without this it happily returned
+  // 94.8-95.0% while maxStealForDrift put the protectable ceiling at 94.3%, and
+  // those streams ran on a 3.68% tolerance against the 4.00% they were sized
+  // for - the shortfall the ceiling exists to prevent.
+  const protectable = Math.min(cap, maxStealForDrift(drift));
+
+  const perThread = math.hackFractionPerThread(snap);
+  if (!(perThread > 0)) return null;
+
+  const times = math.opTimes(snap);
+  if (!(times.weaken > 0)) return null;
+  const heldTimes = held ?? heldAllAtOnce(times);
+
+  const budget = budgetGb > 0 ? budgetGb : Infinity;
+
+  const probe = (hack) => {
+    const threads = planThreadsForHack(math, snap, hack, perThread, { growMargin, drift });
+    if (!threads) return null;
+    // What the pool must hold at ONE INSTANT. Every op of a batch is live just
+    // before its anchor - W1 and W2 span the whole window, grow 0.8 of it - so
+    // the peak really is the whole batch, and it does not shrink when the
+    // cadence widens. See the note above.
+    const peak = batchRam(threads, ram, threads.weaken2);
+    const ramSeconds = batchRamSeconds(threads, ram, heldTimes, threads.weaken2);
+    // Little's law, inverted. A batch occupies ramSeconds GB-ms and one lands
+    // per cadence, so the cadence at which it exactly fills the budget is
+    // ramSeconds / budget. Never faster than the configured floor, which is set
+    // by jitter against the spacer and has nothing to do with RAM.
+    const fitted = Math.max(cadence, ramSeconds / budget);
+    return {
+      hack,
+      threads,
+      peak,
+      gb: ramSeconds / fitted,
+      cadence: fitted,
+      steal: threads.actualSteal,
+      income: threads.take / fitted,
+      fits: fitted <= cadence * (1 + 1e-9),
+      fitsPeak: peak <= budget,
+      capped: false,
+    };
+  };
+
+  const ceiling = Math.max(1, Math.floor((pin ?? protectable) / perThread));
+  if (pin !== null) return probe(ceiling) ?? probe(1);
+
+  let best = null;
+  const consider = (hack) => {
+    const r = probe(hack);
+    // A plan whose single batch does not fit is not a slower plan, it is one
+    // that never places an op. Excluded rather than scored down, because its
+    // income figure is honest arithmetic about a batch that cannot run.
+    if (r && r.fitsPeak && (!best || r.income > best.income)) best = r;
+  };
+
+  // Log-spaced: the useful range of thread counts spans orders of magnitude and
+  // the peak is flat near the top, so a linear walk would spend most of its
+  // probes where the answer barely moves and none where it does.
+  const seen = new Set();
+  const ratio = ceiling > 1 ? Math.pow(ceiling, 1 / Math.max(1, probes - 1)) : 1;
+  for (let i = 0; i < probes; i++) {
+    const h = Math.min(ceiling, Math.max(1, Math.round(Math.pow(ratio, i))));
+    if (seen.has(h)) continue;
+    seen.add(h);
+    consider(h);
+  }
+  // The ceiling is the answer whenever RAM is not the constraint, and rounding
+  // in the sweep can miss it by a thread. Probed explicitly so the unconstrained
+  // case lands exactly on the protectable fraction rather than a hair under it.
+  if (!seen.has(ceiling)) consider(ceiling);
+
+  // Not even one hack thread's batch fits the budget. Reported rather than
+  // returned as null: the caller knows whether this target was pinned by hand
+  // or picked by ranking, and it needs a `take` to score it with either way.
+  if (!best) return probe(1);
+  return { ...best, capped: best.hack >= ceiling };
+}
+
+/**
  * Money per GB-second: what a target earns for the RAM it ties up.
  *
  * This is the honest ranking number and the reason it needs batch thread math.
@@ -357,6 +693,12 @@ export function batchRam(threads, ram, weaken2 = 0) {
  * together and the last releases a couple of spacers after the anchor), so
  * GB-seconds per batch is batchRam * weakenTime, and income per batch arrives
  * once per cadence once the stream is at depth.
+ *
+ * That window assumption is true of the all-at-once dispatcher and FALSE under
+ * JIT, where an op holds RAM only for its own duration - hack for 0.25W rather
+ * than the full window. Ranking still works, because the error biases every
+ * candidate in the same direction, but this should take a held-times argument
+ * and defer to batchRamSeconds when the dispatcher changes.
  */
 export function moneyPerGbSec(take, chance, gb, weakenMs) {
   if (!(gb > 0) || !(weakenMs > 0)) return 0;
@@ -379,7 +721,15 @@ export function moneyPerGbSec(take, chance, gb, weakenMs) {
  * high. A genuine drift compounds and clears these within a few cadences.
  */
 export function baselineDrift(snap, th, slack = BASELINE_SLACK_BATCHES, opts = {}) {
-  const { moneyBatches = MONEY_FLOOR_BATCHES } = opts;
+  const { moneyBatches = MONEY_FLOOR_BATCHES, floorSteal = null } = opts;
+
+  // The floor must be sized for the LARGEST fraction still in the air, not the
+  // one the next batch will use. A live run stepped 84.9% -> 50.9% under RAM
+  // pressure, which tightened this floor to (1-0.509)^2 = 24.1% of max
+  // instantly - while batches sized at 84.9% kept landing for another whole
+  // weaken window and left the server at 15.1%. The stream then stopped itself
+  // for a drain that was its own arithmetic. Every step DOWN would do this.
+  const steal = Math.max(th.actualSteal, floorSteal ?? 0);
 
   // MULTIPLICATIVE, and this is a bug fix. The floor was
   // `maxMoney * (1 - steal * slack)`, which goes NEGATIVE above 1/slack - so
@@ -392,7 +742,17 @@ export function baselineDrift(snap, th, slack = BASELINE_SLACK_BATCHES, opts = {
   // the legitimate dip really is almost the whole balance.
   //
   // Security stays additive, because security genuinely adds.
-  const moneyFloor = snap.maxMoney * Math.pow(1 - th.actualSteal, moneyBatches);
+  // The MAX of two bounds, because neither covers the whole range. `(1-s)^N` is
+  // the tighter one below ~50% steal and stays in charge there; above it the
+  // power collapses - 0.28% of max at 94.7% - and a target can lose almost
+  // everything before the check objects. A live run reported OFF BASELINE at
+  // $9.4m of $4723.8m for exactly that reason. `(1-s) * share` is half the
+  // level a healthy stream really sits at the instant after a hack lands, so it
+  // stays meaningful however high the fraction goes.
+  const moneyFloor = snap.maxMoney * Math.max(
+    Math.pow(1 - steal, moneyBatches),
+    (1 - steal) * MONEY_FLOOR_SHARE,
+  );
   const secCeiling = snap.minSec + (th.hackSec + th.growSec) * slack;
 
   const moneyOff = snap.money < moneyFloor;

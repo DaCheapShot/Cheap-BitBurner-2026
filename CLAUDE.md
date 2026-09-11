@@ -37,11 +37,20 @@ Game source (for behaviour the docs don't state) lives under `.../stable/src/`.
 Everything runs from the in-game terminal. `boot.js` is the entry point and supervises the rest:
 
 ```
-run scripts/boot.js                     # root -> deploy -> calibrate -> cloud -> manager
+run scripts/boot.js                     # root -> deploy -> cloud -> continuous batcher
+run scripts/boot.js --shotgun           # the volley batcher instead (adds calibrate)
 run scripts/boot.js --target omega-net  # pin the manager's target instead of auto-picking
+run scripts/boot.js --targets 5         # continuous only; the shotgun ignores it
 run scripts/boot.js --once --no-cloud
 run scripts/boot.js --no-formulas       # force the analyze build
 ```
+
+**Boot chooses between TWO batchers**, and the choice is a flag, not a marker - retype it if
+you restart boot. `scripts/continuous/` is the default and the better earner. `--shotgun` runs
+`scripts/manager.js`. Within either, boot re-picks the formulas or analyze build every tick,
+because Formulas.exe can be bought or lost at any time. Calibration is a shotgun-only step:
+`scripts/continuous/lib/mathAnalyze.js` deliberately keeps no cache and never reads
+`/data/calib.json`, so running `calibrate.js` for it is a 6.20 GB transient buying nothing.
 
 Individual pieces, useful when diagnosing:
 
@@ -64,9 +73,22 @@ node tests/run.mjs                      # run the test suite
 
 **Only one process may own the RAM pool and the report port.** `port.read()` removes the
 message and `Server.pending` is per-process memory, so a second owner steals reports and
-over-commits the same RAM. `manager.js` and `manager-formulas.js` are alternatives — only one
-may run. Do not run `prep.js` alongside either — prep runs *inside* the manager via
-`prepper.js`. `boot.js` enforces this by killing duplicate services (lowest PID wins).
+over-commits the same RAM. There are **four** manager files — `manager.js`,
+`manager-formulas.js`, `continuous/manager.js`, `continuous/manager-formulas.js` — and all four
+are alternatives, not services. Only one may run. Do not run `prep.js` alongside any of them —
+prep runs *inside* the manager. `boot.js` enforces this by killing every rival before it starts
+the one it wants (duplicates of the same file: lowest PID wins).
+
+The continuous side guards itself too: `findRivals` in `continuous/core.js` **aborts** rather
+than starting beside any of the four, and does not kill the rival — which system runs is the
+user's decision. That is why boot has to clear the others first: a survivor does not make the
+incoming manager degrade, it makes it exit, and boot would restart it into the same wall once a
+minute forever.
+
+A swap between the two systems must also clear **both** worker sets. They use different files
+(`scripts/hack.js` against `scripts/continuous/hack.js`), so a kill list covering only the
+incoming system's leaves the outgoing one's batches running network-wide.
+
 `capacity.js` is safe to run beside the manager: it allocates and releases only within its own
 process and never touches the port.
 
@@ -180,7 +202,7 @@ Layers, bottom up:
 | `manager-formulas.js` | entry: core + mathFormulas | 6.50 |
 | `prep.js` | entry: prepper + mathAnalyze | 6.15 |
 | `prep-formulas.js` | entry: prepper + mathFormulas | 6.10 |
-| `boot.js` | supervisor | 3.60 |
+| `boot.js` | supervisor, picks the batcher | 3.60 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
 | `share.js` | one `ns.share()` loop | 4.00 **per thread** |
@@ -315,13 +337,74 @@ busy pool when the file was missing; the second told the user to run `deploy.js`
 acted on.** A refusal now prints what was asked against what the pool believed was free, so the
 next log diagnoses itself instead of costing another round trip.
 
+### The continuous batcher (`scripts/continuous/`)
+
+The default. It replaces the volley with a **stream**: batches are dispatched at a cadence and
+each op is `exec`ed just in time for its own landing, so an op holds RAM for its own duration
+rather than for the whole weaken window. Measured at $947m/s average on a live save with `bad 0`
+and 10–11 ms of jitter against a 100 ms spacer.
+
+**Self-contained by rule.** It does not import from `scripts/`, and `scripts/` does not import
+from it except for one 0 GB constant list (`boot.js` reads `continuous/config.js` for the worker
+paths it has to be able to kill). It carries its own workers, its own deploy, its own math
+backends and its own report port (3, not 1 — a killed shotgun leaves reports in flight for a
+whole window, and on a shared port they would be credited to batch ids that never existed here).
+
+**Just-in-time dispatch is legal because op duration is fixed at CALL time**, not at landing —
+`NetscriptHelpers.tsx` resolves it when the op starts. So placing `G` a hundred seconds after
+`W1` does not change where `G` lands, and the shotgun's "all four at once" rule does not apply.
+What is still true, and is the thing that rule was really protecting, is that nothing may sleep
+and *then* ask how long an op takes.
+
+**The steal fraction is calculated, never configured.** `chooseSteal` sweeps hack-thread counts
+log-spaced and takes the best income, subject to two separate bounds:
+
+- **peak RAM**, `batchRam` — all four ops are live just before the anchor, so at depth ≤ 1 the
+  mean is not the constraint and averaging over the cadence would over-commit by the depth
+  factor;
+- **mean RAM**, `batchRamSeconds / cadence` — Little's law, which binds instead once the pipeline
+  is deep.
+
+`--steal` still exists and pins the fraction, for controlled measurement only.
+
+**The grow margin is derived from measured drift**, not flat. Drift is hack effectiveness rising
+between dispatch and landing; the controller measures it two ways (from reports, and from the
+trend in `hackFractionPerThread` over a weaken window) and sizes every batch for
+`DRIFT_SAFETY ×` the worse. One consequence is worth knowing before touching the controller: in
+steady state `worstOver / tolerance ≈ 1 / DRIFT_SAFETY`, whatever the fraction or the target — so
+a climb threshold below that is one no healthy stream can ever meet.
+
+**`MAX_TARGETS = 3`, but the count is chosen by INCOME, not capacity.** Running the most targets
+that fit is only right when the budget is not the constraint. When it is, every extra target
+narrows the slice for all of them and income is near-linear in the slice — a live run measured
+phantasy alone at $2.84m/s against $1.96m/s for three. `rescan` prices 1..N and takes the best
+total, so the count rises to 3 on its own as the pool grows.
+
+**Prep runs concurrently with streaming**, one target at a time unless RAM is genuinely spare
+(`PREP_SPARE_SHARE`). Four concurrent preps on a 1.6 TB pool reserved the whole of it and
+starved the only live stream to 169 aborts in 170 batches.
+
+**Share works here too**, through `lib/share.js` — the same marker, the same port 2, the same
+`sharemode.js`. It is a port of `managerCore`'s, not a rewrite, and every rule in it is one the
+shotgun learned expensively: proportional placement, both passes planned before anything execs,
+`noFile` and `refused` kept apart, and nothing routed through `pool.allocate` (a reservation is
+released at cycle end and a share worker is not, so the same bytes would be subtracted twice).
+It is called once per rescan and **before the RAM budget is computed** — a budget taken first
+prices RAM share is about to take, and the calculator then commits a fraction it cannot place.
+
+Its log mirrors to `/data/continuous.log.txt`. That file is written to the GAME's filesystem and
+filesync only pushes the other way, so getting it onto disk means `download /data/continuous.log.txt`
+from the terminal.
+
 ### Invariants that look arbitrary but aren't
 
 Breaking any of these produces silent, compounding damage rather than an error:
 
-- **All four ops of a batch `exec` at the same instant.** Separation comes from
-  `additionalMsec`, never from sleeping between launches — a sleep-then-op recomputes its
-  duration from the security level at wake-up and lands somewhere else.
+- **All four ops of a batch `exec` at the same instant** — *in the shotgun*. Separation comes
+  from `additionalMsec`, never from sleeping between launches: a sleep-then-op recomputes its
+  duration from the security level at wake-up and lands somewhere else. The continuous batcher
+  breaks this deliberately and is still correct — see its section below — but the reason is
+  narrow, and anything that sleeps and *then* asks how long an op takes is wrong in both.
 - **Recompute each worker's delay at its own `exec`.** A volley is hundreds of `exec` calls
   spanning real wall time; one delay computed up front is correct only for the first worker.
 - **Call the security analyze functions WITHOUT a host argument.** With one, they cap by
@@ -334,8 +417,9 @@ Breaking any of these produces silent, compounding damage rather than an error:
 - **A manager swap must clear the network.** boot switches builds when Formulas.exe is gained
   or lost, and the outgoing manager's volley keeps running — hundreds of batches holding the
   RAM the replacement needs and still working a target nobody owns. `killOrphanWorkers` runs
-  only when no manager of either build survives; doing it on every manager kill would destroy
-  the volley of the survivor `killDuplicates` just kept. Nothing is lost by killing them:
+  only when no manager of ANY of the four survives; doing it on every manager kill would
+  destroy the volley of the survivor `killDuplicates` just kept. Switching BATCHERS is a manager
+  swap too, and the kill list has to cover both systems' workers - they are different files. Nothing is lost by killing them:
   `ns.hack` credits money on landing, so a killed grow forfeits only the restore, which prep
   does anyway.
 - **A full pool is transient, not a failure.** Prep waits it out (`POOL_WAIT_CYCLES`) rather
@@ -344,10 +428,13 @@ Breaking any of these produces silent, compounding damage rather than an error:
 - **Cap the auto-chosen steal fraction.** Thread counts are sized once per volley, then the
   batches land across the whole weaken window while hacking level climbs. A batch landing late
   steals more than planned, and its grow was sized for the smaller take, so it ends below where
-  it started and compounds. The headroom is
+  it started and compounds. In the shotgun the headroom is
   `((GROW_MARGIN - 1) / GROW_MARGIN) * (1 - steal) / steal` — 0.25% at 95% steal against 19% at
   20%. A measured volley at 98.28% drained $17.68b to $166.11k in one window. See
-  `MAX_STEAL_FRACTION`.
+  `MAX_STEAL_FRACTION`. **That formula is the shotgun's**: the flat `GROW_MARGIN` in it is what
+  makes the tolerance a property of the fraction alone. Continuous derives the margin from
+  measured drift instead, so its tolerance moves with the target — do not carry the flat form
+  across.
 - **Share is launched by whoever owns the pool.** A share service running beside the manager
   would `exec` into RAM the manager had already planned a volley against, and the manager's
   `exec` would fail mid-volley — the same class of damage two managers cause. It would also

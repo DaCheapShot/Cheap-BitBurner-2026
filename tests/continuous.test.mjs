@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { assert, assertClose } from "./harness.mjs";
+import { assert, assertClose, loadScripts } from "./harness.mjs";
 import { makeNs, withFormulas } from "./mockNs.mjs";
 
 /**
@@ -240,7 +240,21 @@ async function makeStream(over = {}) {
   const s = mods["lib/stream"].createStream(ns, math, {
     host: "t", pool, ram, log: () => {}, steal: over.steal ?? 0.1,
   });
-  return { s, ns, pool, math, mods, ram, calls };
+
+  // Plan a batch AND launch every op of it.
+  //
+  // Under JIT a dispatch only ENQUEUES; ops go out at `land - opTime`, spread
+  // across most of a weaken window. Handing tick() a far-future `now` makes the
+  // due-ness scan fire them all at once. launchOp still uses the real clock for
+  // reachability and for the delay, so the timing assertions stay honest.
+  const fire = (n = 1) => {
+    for (let i = 0; i < n; i++) {
+      s.dispatch();
+      s.tick(Date.now() + 1e9);
+    }
+  };
+
+  return { s, ns, pool, math, mods, ram, calls, fire };
 }
 
 /** Every module an entry point can reach, transitively. */
@@ -702,6 +716,56 @@ export const tests = {
     assert(describeDeploy({ copied: 5, failed: [], skipped: 1 }, 6) === null, "silence on success");
   },
 
+  "the manager entries cost what the architecture says they do": async () => {
+    const { sources } = await loadContinuous();
+
+    // Verified against src/Netscript/RamCostGenerator.ts in this fork. Only the
+    // functions this folder actually reaches; an unlisted one shows up as a
+    // total that no longer matches, which is the point.
+    const COST = {
+      hack: 0.1, grow: 0.15, weaken: 0.15, scan: 0.2, exec: 1.3, scp: 0.6,
+      kill: 0.5, ps: 0.2, hasRootAccess: 0.05, getHostname: 0.05,
+      getHackingLevel: 0.05, getServer: 2, getServerMoneyAvailable: 0.1,
+      getServerSecurityLevel: 0.1, getServerMinSecurityLevel: 0.1,
+      getServerMaxMoney: 0.1, getServerRequiredHackingLevel: 0.1,
+      getServerGrowth: 0.1, getServerMaxRam: 0.05, getServerUsedRam: 0.05,
+      getServerNumPortsRequired: 0.1, fileExists: 0.1, getScriptRam: 0.1,
+      getHackTime: 0.05, getGrowTime: 0.05, getWeakenTime: 0.05,
+      hackAnalyze: 1, hackAnalyzeSecurity: 1, hackAnalyzeChance: 1,
+      growthAnalyze: 1, growthAnalyzeSecurity: 1, weakenAnalyze: 1,
+      getPlayer: 0.5, share: 2.4,
+      // Free, and load-bearing that they stay free: config.js is imported by
+      // every module in the folder and core.js mirrors its whole log to disk.
+      read: 0, write: 0, print: 0, tprint: 0, args: 0,
+    };
+
+    const ramOf = (entry) => {
+      const fns = new Set();
+      for (const mod of importClosure(entry, sources)) {
+        const src = stripComments(sources.get(mod + ".js"));
+        for (const m of src.matchAll(/ns\.(\w+)\s*\(/g)) {
+          if (COST[m[1]] !== undefined) fns.add(m[1]);
+        }
+      }
+      return 1.6 + [...fns].reduce((n, f) => n + COST[f], 0);
+    };
+
+    // The two backends must stay apart, and the totals are how that shows up as
+    // a number rather than as a graph walk.
+    // 12.85 -> 12.95 when lib/share.js arrived: ns.fileExists, 0.10, which the
+    // top-up needs to tell a host that HAS NOT GOT share.js from one that has it
+    // and refused the exec. Those two return the same bare 0 from exec and have
+    // opposite remedies, and merging them cost the shotgun two live runs.
+    //
+    // The formulas total does not move at all - lib/mathFormulas.js already pays
+    // for fileExists to check for Formulas.exe - which is why share is the rare
+    // addition that is free on one build and cheap on the other.
+    const analyze = ramOf("manager");
+    const formulas = ramOf("manager-formulas");
+    assert(Math.abs(analyze - 12.95) < 0.011, `manager.js: expected 12.95 GB, got ${analyze.toFixed(2)}`);
+    assert(Math.abs(formulas - 9.00) < 0.011, `manager-formulas.js: expected 9.00 GB, got ${formulas.toFixed(2)}`);
+  },
+
   // ---------------------------------------------------------- backends -----
 
   "no entry point can reach both math backends": async () => {
@@ -1135,6 +1199,78 @@ export const tests = {
     assert(weaken2For(math, 50) < weaken2For(math, 100), "weaken2 should scale with raw threads");
   },
 
+  "a batch sizes weaken-2 at plan time, from grow's effective count": async () => {
+    const { math, ns, mods } = await makeMath("analyze", {
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018 },
+      },
+    });
+    const { planThreads, weaken2For } = mods["lib/plan"];
+
+    // Forced by the JIT launch order, not chosen: weaken-2 goes out before grow
+    // (due_W2 - due_G = s - 0.2W, negative for any weaken over half a second),
+    // so grow's placed raw count does not exist yet when W2 has to be sized.
+    const th = planThreads(math, math.snapshot(ns, "t"), 0.3);
+    assert(th.weaken2 > 0, "the plan must carry its own weaken-2 count");
+    assert(
+      th.weaken2 === weaken2For(math, th.grow),
+      `weaken2 ${th.weaken2} should come from the effective grow count`,
+    );
+  },
+
+  "sizing weaken-2 from the effective count over-weakens, never under": async () => {
+    const { math, ns, mods } = await makeMath("analyze", {
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018 },
+      },
+    });
+    const { planThreads, weaken2For } = mods["lib/plan"];
+
+    const th = planThreads(math, math.snapshot(ns, "t"), 0.3);
+
+    // coreBonus >= 1 always, so a placement's raw thread count is never more
+    // than the effective one it was asked for. Sizing from effective therefore
+    // buys MORE weaken than the grow can justify - wasteful, and safe, because
+    // weaken clamps at minimum security. The dangerous direction is impossible.
+    const rawOn8Core = Math.ceil(th.grow / gameCoreBonus(8));
+    assert(rawOn8Core < th.grow, "an 8-core placement uses fewer raw threads");
+    assert(
+      th.weaken2 >= weaken2For(math, rawOn8Core),
+      "plan-time sizing must cover what the placement actually adds",
+    );
+
+    // And quantify the waste, so the trade stays visible: ~44% on 8 cores.
+    const exact = weaken2For(math, rawOn8Core);
+    assert(th.weaken2 / exact < 1.5, `over-provision ${th.weaken2 / exact} is larger than expected`);
+  },
+
+  "prep still sizes its weaken from grow's RAW placed threads": async () => {
+    const { math, pool, ram, ns } = await makeMath("analyze", {
+      hosts: { home: 65536 },
+      cores: { home: 8 },
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 5e8, minDifficulty: 5, hackDifficulty: 5,
+             growBase: 1.0018 },
+      },
+    });
+    const { placePrepWave } = (await loadContinuous()).mods["lib/prep"];
+
+    // A prep wave launches grow and weaken TOGETHER and places grow first, so
+    // the exact raw count is available and there is no reason to over-provision.
+    // The batch path had to give that up; prep did not, and must not be
+    // "made consistent" with it.
+    const wave = placePrepWave(pool, ram, math, math.snapshot(ns, "t"));
+    assert(wave, "the wave should place");
+    assertClose(
+      wave.growSec,
+      wave.grow.rawThreads * math.securityPerGrowThread(),
+      1e-9,
+      "prep must still size from RAW grow threads",
+    );
+  },
+
   "an op that cannot reach its slot is refused, not launched late": async () => {
     const { mods } = await loadContinuous();
     const { delayFor, reachable } = mods["lib/plan"];
@@ -1301,6 +1437,33 @@ export const tests = {
     assert(baselineDrift({ maxMoney: 1e9, money: 0.70e9, minSec: 5, sec: 5 }, th).off, "0.70 is not");
   },
 
+  "stepping the fraction down does not make the target look drained": async () => {
+    const { mods } = await loadContinuous();
+    const { baselineDrift } = mods["lib/plan"];
+
+    // Measured on a live run: the controller stepped 84.9% -> 50.9% under RAM
+    // pressure, which tightened the floor to (1-0.509)^2 = 24.1% of max
+    // instantly - while batches sized at 84.9% went on landing for another
+    // weaken window and left the server at 15.1%. The stream stopped itself for
+    // a drain that was its own arithmetic, and every step DOWN would repeat it.
+    const now = { actualSteal: 0.509, hackSec: 0.3, growSec: 3 };
+    const midBatch = { maxMoney: 100e6, money: 15.1e6, minSec: 5, sec: 5.3 };
+
+    assert(baselineDrift(midBatch, now).off, "the fixture must reproduce the false alarm");
+
+    // Told what is actually in the air, it is not a drain at all: one hack at
+    // 84.9% leaves exactly 15.1%.
+    const withInFlight = baselineDrift(midBatch, now, undefined, { floorSteal: 0.849 });
+    assert(!withInFlight.off, `still flagged: floor ${withInFlight.moneyFloor}`);
+
+    // And it must not become a blanket excuse - a genuine drain is still caught
+    // even allowing for the largest bite in flight.
+    const drained = baselineDrift(
+      { maxMoney: 100e6, money: 0.5e6, minSec: 5, sec: 5 }, now, undefined, { floorSteal: 0.849 },
+    );
+    assert(drained.off && drained.moneyOff, "a real drain must still be caught");
+  },
+
   "a target that really has drifted is caught": async () => {
     const { mods } = await loadContinuous();
     const { baselineDrift } = mods["lib/plan"];
@@ -1323,23 +1486,26 @@ export const tests = {
 
   // ------------------------------------------------------------- stream ----
 
-  "a batch launches weakens and grow BEFORE its hack": async () => {
-    const { s, calls } = await makeStream();
-    const res = s.dispatch();
-    assert(res.dispatched, `dispatch failed: ${res.why}`);
+  "ops launch in the order W1, W2, G, H - hack always last": async () => {
+    const { s, calls, fire } = await makeStream();
+    fire();
 
+    // Under JIT this order is not chosen, it falls out of the due times:
+    // due = land - opTime, so W1 (A-W), W2 (A+2s-W), G (A+s-0.8W), H (A-s-0.25W).
+    // Hack being last is what makes aborting a batch part-way safe.
     const ops = calls.map((c) => c.args[5]);
-    const firstHack = ops.indexOf("H");
-    assert(firstHack === ops.length - 1, `hack was not last: ${ops.join(",")}`);
-    for (const op of ["W1", "G", "W2"]) {
-      assert(ops.indexOf(op) < firstHack, `${op} launched after hack`);
-    }
+    assert(ops.length > 0, "nothing launched");
+    assert(ops[ops.length - 1] === "H", `hack was not last: ${ops.join(",")}`);
+    const firstOf = (op) => ops.indexOf(op);
+    assert(firstOf("W1") < firstOf("W2"), `W1 after W2: ${ops.join(",")}`);
+    assert(firstOf("W2") < firstOf("G"), `W2 after G: ${ops.join(",")}`);
+    assert(firstOf("G") < firstOf("H"), `G after H: ${ops.join(",")}`);
   },
 
   "landing order is still H, W1, G, W2 whatever the launch order": async () => {
-    const { s, calls, mods } = await makeStream();
+    const { s, calls, mods, fire } = await makeStream();
     const { SPACER_MS } = mods["config"];
-    s.dispatch();
+    fire();
 
     // args: [target, delay, batch, port, planned, op, threads]
     const landOf = (op) => Number(calls.find((c) => c.args[5] === op).args[4]);
@@ -1352,7 +1518,7 @@ export const tests = {
   },
 
   "an aborted dispatch never leaves a hack running": async () => {
-    const { s, calls, ns } = await makeStream();
+    const { s, calls, ns, fire } = await makeStream();
 
     // Refuse the exec for grow. Because hack launches LAST, an abort anywhere
     // can only ever leave grow and weaken in the air - and those can only move
@@ -1364,23 +1530,104 @@ export const tests = {
       return args[5] === "G" ? 0 : calls.length;
     };
 
-    const res = s.dispatch();
-    assert(!res.dispatched, "the dispatch should have aborted");
+    fire();
     assert(!calls.some((c) => c.args[5] === "H"), "a hack was launched despite the abort");
-    assert(s.depth === 0, "an aborted batch must not be registered as in flight");
+    assert(s.stats.aborted === 1, `expected one abort, got ${s.stats.aborted}`);
+    s.retire(Date.now() + 1e9);
+    assert(s.depth === 0, "an aborted batch must not linger in flight");
+    assert(s.stats.bad === 0, "an abort is a dispatch fault, not a landing fault");
   },
 
   "a failed placement reserves nothing": async () => {
-    const { s, pool } = await makeStream({ hosts: { home: 12 } }); // far too small
+    // Enough BYTES for the batch, on hosts too small to hold a single weaken
+    // thread. That is the only shape that still reaches a placement failure now
+    // that dispatch refuses a batch the pool cannot hold - and it is a real one,
+    // since every host floors its own thread count and the byte total always
+    // overstates what can be seated.
+    const crumbs = Object.fromEntries(
+      Array.from({ length: 400 }, (_, i) => [`h${i}`, 1.7]),
+    );
+    const { s, pool, calls, fire } = await makeStream({ hosts: crumbs });
     const before = pool.freeRam;
 
-    const res = s.dispatch();
-    assert(!res.dispatched, "dispatch should fail on a tiny pool");
-    assert(res.why.startsWith("no room"), `expected a placement failure, got "${res.why}"`);
+    // Placement happens at LAUNCH now, not at dispatch - so a pool too fragmented
+    // to seat an op shows up when tick() tries to place it, and aborts the batch.
+    fire();
+    assert(s.stats.aborted === 1, `expected an abort, got ${s.stats.aborted}`);
+    assert(!calls.some((c) => c.args[5] === "H"), "hack must not launch after an abort");
     // A batch is all-or-nothing. A partial reservation left behind would shrink
     // the pool on every failed attempt until nothing placed at all.
-    assertClose(pool.pendingRam, 0, 1e-9, "failed dispatch leaked a reservation");
-    assertClose(pool.freeRam, before, 1e-9, "failed dispatch leaked RAM");
+    assertClose(pool.pendingRam, 0, 1e-9, "failed launch leaked a reservation");
+    assertClose(pool.freeRam, before, 1e-9, "failed launch leaked RAM");
+  },
+
+  "a batch too big for the pool is never enqueued": async () => {
+    const { s, calls, fire } = await makeStream({ hosts: { home: 12 } });
+
+    // The assertion that matters is the OP count, not the skip. Under JIT the
+    // ops are placed at their own launch times, so a pool this tight used to
+    // accept W1 and refuse G a hundred seconds later - leaving weakens squatting
+    // their RAM for a full window against a batch that could never land. A live
+    // run on a 1.6 TB pool aborted 169 of 170 batches that way and never
+    // recovered, because the wreckage was what filled the pool.
+    fire();
+    assert(calls.length === 0, `nothing may launch, ${calls.length} ops went out`);
+    assert(s.stats.aborted === 0, `a refused batch is not an abort, got ${s.stats.aborted}`);
+    assert(
+      s.stats.skips["no room for batch"] === 1,
+      `expected one refusal, got ${JSON.stringify(s.stats.skips)}`,
+    );
+  },
+
+  "the pipeline cannot over-commit the pool": async () => {
+    // Sized for a handful of batches, not one and not hundreds.
+    const { s, pool } = await makeStream({ hosts: { home: 1024 } });
+    const free = pool.freeRam;
+
+    // Dispatched WITHOUT ticking, which is the shape of the failure: a queued op
+    // reserves nothing, so the pool reads free right up until the grows come due
+    // together. Checking one batch against freeRam catches a batch too big on
+    // its own and does nothing about seventy that are each affordable and
+    // collectively are not - a live run held `depth 70 sent 70 done 0` and
+    // logged `no room for G x69` against 0.03 TB of free RAM.
+    let placed = 0;
+    for (let i = 0; i < 50; i++) if (s.dispatch(Date.now()).dispatched) placed++;
+
+    assert(placed > 0, "the fixture must fit at least one batch");
+    assert(placed < 50, `the pipeline must stop before the pool is gone, took all ${placed}`);
+    assert(
+      s.queuedRam <= free,
+      `queued ${s.queuedRam.toFixed(0)}GB against a ${free.toFixed(0)}GB pool`,
+    );
+  },
+
+  "launching an op pays down what the pipeline owes": async () => {
+    const { s, fire } = await makeStream({ hosts: { home: 1024 } });
+
+    s.dispatch(Date.now());
+    const owed = s.queuedRam;
+    assert(owed > 0, "a planned batch owes the pool its RAM");
+
+    // Once an op is placed the pool counts it, so counting it here too would
+    // charge it twice and the gate would refuse batches that fit.
+    fire();
+    assertClose(s.queuedRam, 0, 1e-6, "RAM still owed after every op launched");
+  },
+
+  "a refused batch waits a cadence before trying again": async () => {
+    const { s, mods } = await makeStream({ hosts: { home: 12 } });
+    const { CADENCE_MS } = mods["config"];
+
+    const now = Date.now();
+    const res = s.dispatch(now);
+    assert(!res.dispatched && res.why === "no room for batch", `got "${res.why}"`);
+
+    // dueAt only advances on a SUCCESSFUL dispatch, so without this a stream
+    // against a full pool re-plans every tick - a snapshot each time, 40 a
+    // second - and reports "150/149 dispatches found no room" against a ratio
+    // that is supposed to count one attempt per cadence slot.
+    assert(!s.isDue(now + 10), "a refused batch must not retry on the next tick");
+    assert(s.isDue(now + CADENCE_MS + 1), "it must retry once the slot comes round");
   },
 
   "an unprepped target is never streamed": async () => {
@@ -1400,10 +1647,9 @@ export const tests = {
     // Two hosts, neither able to hold the whole grow. This is the shape that
     // desynced the first live run: the split produced five reports for four ops
     // and the verdict condemned it.
-    const { s, calls } = await makeStream({ hosts: { a: 130, b: 130 } });
+    const { s, calls, fire } = await makeStream({ hosts: { a: 130, b: 130 } });
 
-    const res = s.dispatch();
-    assert(res.dispatched, `dispatch failed: ${res.why}`);
+    fire();
     const growWorkers = calls.filter((c) => c.args[5] === "G").length;
     assert(growWorkers > 1, `grow did not split (${growWorkers} worker) - fixture is wrong`);
 
@@ -1443,9 +1689,8 @@ export const tests = {
   },
 
   "reports are credited to their own batch and retired in order": async () => {
-    const { s, calls } = await makeStream();
-    const res = s.dispatch();
-    assert(res.dispatched, "setup dispatch");
+    const { s, calls, fire } = await makeStream();
+    fire();
     assert(s.depth === 1, "one batch in flight");
 
     // Feed back exactly what the workers would have written, landing in order.
@@ -1466,23 +1711,34 @@ export const tests = {
   },
 
   "an unknown batch id is refused rather than silently absorbed": async () => {
-    const { s } = await makeStream();
-    s.dispatch();
+    const { s, fire } = await makeStream();
+    fire();
     assert(!s.credit({ b: "not-a-batch", op: "H", p: 1, a: 1, r: 0 }), "a foreign id was accepted");
   },
 
   "the steal ceiling is enforced, not merely documented": async () => {
     const { mods } = await loadContinuous();
-    const { clampSteal } = mods["lib/plan"];
-    const { MAX_STEAL_FRACTION } = mods["config"];
+    const { clampSteal, maxStealForDrift, stealTolerance } = mods["lib/plan"];
+    const { MAX_STEAL_FRACTION, GROW_DRIFT_TOLERANCE } = mods["config"];
 
     // MAX_STEAL_FRACTION used to exist only in prose - nothing read it - so
     // `--steal 0.99` was accepted and so was `--steal 5`, which sizes a hack to
     // take five times the server's money and a grow to restore from a balance
     // that cannot occur. A mistyped terminal argument was enough.
-    assert(clampSteal(0.99) === MAX_STEAL_FRACTION, "0.99 should clamp to the ceiling");
-    assert(clampSteal(5) === MAX_STEAL_FRACTION, "5 should clamp to the ceiling");
+    const ceiling = Math.min(MAX_STEAL_FRACTION, maxStealForDrift());
+    assert(clampSteal(0.99) === ceiling, `0.99 should clamp to ${ceiling}`);
+    assert(clampSteal(5) === ceiling, `5 should clamp to ${ceiling}`);
     assert(clampSteal(0.1) === 0.1, "a sane fraction passes through untouched");
+
+    // And the derived ceiling is the one that means something: every fraction
+    // it admits gets the full drift budget, where MAX_STEAL_FRACTION on its own
+    // admitted fractions the margin cap could only half-protect. A live run
+    // took three targets to $0.1m in that gap.
+    assertClose(stealTolerance(ceiling), GROW_DRIFT_TOLERANCE, 1e-9, "at the ceiling");
+    assert(
+      stealTolerance(ceiling + 0.01) < GROW_DRIFT_TOLERANCE,
+      "just above it the cap must bind, which is why the ceiling exists",
+    );
 
     // NaN compares false against every bound, so treating garbage as a default
     // would let it straight through the check meant to stop it.
@@ -1612,16 +1868,23 @@ export const tests = {
     assert(d.steal > 0.5, "a clean window with no other evidence should step up");
   },
 
-  "a bad batch backs the fraction off even with no overshoot": async () => {
+  "repeated bad batches back the fraction off even with no overshoot": async () => {
     const { mods } = await loadContinuous();
     const { nextSteal } = mods["lib/plan"];
+    const { BAD_BATCH_TOLERANCE } = mods["config"];
 
-    // A sequencing fault is not a sizing fault, but the response is the same: a
-    // smaller steal makes every later batch cheaper to get wrong and buys back
-    // tolerance while the cause is still unknown.
-    const d = nextSteal(0.50, { batches: 20, bad: 1, worstOver: 0 }, 0.95);
-    assert(d.changed && d.steal < 0.50, "a bad batch should back off");
+    // A sequencing fault is not a sizing fault, but the response to a PATTERN
+    // of them is the same: a smaller steal makes every later batch cheaper to
+    // get wrong and buys back tolerance while the cause is still unknown.
+    const d = nextSteal(0.50, { batches: 20, bad: BAD_BATCH_TOLERANCE + 1, worstOver: 0 }, 0.95);
+    assert(d.changed && d.steal < 0.50, "repeated bad batches should back off");
     assert(d.reason.includes("bad batch"), `reason was "${d.reason}"`);
+
+    // A single one must not, and this is the half that cost money: a live run
+    // cut alpha-ent from 94.8% to 56.9% on one batch out of 223 and left it
+    // there, while rho-construction took the same 1-in-536 and held.
+    const one = nextSteal(0.50, { batches: 20, bad: BAD_BATCH_TOLERANCE, worstOver: 0 }, 0.95);
+    assert(one.steal >= 0.50, `one bad batch cut the fraction to ${one.steal}`);
   },
 
   "it will not step up from the edge of tolerance": async () => {
@@ -1646,8 +1909,26 @@ export const tests = {
 
     // But a fault acts immediately - waiting for a quorum to react to damage
     // would mean taking the damage repeatedly first.
-    const bad = nextSteal(0.10, { batches: 1, bad: 1, worstOver: 0 }, 0.95);
+    const bad = nextSteal(0.10, { batches: 2, bad: 2, worstOver: 0 }, 0.95);
     assert(bad.changed, "a fault should not wait for a full window");
+
+    // One bad batch is not a fault, though. A stream carrying jitter near the
+    // spacer produces them, a smaller steal does not make landings punctual,
+    // and DESYNC_STRIKES consecutive ones still stop the stream outright.
+    const one = nextSteal(0.10, { batches: 200, bad: 1, worstOver: 0 }, 0.95);
+    assert(!one.changed || one.steal > 0.10, `one bad batch cut the fraction to ${one.steal}`);
+  },
+
+  "a back-off never raises the fraction": async () => {
+    const { mods } = await loadContinuous();
+    const { nextSteal } = mods["lib/plan"];
+
+    // chooseSteal hands back a one-hack-thread plan when even that is over
+    // budget, and that fraction can sit BELOW MIN_STEAL_FRACTION. Clamping to
+    // the floor then RAISES it on evidence that said to cut: a live run logged
+    // `steal 0.3% -> 0.5% (400/400 dispatches found no room)`.
+    const d = nextSteal(0.003, { attempts: 400, noRoom: 400 });
+    assert(d.steal <= 0.003, `a back-off went UP, 0.003 -> ${d.steal}`);
   },
 
   "the ceiling and the floor both hold": async () => {
@@ -1686,8 +1967,8 @@ export const tests = {
   },
 
   "a missed hack is not counted as a huge undershoot": async () => {
-    const { s, calls } = await makeStream();
-    assert(s.dispatch().dispatched, "setup");
+    const { s, calls, fire } = await makeStream();
+    fire();
     const id = calls[0].args[2];
 
     // A miss returns 0, so stolen/take - 1 is -1. Folding that into the sample
@@ -1706,19 +1987,1053 @@ export const tests = {
     assert(s.steal === 0.1, "one miss must not move the fraction");
   },
 
+  "the grow margin is derived from the fraction, so the tolerance is flat": async () => {
+    const { mods } = await loadContinuous();
+    const { growMarginFor, stealTolerance } = mods["lib/plan"];
+    const { GROW_MARGIN, GROW_MARGIN_CAP, GROW_DRIFT_TOLERANCE } = mods["config"];
+
+    // The inversion. A flat margin buys 42% of headroom at 10% steal and 0.27%
+    // at 94.7% - generous where nothing can go wrong, absent where everything
+    // can. Deriving it instead fixes the headroom and lets the cost move.
+    // Exact wherever the algebra binds: everything from ~70% up to the derived
+    // ceiling, which is the range where a batcher actually dies.
+    const ceiling = mods["lib/plan"].maxStealForDrift();
+    for (const f of [0.8, 0.9, ceiling]) {
+      assertClose(stealTolerance(f), GROW_DRIFT_TOLERANCE, 1e-9, `tolerance at ${f}`);
+    }
+    // Above it the margin cap binds and the budget is no longer delivered,
+    // which is exactly what clampSteal refuses to let happen.
+    assert(stealTolerance(0.99) < GROW_DRIFT_TOLERANCE, "the cap must bind above the ceiling");
+    // Below that the GROW_MARGIN floor binds and hands out MORE headroom than
+    // asked for. Never less, at any fraction.
+    for (const f of [0.05, 0.3, 0.5, 0.7]) {
+      assert(stealTolerance(f) >= GROW_DRIFT_TOLERANCE - 1e-9, `headroom shrank at ${f}`);
+    }
+
+    // Cost rises with the fraction, which is the point.
+    assert(growMarginFor(0.95) > growMarginFor(0.5), "margin must rise with steal");
+    // ...but never below the flat value it replaces: at low fractions the
+    // algebra asks for ~1.002 and the threads are cheap enough not to bother.
+    assert(growMarginFor(0.05) === GROW_MARGIN, "the old constant is the floor");
+    // Above ~98% no finite grow repairs the drift, so the cap binds instead of
+    // returning something unplaceable.
+    assert(growMarginFor(0.999) === GROW_MARGIN_CAP, "the cap must bind");
+    assert(growMarginFor(0) === GROW_MARGIN && growMarginFor(1) === GROW_MARGIN, "degenerate");
+  },
+
+  "a batch repairs its own hack at the drift the-hub actually drifted by": async () => {
+    const { mods } = await loadContinuous();
+    const { growMarginFor } = mods["lib/plan"];
+    const { GROW_MARGIN } = mods["config"];
+
+    // The measured failure, reproduced as arithmetic. the-hub ran at a planned
+    // 94.7% and went from $4723.8m to $9.4m in 18 landed batches - net x0.708
+    // each. Solving `(1 - actual) * 1.05 / (1 - 0.947) = 0.708` gives an actual
+    // take of 96.4%: 1.8% of drift against 0.27% of headroom.
+    const planned = 0.947;
+    const actual = 0.964;
+    const net = (m) => (1 - actual) * m / (1 - planned);
+
+    assertClose(net(GROW_MARGIN), 0.708, 0.01, "the flat margin loses 29% a batch");
+    assert(net(growMarginFor(planned)) >= 1, `still drains: net ${net(growMarginFor(planned))}`);
+  },
+
+  "the ceiling survives the drift a live fleet actually produced": async () => {
+    const { mods } = await loadContinuous();
+    const { growMarginFor, maxStealForDrift, clampSteal } = mods["lib/plan"];
+
+    // Measured, not chosen. One run stepped all three targets down within
+    // seconds of each other - "overshoot 2.16% past the 2.00% tolerance", then
+    // 2.13% and 2.13% - so the real drift over a weaken window on that fleet is
+    // a little over 2%. A budget set at the observed value has no margin, and
+    // at 94.9% steal a 2.16% overshoot nets x0.933 per batch: with 1061 batches
+    // in flight the targets read $0.1m of $17482.0m before the controller's
+    // correction reached a single landing.
+    const drift = 0.0216;
+    const p = clampSteal(0.99);
+    const net = (1 - p * (1 + drift)) * growMarginFor(p) / (1 - p);
+    assert(net >= 1, `the ceiling still drains at the measured drift: net ${net}`);
+
+    // The old pairing did not, which is what the run demonstrated.
+    const old = (1 - 0.949 * (1 + drift)) * growMarginFor(0.949, 0.02) / (1 - 0.949);
+    assert(old < 1, `fixture wrong - the 2% budget should lose at 94.9%, got ${old}`);
+
+    // And the ceiling is not a constant anyone typed: widen the budget and it
+    // must come down, because a bigger budget costs more margin to buy.
+    assert(maxStealForDrift(0.10) < maxStealForDrift(0.02), "a wider budget must lower the ceiling");
+  },
+
+  "grow is priced at the security it will meet, not the one we hope for": async () => {
+    const { mods } = await loadContinuous();
+    const { planThreadsForHack } = mods["lib/plan"];
+
+    const seen = [];
+    const math = {
+      weakenPerThread: () => 0.05,
+      securityPerHackThread: () => 0.002,
+      securityPerGrowThread: () => 0.004,
+      coreBonusFor: () => 1,
+      growThreadsToRestore: (snap, from, to, atSecurity) => { seen.push(atSecurity); return 100; },
+    };
+
+    // A live run measured alpha-ent at 24.54 against a 17.00 minimum, with a
+    // weaken window 45% longer than the one it was ranked on. Pricing grow at
+    // the minimum there under-restores by whatever the gap is worth, and at a
+    // high fraction that compounds within one window.
+    planThreadsForHack(math, { maxMoney: 1e9, minSec: 17, sec: 24.54 }, 10, 0.01);
+    assert(seen[0] === 24.54, `priced at ${seen[0]}, not the security it will meet`);
+
+    // Never BELOW the minimum, which is where a healthy stream sits and what
+    // the analyze backend would answer anyway.
+    planThreadsForHack(math, { maxMoney: 1e9, minSec: 17, sec: 3 }, 10, 0.01);
+    assert(seen[1] === 17, `priced at ${seen[1]}, below the floor prep holds`);
+  },
+
+  "the money floor still means something at the top of the range": async () => {
+    const { mods } = await loadContinuous();
+    const { baselineDrift } = mods["lib/plan"];
+    const { MONEY_FLOOR_BATCHES } = mods["config"];
+
+    const snap = (frac) => ({ maxMoney: 1e9, money: frac * 1e9, minSec: 10, sec: 10 });
+    const th = (steal) => ({ actualSteal: steal, hackSec: 0.1, growSec: 0.2 });
+
+    // `(1-s)^2` is 0.28% of max at 94.7%, so a target could lose 99.7% of its
+    // money and pass. A live run reported OFF BASELINE at $9.4m of $4723.8m for
+    // exactly that reason.
+    const old = Math.pow(1 - 0.947, MONEY_FLOOR_BATCHES);
+    assert(old < 0.01, "fixture assumes the power really is that permissive");
+    assert(baselineDrift(snap(0.01), th(0.947)).moneyOff, "1% of max must read as drained");
+
+    // Below ~50% the power is the tighter of the two and stays in charge.
+    assertClose(baselineDrift(snap(0.5), th(0.10)).moneyFloor, 0.81e9, 1e-6, "10% steal");
+    assert(!baselineDrift(snap(0.9), th(0.10)).moneyOff, "a healthy low-steal dip is not a drain");
+  },
+
+  "a stream whose drift is steady climbs back toward its ceiling": async () => {
+    const { mods } = await loadContinuous();
+    const { nextSteal, stealTolerance } = mods["lib/plan"];
+    const { DRIFT_SAFETY } = mods["config"];
+
+    // The steady state, by construction: the budget is DRIFT_SAFETY times the
+    // worst drift seen and the margin is derived from the budget, so a target
+    // behaving exactly as measured sits at 1/DRIFT_SAFETY of its own tolerance -
+    // 0.667 - whatever the fraction and however clean the batches are.
+    // 70%, not 30%: below ~44% the flat GROW_MARGIN floor dominates the derived
+    // margin, so the tolerance is the same whatever drift is passed and the test
+    // would pass without nextSteal honouring it at all.
+    const drift = 0.09;
+    const tol = stealTolerance(0.70, null, drift);
+    const steady = tol / DRIFT_SAFETY;
+
+    const d = nextSteal(0.70, { batches: 40, bad: 0, worstOver: steady }, 0.87, { drift });
+
+    // A threshold below 0.667 does not mean "climb when comfortable", it means
+    // "never climb". A live run held phantasy at 30.4% under an 87% ceiling and
+    // iron-gym at 28.0% under 66% for a whole run, with bad 0 and hit 98%.
+    assert(d.changed && d.steal > 0.70, `stuck at 70%: ${d.reason}`);
+    assert(d.steal <= 0.87, `climbed past its ceiling to ${d.steal}`);
+  },
+
+  "drift is predicted from hack effectiveness, not inferred from money": async () => {
+    const t = {
+      moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+      hackPercentPerThread: 0.003, growBase: 1.0018,
+      weakenTime: 20000, growTime: 16000, hackTime: 5000,
+    };
+    const { s, mods } = await makeStream({ servers: { t } });
+    const { GROW_DRIFT_TOLERANCE, DRIFT_SAFETY } = mods["config"];
+
+    const now = Date.now();
+    s.dispatch(now);
+
+    // Hack effectiveness rises 6% over one weaken window. That IS the drift: a
+    // batch dispatched at the start of the window lands into this.
+    t.hackPercentPerThread = 0.003 * 1.06;
+    s.dispatch(now + 21000);
+
+    // The report-based estimator cannot see this. `over` is stolen/take - 1, so
+    // it only reveals drift while the target is FULL, and it is a decayed max of
+    // a bursty series - hacking level rises in steps. A live run climbed three
+    // targets to 94.7-95.0% on "worst overshoot 0.20% of a 0.50% tolerance" and
+    // then took overshoots of 6.23% and 9.16%. All three drained to under 1%.
+    assert(
+      s.drift > GROW_DRIFT_TOLERANCE + 1e-9,
+      `budget ignored a 6% trend: ${(s.drift * 100).toFixed(2)}%`,
+    );
+    assertClose(s.drift, 0.06 * DRIFT_SAFETY, 2e-3, "budget should be the trend times the safety factor");
+  },
+
+  "the drift budget cannot grow to excuse itself": async () => {
+    const { s, calls, fire, mods } = await makeStream();
+    const { MAX_DRIFT_TOLERANCE } = mods["config"];
+
+    fire();
+    const id = calls[calls.length - 1].args[2];
+    const take = s.stats.lastThreads.take;
+    for (const c of calls) {
+      s.credit({
+        b: id, op: c.args[5], t: c.threads,
+        p: Number(c.args[4]), a: Number(c.args[4]),
+        r: c.args[5] === "H" ? take * 2 : 1,
+      });
+    }
+    s.retire();
+
+    // 100% overshoot. Unbounded, that becomes a 150% drift budget, and since the
+    // grow margin is derived from the budget the tolerance widens to cover it -
+    // so the back-off that would catch the NEXT one can never fire. The
+    // measurement grows to excuse the thing it exists to detect.
+    assert(
+      s.drift <= MAX_DRIFT_TOLERANCE + 1e-9,
+      `budget ran away to ${(s.drift * 100).toFixed(0)}%`,
+    );
+  },
+
+  "backing off does not wait out the hold, climbing does": async () => {
+    const { s, calls, fire } = await makeStream();
+
+    // Credit a batch that took far more than its grow was sized to restore.
+    const overshoot = () => {
+      const id = calls[calls.length - 1].args[2];
+      const take = s.stats.lastThreads.take;
+      for (const c of calls) {
+        s.credit({
+          b: id, op: c.args[5], t: c.threads,
+          p: Number(c.args[4]), a: Number(c.args[4]),
+          r: c.args[5] === "H" ? take * 2 : 1,
+        });
+      }
+      calls.length = 0;
+      s.retire();
+    };
+
+    fire();
+    overshoot();
+    const first = s.steal;
+    assert(first < 0.1, `first overshoot did not back off: ${first}`);
+
+    // The hold is now set. A CLIMB would have to wait it out - but the evidence
+    // that a fraction is too high is conclusive the moment it arrives, and
+    // every cadence spent waiting lands another oversized batch. A 94.7% target
+    // drained in 18 batches while the controller sat out ~528 of them.
+    fire();
+    overshoot();
+    assert(s.steal < first, `second overshoot waited for the hold: ${s.steal}`);
+  },
+
+  "evidence from the old fraction cannot re-trigger a step": async () => {
+    const { s, calls, fire } = await makeStream();
+
+    // Two batches planned at 0.1, in flight together.
+    fire();
+    const a = [...calls];
+    calls.length = 0;
+    fire();
+    const b = [...calls];
+
+    const take = s.stats.lastThreads.take;
+    const creditAll = (list) => {
+      const id = list[0].args[2];
+      for (const c of list) {
+        s.credit({
+          b: id, op: c.args[5], t: c.threads,
+          p: Number(c.args[4]), a: Number(c.args[4]),
+          r: c.args[5] === "H" ? take * 2 : 1,
+        });
+      }
+      s.retire();
+    };
+
+    creditAll(a);
+    const after = s.steal;
+    assert(after < 0.1, "the first batch should have backed it off");
+
+    // B was PLANNED at 0.1 and says nothing about the fraction now in force.
+    // Counting it would step down again on the same fault, and at a cadence of
+    // 400ms against a weaken window, a whole window of stale reports would walk
+    // the fraction to the floor for one bad reading.
+    creditAll(b);
+    assert(s.steal === after, `stale evidence moved the fraction to ${s.steal}`);
+  },
+
+  "a snapshot alone cannot stop a stream whose hacks keep finding it full": async () => {
+    const t = {
+      moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+      hackPercentPerThread: 0.003, growBase: 1.0018,
+      weakenTime: 20000, growTime: 16000, hackTime: 5000,
+    };
+    const { s, calls, fire, mods } = await makeStream({ servers: { t } });
+    const { DESYNC_STRIKES } = mods["config"];
+
+    const creditLast = (share) => {
+      const list = [...calls];
+      calls.length = 0;
+      const id = list[0].args[2];
+      const take = s.stats.lastThreads.take;
+      for (const c of list) {
+        s.credit({
+          b: id, op: c.args[5], t: c.threads,
+          p: Number(c.args[4]), a: Number(c.args[4]),
+          r: c.args[5] === "H" ? take * share : 1,
+        });
+      }
+      s.retire();
+    };
+
+    // One batch that found the target exactly as full as it was planned for.
+    fire();
+    creditLast(1);
+    assert(s.stats.hackHits === 1, "setup: one landed hack");
+    assert(!s.drained, "a hack that found the target full is not a drain");
+
+    // Now show the dispatch gate a target that reads empty. The snapshot is
+    // taken at whatever point of the cycle dispatch happens to fall on, and
+    // dispatch is paced at exactly the batch cadence - so it reads the SAME
+    // point every time, and at a high fraction that point is often the
+    // post-hack dip. Three consecutive readings used to stop the stream.
+    t.moneyAvailable = 1e6;
+    for (let i = 0; i < DESYNC_STRIKES + 2; i++) s.dispatch();
+    assert(!s.stopped, `a snapshot stopped a healthy stream: ${s.stopped}`);
+
+    // The reports are the honest measurement: `over` is taken at the instant a
+    // hack landed, which is the only moment the balance has to be right. Once
+    // THEY say the target was not full, the snapshot is corroborated and the
+    // stream stops for re-prep as it always did.
+    t.moneyAvailable = 1e9;
+    fire();
+    creditLast(0.05);
+    assert(s.lastUnder < -0.25, `setup: expected a drained reading, got ${s.lastUnder}`);
+    // The same verdict the RANKING reads, so a live stream is priced on its
+    // reports rather than on whenever a rescan happened to look at it.
+    assert(s.drained, "the reports say drained; the getter must agree");
+
+    t.moneyAvailable = 1e6;
+    for (let i = 0; i < DESYNC_STRIKES; i++) s.dispatch();
+    assert(s.stopped === "off baseline", `a corroborated drain must stop: ${s.stopped}`);
+  },
+
+  // ---------------------------------------------------- steal calculator ---
+
+  "the held-time RAM model reduces to the old depth x gb under all-at-once": async () => {
+    const { mods } = await loadContinuous();
+    const { avgConcurrentRam, heldAllAtOnce, batchRam } = mods["lib/plan"];
+    const { CADENCE_MS } = mods["config"];
+
+    const threads = { hack: 28, weaken1: 2, grow: 107 };
+    const ram = { hack: 1.7, grow: 1.75, weaken: 1.75 };
+    const times = { hack: 5000, grow: 16000, weaken: 20000 };
+    const w2 = 5;
+
+    // This equivalence is the whole reason the calculator can be written now
+    // and reused unchanged by the JIT dispatcher: under all-at-once every op is
+    // held ~W, so ramSeconds/cadence collapses to the figure admission has
+    // always used. Phase 3 changes the model by passing different held times,
+    // not by rewriting anything.
+    const depth = times.weaken / CADENCE_MS;
+    const old = batchRam(threads, ram, w2) * depth;
+    const got = avgConcurrentRam(threads, ram, heldAllAtOnce(times, 0), w2, CADENCE_MS);
+
+    assertClose(got, old, 1e-6, "held-time model disagrees with depth x gb");
+  },
+
+  "JIT held times cost less than all-at-once ones": async () => {
+    const { mods } = await loadContinuous();
+    const { heldAllAtOnce, batchRamSeconds } = mods["lib/plan"];
+
+    const times = { hack: 5000, grow: 16000, weaken: 20000 };
+    const held = heldAllAtOnce(times, 100);
+    assert(held.H > times.weaken * 0.9, "all-at-once holds hack nearly the whole window");
+
+    // Each op held for its own duration - the arithmetic behind the ~27%.
+    const jit = { H: times.hack, W1: times.weaken, G: times.grow, W2: times.weaken };
+    const threads = { hack: 28, weaken1: 2, grow: 107 };
+    const ram = { hack: 1.7, grow: 1.75, weaken: 1.75 };
+
+    const now = batchRamSeconds(threads, ram, held, 5);
+    const then = batchRamSeconds(threads, ram, jit, 5);
+    assert(then < now, "JIT held times must cost less");
+    assert(then / now < 0.8 && then / now > 0.6, `expected ~0.7x, got ${(then / now).toFixed(3)}`);
+  },
+
+  "an unconstrained pool calculates the ceiling fraction": async () => {
+    const { ns, math, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 1048576 },
+      servers: {
+        rich: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+                hackPercentPerThread: 0.003, growBase: 1.0018,
+                weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+    const { chooseSteal, maxStealForDrift } = mods["lib/plan"];
+    const { MAX_STEAL_FRACTION } = mods["config"];
+
+    // Income is LINEAR in steal with no interior optimum, so with RAM to spare
+    // the answer is simply the ceiling. Less would mean the search stops early.
+    //
+    // The ceiling is the DERIVED one, not MAX_STEAL_FRACTION: RAM has nothing
+    // to say about whether a fraction can repair itself, and a calculator that
+    // answered the RAM question alone handed streams 94.3% with a drift budget
+    // that could not cover them.
+    const ceiling = Math.min(MAX_STEAL_FRACTION, maxStealForDrift());
+    const got = chooseSteal(math, math.snapshot(ns, "rich"), ram, 1e9);
+    assert(got.fits, "should fit on an effectively infinite budget");
+    assert(got.capped, "should report that it hit the ceiling");
+    assertClose(got.steal, ceiling, 0.01, "should land at the ceiling");
+  },
+
+  "a tight budget slows the pace instead of shrinking the bite": async () => {
+    const { ns, math, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018,
+             weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+    const { chooseSteal, planThreadsForHack, batchRamSeconds, heldAllAtOnce, weaken2For } =
+      mods["lib/plan"];
+    const { CADENCE_MS } = mods["config"];
+
+    const snap = math.snapshot(ns, "t");
+    const perThread = math.hackFractionPerThread(snap);
+    const held = heldAllAtOnce(math.opTimes(snap));
+    const budget = 20000;
+    const got = chooseSteal(math, snap, ram, budget);
+
+    // Shrinking the bite cannot fix a DEPTH problem - the floor of a batch is
+    // one hack thread plus the weakens that cancel it, and a whole pipeline of
+    // those still does not fit. A live run duly settled on 0.3% steal, 38x over
+    // budget, and earned $0.14m/s while refusing 816 dispatches to land 3.
+    assert(got.cadence > CADENCE_MS, `stayed at the configured pace: ${got.cadence}ms`);
+    assert(!got.fits, "a budget this tight cannot run at the configured pace");
+    assertClose(got.gb, budget, budget * 1e-6, "the pace must spend the budget, not exceed it");
+    assert(
+      got.steal > perThread * 10,
+      `collapsed to the thread floor: ${(got.steal * 100).toFixed(2)}%`,
+    );
+
+    // And it must be the highest-INCOME pace, which is the whole objective now.
+    // Both ends of the range are worse: one thread wastes the budget on batch
+    // overhead, the ceiling spends it all on grow threads that scale as
+    // ln(1/(1-steal)) while income only scales linearly.
+    const incomeAt = (hack) => {
+      const th = planThreadsForHack(math, snap, hack, perThread);
+      const ramSeconds = batchRamSeconds(th, ram, held, weaken2For(math, th.grow));
+      return th.take / Math.max(CADENCE_MS, ramSeconds / budget);
+    };
+    const ceiling = Math.floor(0.943 / perThread);
+    assert(got.income >= incomeAt(1), "one thread earns more than the chosen plan");
+    assert(got.income >= incomeAt(ceiling), "the ceiling earns more than the chosen plan");
+  },
+
+  "the cost function is monotonic, which is what makes the search valid": async () => {
+    const { ns, math, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018,
+             weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+    const { planThreadsForHack, avgConcurrentRam, heldAllAtOnce, weaken2For } = mods["lib/plan"];
+
+    // A binary search over a non-monotonic cost returns a wrong answer SILENTLY
+    // rather than failing, so assert it directly instead of trusting the
+    // reasoning about growThreadsToRestore.
+    const snap = math.snapshot(ns, "t");
+    const perThread = math.hackFractionPerThread(snap);
+    const held = heldAllAtOnce(math.opTimes(snap));
+
+    let prev = 0;
+    for (let h = 1; h <= 200; h += 7) {
+      const th = planThreadsForHack(math, snap, h, perThread);
+      const gb = avgConcurrentRam(th, ram, held, weaken2For(math, th.grow));
+      assert(gb > prev, `cost fell from ${prev.toFixed(1)} to ${gb.toFixed(1)} at ${h} threads`);
+      prev = gb;
+    }
+  },
+
+  "a larger budget never yields a smaller fraction": async () => {
+    const { ns, math, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018,
+             weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+    const { chooseSteal } = mods["lib/plan"];
+
+    const snap = math.snapshot(ns, "t");
+    let last = 0;
+    for (const budget of [500, 2000, 8000, 32000, 128000, 1e9]) {
+      const got = chooseSteal(math, snap, ram, budget);
+      assert(got !== null, `no answer at budget ${budget}`);
+      assert(got.steal >= last - 1e-9, `budget ${budget} gave LESS steal than a smaller one`);
+      last = got.steal;
+    }
+  },
+
+  "one batch must fit at once, not merely on average": async () => {
+    const { ns, math, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018,
+             weakenTime: 600000, growTime: 480000, hackTime: 150000 },
+      },
+    });
+    const { chooseSteal, batchRam } = mods["lib/plan"];
+
+    // A long weaken window means the cadence has enormous room to widen, so the
+    // MEAN occupancy can be brought inside any budget at any thread count. The
+    // mean is not what the pool has to hold: widening pushes depth down, and
+    // past depth 1 there is no overlap left to average over.
+    //
+    // A live run priced iron-gym at "0.46TB of a 0.46TB slice, paced at 363.9s"
+    // and the batch behind that average was 9.29TB on a 1.6TB pool. It placed
+    // weakens and never once placed its grow - `sent 2 done 0, no room for G`.
+    // 400 GB, not a round 1000: the unbounded income optimum for this fixture
+    // is 91 threads at a 550 GB batch whatever the budget, so a budget above
+    // that would pass without the bound ever being consulted.
+    const budget = 400;
+    const got = chooseSteal(math, math.snapshot(ns, "t"), ram, budget);
+
+    assert(got.gb <= budget * (1 + 1e-9), `mean ${got.gb.toFixed(0)}GB over budget`);
+    assert(
+      got.peak <= budget * (1 + 1e-9),
+      `a ${got.peak.toFixed(0)}GB batch against a ${budget}GB budget`,
+    );
+    assertClose(
+      got.peak,
+      batchRam(got.threads, ram, got.threads.weaken2),
+      1e-6,
+      "the reported peak must be the batch it actually plans",
+    );
+    assert(got.hack >= 1 && got.income > 0, `got hack=${got.hack} income=${got.income}`);
+  },
+
+  "an absurd budget yields a slow plan, never NaN": async () => {
+    const { ns, math, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018,
+             weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+    const { chooseSteal } = mods["lib/plan"];
+
+    // A gigabyte of budget is a millionth of one batch. There is still an
+    // answer - a very slow one - and the caller must be able to tell that this
+    // is the case rather than getting null, NaN, or a plan that claims to fit.
+    const got = chooseSteal(math, math.snapshot(ns, "t"), ram, 0.001);
+    assert(got !== null, "should still return an answer");
+    assert(got.fits === false, "should report that it cannot run at the configured pace");
+    assert(Number.isFinite(got.cadence) && got.cadence > 0, `cadence ${got.cadence}`);
+    assert(Number.isFinite(got.gb) && got.gb > 0, `gb ${got.gb}`);
+    assert(Number.isFinite(got.income), `income ${got.income}`);
+  },
+
+  "a pinned fraction overrides the calculation": async () => {
+    const { ns, math, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 1048576 },
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018,
+             weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+    const { chooseSteal } = mods["lib/plan"];
+
+    // --steal exists for controlled measurement, where a self-sizing fraction
+    // is exactly what ruins the experiment.
+    const snap = math.snapshot(ns, "t");
+    const free = chooseSteal(math, snap, ram, 1e9);
+    const pinned = chooseSteal(math, snap, ram, 1e9, { pin: 0.25 });
+
+    assert(pinned.steal < free.steal, "the pin should hold it below the calculated optimum");
+    assertClose(pinned.steal, 0.25, 0.005, `pinned at ${pinned.steal}`);
+  },
+
+  "the calculated fraction is a ceiling the controller can descend from": async () => {
+    const { s, mods } = await makeStream({ steal: 0.8 });
+    const { MAX_STEAL_FRACTION } = mods["config"];
+
+    s.setBase(0.8);
+    assert(s.cap === 0.8, `cap ${s.cap}`);
+
+    // A ceiling, not an assignment. The calculator knows what the SERVER and the
+    // RAM allow; only the reports know about hacking-level drift, so a stream
+    // that has backed off must not be yanked back up by a rescan.
+    s.setBase(0.6);
+    assert(s.cap === 0.6 && s.steal <= 0.6, `lowering the base must pull steal down: ${s.steal}`);
+
+    s.setBase(0.9);
+    assert(s.cap === 0.9, "raising the base raises the ceiling");
+    assert(s.steal <= 0.6, "but must NOT yank the fraction back up");
+
+    // And the ceiling can never exceed either bound: MAX_STEAL_FRACTION, or the
+    // largest fraction whose drift budget the margin can actually buy. The
+    // second is usually the binding one, and it moves with what the stream has
+    // measured rather than being a constant anyone typed.
+    const { maxStealForDrift } = mods["lib/plan"];
+    s.setBase(5);
+    const hard = Math.min(MAX_STEAL_FRACTION, maxStealForDrift(s.drift));
+    assert(s.cap === hard, `cap escaped to ${s.cap}, wanted ${hard}`);
+    assert(s.cap < MAX_STEAL_FRACTION, "the derived ceiling should be the binding one here");
+  },
+
+  "a drained target cannot push its anchors two weaken windows out": async () => {
+    // minSec far below one batch's security churn, which is the shape a drained
+    // target takes: grow gets sized to climb back from almost nothing, so
+    // growSec dwarfs the minimum the weakens are holding it at.
+    const t = {
+      moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 0.1, hackDifficulty: 0.1,
+      hackPercentPerThread: 0.003, growBase: 1.0018,
+      weakenTime: 20000, growTime: 16000, hackTime: 5000,
+    };
+    const { s, mods } = await makeStream({
+      servers: { t }, steal: 0.94, hosts: { home: 1048576 },
+    });
+    const { MIN_LEAD_MS, MAX_ANCHOR_SWING } = mods["config"];
+
+    const before = Date.now();
+    const res = s.dispatch();
+    assert(res.dispatched, `dispatch failed: ${res.why}`);
+
+    const lead = res.anchor - before;
+    // Weaken-1 lands ON the anchor and runs a full weaken, so a full window is
+    // the floor. The swing allowance sits on top of that and used to be able to
+    // double it: at 1, and a 480s window, a live run put every new batch's
+    // deadline sixteen minutes out and froze two streams solid - `done` stuck
+    // while `sent` climbed, depth pinned at MAX_IN_FLIGHT, and free RAM rising
+    // because nothing was due to launch.
+    assert(lead >= 20000, `anchor ${lead}ms out - weaken-1 cannot reach it`);
+    assert(
+      lead <= 20000 * (1 + MAX_ANCHOR_SWING) + MIN_LEAD_MS + 100,
+      `anchor ${lead}ms out, past the ${MAX_ANCHOR_SWING} swing allowance`,
+    );
+
+    // But the LAUNCH allowance is a separate number and must stay generous.
+    // Capping both was one edit and it cost ~200 aborts per stream in a live
+    // run - "W1 missed its slot x116, G missed its slot x82" - because ops in
+    // this exact shape were judged not-yet-due and then found unreachable.
+    // Launching early is nearly free; launching late loses the batch.
+    const before2 = s.stats.aborted;
+    s.tick(Date.now() + 1e9);
+    assert(s.stats.aborted === before2, `capping the anchor must not abort ops: ${s.stats.aborted}`);
+    assert(s.depth === 1, "the batch should still be in flight, fully launched");
+  },
+
+  "the drift budget is measured per target, and the ceiling follows it": async () => {
+    const { s, calls, fire, mods } = await makeStream();
+    const { GROW_DRIFT_TOLERANCE, DRIFT_SAFETY } = mods["config"];
+
+    // A new stream has measured nothing, so it budgets the floor.
+    assertClose(s.drift, GROW_DRIFT_TOLERANCE, 1e-12, "a fresh stream budgets the floor");
+    const capBefore = s.cap;
+
+    // Now show it a window that drifted far more than the floor allows. Drift
+    // is hacking level moving between dispatch and landing, so it scales with
+    // the weaken window: one run measured 4.41% on a 266s target and 6.37% on a
+    // 473s one against a single 4.00% constant, and the long one earned $49.97b
+    // while holding a third of the RAM that the short one turned into $17.27t.
+    const over = 0.10;
+    fire();
+    const take = s.stats.lastThreads.take;
+    const id = calls[0].args[2];
+    for (const c of calls) {
+      s.credit({
+        b: id, op: c.args[5], t: c.threads,
+        p: Number(c.args[4]), a: Number(c.args[4]),
+        r: c.args[5] === "H" ? take * (1 + over) : 1,
+      });
+    }
+    s.retire();
+
+    assertClose(s.drift, over * DRIFT_SAFETY, 1e-9, "the budget must follow the measurement");
+    assert(s.cap < capBefore, `a wider budget must lower the ceiling: ${s.cap} vs ${capBefore}`);
+    assert(s.steal <= s.cap, "and the fraction must be pulled under it");
+  },
+
+  "a drain is measured from every hack, not only the ones the controller owns": async () => {
+    const { s, calls, fire } = await makeStream();
+
+    // Two batches in flight, both planned at the starting fraction.
+    fire();
+    const a = [...calls];
+    calls.length = 0;
+    fire();
+    const b = [...calls];
+
+    const take = s.stats.lastThreads.take;
+    const creditAll = (list, share) => {
+      const id = list[0].args[2];
+      for (const c of list) {
+        s.credit({
+          b: id, op: c.args[5], t: c.threads,
+          p: Number(c.args[4]), a: Number(c.args[4]),
+          r: c.args[5] === "H" ? take * share : 1,
+        });
+      }
+      s.retire();
+    };
+
+    // A overshoots, so the controller steps down and the evidence window is now
+    // attributed to the NEW fraction.
+    creditAll(a, 2);
+    assert(s.steal < 0.1, "setup: the overshoot should have backed it off");
+    assert(!s.drained, "setup: an overshoot is not a drain");
+
+    // B was planned at the old fraction, so it says nothing about the new one -
+    // but it says everything about the TARGET, which is empty. Gating this on
+    // the controller's attribution was a real outage: the fraction wobbles by a
+    // tenth of a percent every window, resetting the attribution, so a stream
+    // whose target had emptied never corroborated its own money check and never
+    // stopped. Two of them hacked a server at 0.05% of max for 500 batches and
+    // reported `hit 100%, bad 0` throughout, because every batch really did
+    // land in order - on nothing.
+    creditAll(b, 0.0001);
+    assert(s.drained, `a drained target must read as drained: lastUnder ${s.lastUnder}`);
+  },
+
+  "a proven stream is priced at its own drift budget, not the default": async () => {
+    const { ns, math, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 1048576 },
+      servers: {
+        rich: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+                hackPercentPerThread: 0.003, growBase: 1.0018,
+                weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+    const { priceTargets } = mods["core"];
+
+    const ranked = [{ host: "rich", chance: 1 }];
+    const live = new Set(["rich"]);
+    const price = (drifts) =>
+      priceTargets(ns, math, ram, 0.1, ranked, live, new Map(), Infinity, null, new Set(), drifts);
+
+    // The calculator hands the stream its BASE, and the stream's own ceiling can
+    // never exceed it. So pricing every target at the conservative pre-evidence
+    // default pins a target that has proved itself steady - a live run held
+    // alpha-ent and rho-construction at 91.7% for a whole run while they were
+    // measuring 0.22% and 0.42% of drift.
+    const byDefault = price(new Map());
+    const byEvidence = price(new Map([["rich", 0.005]]));
+
+    assert(
+      byEvidence[0].fit.steal > byDefault[0].fit.steal,
+      `evidence must raise the base: ${byEvidence[0].fit.steal} vs ${byDefault[0].fit.steal}`,
+    );
+  },
+
+  "a target that measures LESS drift than the default is let up, not held down": async () => {
+    const { s, calls, fire, mods } = await makeStream();
+    const { GROW_DRIFT_TOLERANCE, MAX_STEAL_FRACTION } = mods["config"];
+    const { maxStealForDrift } = mods["lib/plan"];
+
+    s.setBase(MAX_STEAL_FRACTION);
+    const capBefore = s.cap;
+    assertClose(capBefore, maxStealForDrift(GROW_DRIFT_TOLERANCE), 1e-9, "pre-evidence ceiling");
+
+    // Measured drift differs by an order of magnitude between targets in one
+    // run - 0.34% on alpha-ent against 4.50% on nova-med - so the constant can
+    // only be the PRE-EVIDENCE default. Holding a target that has proved itself
+    // steady at a budget sized for the worst one costs income for nothing.
+    fire();
+    const take = s.stats.lastThreads.take;
+    const id = calls[0].args[2];
+    for (const c of calls) {
+      s.credit({
+        b: id, op: c.args[5], t: c.threads,
+        p: Number(c.args[4]), a: Number(c.args[4]),
+        r: c.args[5] === "H" ? take * 1.001 : 1,
+      });
+    }
+    s.retire();
+
+    assert(s.drift < GROW_DRIFT_TOLERANCE, `budget stuck at the default: ${s.drift}`);
+    assert(s.cap > capBefore, `a proven target must be let up: ${s.cap} vs ${capBefore}`);
+    assert(s.cap <= MAX_STEAL_FRACTION, "but never past the hard cap");
+  },
+
+  // --------------------------------------------------------------- JIT ----
+
+  "a dispatch places and execs nothing - only tick does": async () => {
+    const { s, calls, pool } = await makeStream();
+    const before = pool.freeRam;
+
+    const res = s.dispatch();
+    assert(res.dispatched, `dispatch failed: ${res.why}`);
+
+    // The whole change in one assertion. A dispatch used to place all four ops
+    // and exec them, so a hack thread held 1.70 GB doing nothing for nearly a
+    // whole weaken window. Now it only queues.
+    assert(calls.length === 0, `dispatch exec'd ${calls.length} workers`);
+    assertClose(pool.freeRam, before, 1e-9, "dispatch must reserve nothing");
+    assert(s.depth === 1, "the batch is in flight even though nothing has launched");
+  },
+
+  "the late ops wait; only the ones actually due go out": async () => {
+    const { s, calls, mods } = await makeStream();
+    const { LAUNCH_LEAD_MS, MIN_LEAD_MS } = mods["config"];
+    s.dispatch();
+
+    s.tick(Date.now());
+
+    // Weaken-1 is due at A - W, and the anchor sits at now + W + MIN_LEAD_MS -
+    // so it is due within MIN_LEAD_MS. With LAUNCH_LEAD_MS larger than that it
+    // is inside the lead window immediately and goes out at once, which is
+    // exactly what the all-at-once dispatcher did with it too (delay 0, land A).
+    assert(LAUNCH_LEAD_MS > MIN_LEAD_MS, "fixture assumes the lead exceeds the anchor cushion");
+    // Both weakens are due immediately - they run for a full W, so they have to
+    // start a full W before they land, and the anchor is only MIN_LEAD_MS
+    // further out than that. The all-at-once dispatcher launched them at the
+    // same moment for the same reason.
+    for (const c of calls) {
+      assert(c.args[5] === "W1" || c.args[5] === "W2", `${c.args[5]} should not be due yet`);
+    }
+
+    // The ones that matter are still waiting: hack is due 0.75W later, and
+    // launching it now is the whole thing JIT exists to avoid.
+    assert(!calls.some((c) => c.args[5] === "H"), "hack must not launch at dispatch");
+    assert(!calls.some((c) => c.args[5] === "G"), "grow must not launch at dispatch");
+
+    s.tick(Date.now() + 1e9);
+    assert(calls.length >= 4, `expected all four ops, got ${calls.length}`);
+  },
+
+  "every launched op gets a non-negative additionalMsec": async () => {
+    const { calls, fire } = await makeStream();
+    fire(3);
+
+    // The game THROWS on a negative additionalMsec (NetscriptHelpers.tsx:363),
+    // so this is a crash, not a mistiming.
+    for (const c of calls) {
+      const delay = Number(c.args[1]);
+      assert(Number.isFinite(delay) && delay >= 0, `${c.args[5]} got delay ${delay}`);
+    }
+  },
+
+  "RAM is held for each op's own duration, not the whole window": async () => {
+    const { s, calls, mods, fire } = await makeStream();
+    const { batchRamSeconds, heldAllAtOnce } = mods["lib/plan"];
+
+    fire();
+    const th = s.stats.lastThreads;
+    const ram = { hack: 1.7, grow: 1.75, weaken: 1.75 };
+    const times = { hack: 5000, grow: 16000, weaken: 20000 };
+
+    // What the ops were actually launched with, read back off the exec calls:
+    // land - delay - now is each op's measured duration, and that is how long
+    // it holds its RAM.
+    const jitHeld = { H: times.hack, W1: times.weaken, G: times.grow, W2: times.weaken };
+    const jit = batchRamSeconds(th, ram, jitHeld, th.weaken2);
+    const allAtOnce = batchRamSeconds(th, ram, heldAllAtOnce(times), th.weaken2);
+
+    assert(jit < allAtOnce, "JIT must hold less RAM-time than all-at-once");
+    // Hack is the big multiple (4x) but the small share; grow dominates and only
+    // saves 20% of its own time. Hence ~27% rather than something dramatic.
+    const saved = 1 - jit / allAtOnce;
+    assert(saved > 0.15 && saved < 0.45, `saving ${(saved * 100).toFixed(1)}% is off the model`);
+    assert(calls.length >= 4, "sanity: the batch did launch");
+  },
+
+  "an op that misses its slot aborts the batch instead of landing late": async () => {
+    const { s, calls, mods } = await makeStream();
+    const { SPACER_MS } = mods["config"];
+
+    s.dispatch();
+    // Launch W1 and W2 normally, then jump the clock so grow can no longer
+    // reach its landing. Launching it anyway would put it somewhere in the
+    // sequence nobody chose.
+    s.tick(Date.now() + 1e9);
+    const launched = calls.map((c) => c.args[5]);
+
+    assert(SPACER_MS > 0, "sanity");
+    // With everything due at once the batch completes normally; the abort path
+    // is exercised by the placement and exec tests. What matters here is that
+    // no op was launched with a delay that would land it out of order.
+    const landOf = (op) => Number(calls.find((c) => c.args[5] === op).args[4]);
+    assert(landOf("H") < landOf("W1"), `H must land before W1: ${launched.join(",")}`);
+    assert(landOf("W1") < landOf("G"), "W1 must land before G");
+    assert(landOf("G") < landOf("W2"), "G must land before W2");
+  },
+
+  "a slightly late op launches anyway instead of abandoning the batch": async () => {
+    const { s, calls, mods } = await makeStream();
+    const { LATE_TOLERANCE_MS, SPACER_MS } = mods["config"];
+
+    // The tolerance has to leave a clear margin against reordering, since the
+    // ops of a batch are one spacer apart.
+    assert(LATE_TOLERANCE_MS > 0, "a zero tolerance aborts on any drift at all");
+    assert(LATE_TOLERANCE_MS < SPACER_MS, "tolerating a whole spacer could reorder ops");
+
+    s.dispatch();
+    s.tick(Date.now() + 1e9);
+
+    // Every op launched; nothing was abandoned for being a few ms behind. The
+    // strict check this replaces abandoned 1450 of 1826 batches in a live run,
+    // because the due-ness scan reads a cached op time and hackTime moves with
+    // security.
+    assert(s.stats.aborted === 0, `aborted ${s.stats.aborted}: ${JSON.stringify(s.stats.abortReasons)}`);
+    assert(calls.length >= 4, `only ${calls.length} ops launched`);
+  },
+
+  "an op that is late beyond tolerance still aborts": async () => {
+    const { ns, math, pool, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018,
+             weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+
+    // Tolerating lateness must not become tolerating anything. Past the
+    // threshold an op lands out of sequence, and a batch whose grow lands
+    // before its hack is the case that actually loses money.
+    let slow = false;
+    const drifting = {
+      ...math,
+      // Op times balloon after the batch is planned - which is the real hazard
+      // in miniature: security rises, durations grow, and an op that looked
+      // reachable at plan time no longer is.
+      opTimes: (snap) => (slow
+        ? { hack: 1e7, grow: 1e7, weaken: 1e7 }
+        : math.opTimes(snap)),
+    };
+
+    const calls = [];
+    ns.exec = (file, host, threads, ...args) => {
+      calls.push({ file, host, threads, args });
+      return calls.length;
+    };
+
+    const s = mods["lib/stream"].createStream(ns, drifting, {
+      host: "t", pool, ram, steal: 0.1, log: () => {},
+    });
+
+    s.dispatch();
+    slow = true;
+    s.tick(Date.now() + 1e9);
+
+    assert(s.stats.aborted === 1, `expected an abort, got ${s.stats.aborted}`);
+    assert(!calls.some((c) => c.args[5] === "H"), "hack must not launch after an abort");
+    const reasons = Object.keys(s.stats.abortReasons).join(",");
+    assert(reasons.includes("missed its slot"), `abort reason was "${reasons}"`);
+  },
+
+  "an op time that stretches with security does not abandon the batch": async () => {
+    const { ns, math, pool, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018,
+             weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+
+    // The real failure, in miniature. A streaming target sits at minimum
+    // security only about half the time; the rest of the time it carries one
+    // batch's uncancelled hack or grow, and op times stretch with it. An op
+    // scheduled against the relaxed figure is already late when it starts.
+    //
+    // A live run abandoned 59% of one target's grows this way - 177 of ~300 -
+    // because a fixed lead cannot cover a swing that scales with the weaken
+    // time.
+    //
+    // The allowance is (hackSec + growSec) / minSec, which for this fixture is
+    // ~8.2%. Stretching by 5% is inside it and must survive; stretching far
+    // past it must still abort, because a target whose times move more than one
+    // batch's security can account for is not behaving like the model and
+    // launching into it would land ops out of sequence.
+    let stretch = 1;
+    const stretchy = {
+      ...math,
+      opTimes: (snap) => {
+        const t = math.opTimes(snap);
+        return { hack: t.hack * stretch, grow: t.grow * stretch, weaken: t.weaken * stretch };
+      },
+    };
+
+    const calls = [];
+    ns.exec = (file, host, threads, ...args) => {
+      calls.push({ file, host, threads, args });
+      return calls.length;
+    };
+
+    const s = mods["lib/stream"].createStream(ns, stretchy, {
+      host: "t", pool, ram, steal: 0.1, log: () => {},
+    });
+
+    s.dispatch();
+    stretch = 1.05;
+    s.tick(Date.now() + 1e9);
+
+    assert(
+      s.stats.aborted === 0,
+      `aborted ${s.stats.aborted}: ${JSON.stringify(s.stats.abortReasons)}`,
+    );
+    assert(calls.some((c) => c.args[5] === "G"), "grow should still have launched");
+    assert(calls.some((c) => c.args[5] === "H"), "and so should hack");
+
+    // Beyond the allowance it still aborts - the tolerance is derived, not a
+    // blanket excuse for any drift at all.
+    stretch = 1;
+    s.dispatch();
+    stretch = 3;
+    s.tick(Date.now() + 1e9);
+    assert(s.stats.aborted > 0, "a swing far past the model must still abort");
+  },
+
+  "a stopped stream discards its queued ops": async () => {
+    const { s, calls, mods } = await makeStream({
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e6, minDifficulty: 5, hackDifficulty: 40,
+             hackPercentPerThread: 0.003, growBase: 1.0018,
+             weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+    const { DESYNC_STRIKES } = mods["config"];
+
+    // Get one batch queued against a healthy read, then drive it off baseline.
+    for (let i = 0; i < DESYNC_STRIKES + 1; i++) s.dispatch();
+    assert(s.stopped, "the fixture should stop the stream");
+
+    s.tick(Date.now() + 1e9);
+    // Firing queued hacks into a target already known to be wrong is exactly
+    // what stopping is for.
+    assert(!calls.some((c) => c.args[5] === "H"), "a stopped stream launched a hack");
+  },
+
+  "a wound-down stream still launches the batches it already planned": async () => {
+    const { s, calls } = await makeStream();
+
+    s.dispatch();
+    s.windDown();
+    s.tick(Date.now() + 1e9);
+
+    // Unlike a stopped stream, these batches are part-paid for - the target is
+    // fine, it is just being handed over. Finishing them earns their money.
+    assert(calls.length >= 4, `a draining stream should finish its batch, launched ${calls.length}`);
+    assert(calls.some((c) => c.args[5] === "H"), "including its hack");
+  },
+
   // ----------------------------------------------------------- intrusion ---
 
   "a hack landing inside another batch's restore is an intrusion": async () => {
-    const { s, calls } = await makeStream();
+    const { s, calls, fire } = await makeStream();
 
     // Two batches in flight. Batch A hacks, and before A's grow lands, B hacks
     // the same server - so A's grow was sized against money B has just taken,
     // and A under-refills. Every op of BOTH batches landed in perfect order, so
     // the per-batch verdict cannot see this at all.
-    assert(s.dispatch().dispatched, "batch A");
+    fire();
     const a = calls[0].args[2];
     calls.length = 0;
-    assert(s.dispatch().dispatched, "batch B");
+    fire();
     const b = calls[0].args[2];
     assert(a !== b, "the two batches need distinct ids");
 
@@ -1728,12 +3043,12 @@ export const tests = {
   },
 
   "the normal cadence produces no intrusions": async () => {
-    const { s, calls } = await makeStream();
+    const { s, calls, fire } = await makeStream();
 
-    assert(s.dispatch().dispatched, "batch A");
+    fire();
     const a = calls[0].args[2];
     calls.length = 0;
-    assert(s.dispatch().dispatched, "batch B");
+    fire();
     const b = calls[0].args[2];
 
     // A batch is mid-restore for two spacers (200ms); batches are one cadence
@@ -1748,13 +3063,13 @@ export const tests = {
   },
 
   "an intruded batch is judged bad even though its own ops were in order": async () => {
-    const { s, calls } = await makeStream();
+    const { s, calls, fire } = await makeStream();
 
-    assert(s.dispatch().dispatched, "batch A");
+    fire();
     const a = calls[0].args[2];
     const aCalls = [...calls];
     calls.length = 0;
-    assert(s.dispatch().dispatched, "batch B");
+    fire();
     const b = calls[0].args[2];
 
     // A's own four ops land in perfect order at zero drift...
@@ -1778,29 +3093,42 @@ export const tests = {
     const { mods } = await loadContinuous();
     const { admitTargets } = mods["core"];
 
+    const { CADENCE_MS } = mods["config"];
+
     const t = (host, gb, weaken) => ({ host, gb, times: { weaken } });
     const priced = [t("a", 100, 40000), t("b", 100, 40000), t("c", 100, 40000)];
 
-    // depth = ceil(40000/400) = 100, so each target wants 10000GB.
-    const { admitted, committed } = admitTargets(priced, 25000, 12);
+    // Depth is weakenTime / cadence, so every figure here moves when the spacer
+    // is tuned. Derived rather than written out: the literals were 100 and
+    // 10000GB at a 400ms cadence, and they failed the day the cadence became
+    // 320 - for no reason except that they were literals.
+    const depth = Math.ceil(40000 / CADENCE_MS);
+    const want = depth * 100;
+
+    // Budget for two and a half targets, so the third is refused on RAM.
+    const { admitted, committed } = admitTargets(priced, want * 2.5, 12);
     assert(admitted.length === 2, `expected 2 admitted, got ${admitted.length}`);
-    assert(committed === 20000, `committed ${committed}`);
-    assert(admitted[0].depth === 100 && admitted[0].want === 10000, "depth/want recorded");
+    assert(committed === want * 2, `committed ${committed}, expected ${want * 2}`);
+    assert(admitted[0].depth === depth && admitted[0].want === want, "depth/want recorded");
   },
 
   "a cheap target still gets in behind one that did not fit": async () => {
     const { mods } = await loadContinuous();
     const { admitTargets } = mods["core"];
 
+    const { CADENCE_MS } = mods["config"];
+    const depth = Math.ceil(40000 / CADENCE_MS);
+
     const priced = [
-      { host: "rich", gb: 100, times: { weaken: 40000 } },  // wants 10000
-      { host: "huge", gb: 5000, times: { weaken: 40000 } }, // wants 500000
-      { host: "cheap", gb: 10, times: { weaken: 40000 } },  // wants 1000
+      { host: "rich", gb: 100, times: { weaken: 40000 } },  // wants depth * 100
+      { host: "huge", gb: 5000, times: { weaken: 40000 } }, // wants depth * 5000
+      { host: "cheap", gb: 10, times: { weaken: 40000 } },  // wants depth * 10
     ];
 
     // `continue`, not `break`: one unaffordable entry must not end the search,
     // or a cheap target that fits comfortably in the leftovers is lost.
-    const { admitted } = admitTargets(priced, 12000, 12);
+    // Budget: rich plus a fifth, which huge cannot touch and cheap fits inside.
+    const { admitted } = admitTargets(priced, depth * 100 * 1.2, 12);
     assert(admitted.map((a) => a.host).join(",") === "rich,cheap", `got ${admitted.map((a) => a.host)}`);
   },
 
@@ -1833,8 +3161,11 @@ export const tests = {
     const { admitTargets } = mods["core"];
     const { MAX_IN_FLIGHT, CADENCE_MS } = mods["config"];
 
-    // A 6.4 minute weaken at a 400ms cadence wants 959 batches in the air.
-    const slow = { host: "slow", gb: 1, times: { weaken: 960 * CADENCE_MS } };
+    // Derived from the cap rather than hardcoded, so raising MAX_IN_FLIGHT does
+    // not silently turn this into a test of nothing. A target needing twice the
+    // cap in flight cannot be streamed continuously - it falls back into waves,
+    // and the honest fix for one that slow is a wider cadence, not a bigger cap.
+    const slow = { host: "slow", gb: 1, times: { weaken: MAX_IN_FLIGHT * 2 * CADENCE_MS } };
     const { admitted } = admitTargets([slow], Infinity, 12);
     assert(admitted[0].depth === MAX_IN_FLIGHT, `depth ${admitted[0].depth} ignored the cap`);
   },
@@ -1842,8 +3173,8 @@ export const tests = {
   // ---------------------------------------------------------- supervisor ---
 
   "a wound-down stream stops dispatching but keeps its batches": async () => {
-    const { s } = await makeStream();
-    assert(s.dispatch().dispatched, "setup");
+    const { s, fire } = await makeStream();
+    fire();
     assert(s.depth === 1, "one in flight");
 
     s.windDown();
@@ -1907,15 +3238,27 @@ export const tests = {
     });
     const { priceTargets } = mods["core"];
 
-    // The looser test must not become no test: far past what batches in flight
-    // could explain is still a drift.
-    const live = priceTargets(ns, math, ram, 0.1, [{ host: "drained", chance: 1 }], new Set(["drained"]));
+    const ranked = [{ host: "drained", chance: 1 }];
+    const streaming = new Set(["drained"]);
+
+    // A money snapshot on its own is not evidence any more, and must not be: at
+    // 95% steal a HEALTHY target reads this low for half of every cadence, and
+    // pricing on that dropped two of the three best earners in one live rescan.
+    const onSnapshot = priceTargets(ns, math, ram, 0.1, ranked, streaming);
+    assert(onSnapshot.length === 1, "a snapshot alone must not unprice a live stream");
+
+    // Corroborated by the stream's own reports, it is dropped exactly as before.
+    // The looser test must not become no test.
+    const live = priceTargets(
+      ns, math, ram, 0.1, ranked, streaming, new Map(), Infinity, null,
+      new Set(["drained"]),
+    );
     assert(live.length === 0, "a drained target must be dropped even while streaming");
   },
 
   "a re-admitted stream is reinstated, not rebuilt": async () => {
-    const { s } = await makeStream();
-    assert(s.dispatch().dispatched, "setup");
+    const { s, fire } = await makeStream();
+    fire();
     s.windDown();
     assert(!s.isDue(), "wound down");
 
@@ -1944,6 +3287,12 @@ export const tests = {
     });
 
     assert(streams.length === 1 && streams[0].host === "good", `got ${streams.map((s) => s.host)}`);
+
+    // rescan must actually hand the calculated fraction to the stream, and the
+    // stream must START there rather than climbing to it - otherwise the
+    // calculator is computing a number nothing acts on.
+    assert(streams[0].cap > 0, "the stream should have been given a calculated ceiling");
+    assertClose(streams[0].steal, streams[0].cap, 1e-9, "a new stream starts at its optimum");
   },
 
   "an unprepped target is priced on what it would be worth once prepped": async () => {
@@ -2009,6 +3358,127 @@ export const tests = {
     assert(preps.has("rich"), "the displacing candidate should be queued for prep");
   },
 
+  "ranking prefers the bigger earner, not the more RAM-efficient one": async () => {
+    const { ns, math, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        // Long weaken, huge money - the shape the raised in-flight cap made
+        // viable, and the shape money-per-GB-second punishes hardest because it
+        // divides by weaken time.
+        // Deliberately the foodnstuff shape as well as the slow one: growth so
+        // poor that its batch is enormous. That is what makes the two metrics
+        // disagree, and the honest answer with RAM to spare is still to take it.
+        big: {
+          moneyMax: 1e12, moneyAvailable: 1e12, minDifficulty: 5, hackDifficulty: 5,
+          hackPercentPerThread: 0.003, growBase: 1.0002,
+          weakenTime: 360000, growTime: 288000, hackTime: 90000,
+        },
+        // Quick and cheap per batch, but a fraction of the money.
+        quick: {
+          moneyMax: 1e10, moneyAvailable: 1e10, minDifficulty: 5, hackDifficulty: 5,
+          hackPercentPerThread: 0.003, growBase: 1.0018,
+          weakenTime: 20000, growTime: 16000, hackTime: 5000,
+        },
+      },
+    });
+    const { priceTargets } = mods["core"];
+
+    // A live run evicted alpha-ent - $8.1b/s, its best target - for one earning
+    // $2.1b/s, while 19 PB of the pool sat free. RAM efficiency is the right
+    // thing to sort on only when RAM is the constraint.
+    const priced = priceTargets(
+      ns, math, ram, 0.5, [{ host: "big", chance: 1 }, { host: "quick", chance: 1 }],
+      new Set(), new Map(), 1e9,
+    );
+
+    assert(priced.length === 2, `priced ${priced.length}`);
+    assert(priced[0].host === "big", `ranked ${priced.map((p) => p.host)} - income was ignored`);
+
+    // Non-vacuous only if the two metrics actually disagree on this fixture -
+    // otherwise the test would pass under the old ranking too. Reported rather
+    // than asserted blind, so a fixture that stops disagreeing says so.
+    const byIncome = [...priced].sort((a, b) => b.score - a.score).map((p) => p.host).join(",");
+    const byRam = [...priced].sort((a, b) => b.perGbSec - a.perGbSec).map((p) => p.host).join(",");
+    assert(
+      byIncome !== byRam,
+      `fixture no longer distinguishes the metrics: both rank ${byIncome} ` +
+        `(perGbSec big=${priced.find((p) => p.host === "big").perGbSec.toFixed(1)}, ` +
+        `quick=${priced.find((p) => p.host === "quick").perGbSec.toFixed(1)})`,
+    );
+  },
+
+  "the admission score matches what a stream actually earns at depth": async () => {
+    const { ns, math, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 1048576 },
+      servers: {
+        t: { moneyMax: 2e8, moneyAvailable: 2e8, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018,
+             weakenTime: 38000, growTime: 30400, hackTime: 9500 },
+      },
+    });
+    const { priceTargets } = mods["core"];
+    const { CADENCE_MS } = mods["config"];
+
+    // The score is income per second at full depth: one batch per cadence, each
+    // taking `steal` of max money. A live run reported $54.80m/s for a target
+    // whose own numbers showed ~$440m/s - because the report averaged over the
+    // whole run including prep and ramp - which made the score look wrong by
+    // two orders of magnitude when it was the report that was misleading.
+    const priced = priceTargets(
+      ns, math, ram, 0.5, [{ host: "t", chance: 1 }], new Set(), new Map(), 1e9,
+    );
+    assert(priced.length === 1, "should price");
+
+    const p = priced[0];
+    const perBatch = p.fit.threads.take;
+    const batchesPerSec = 1000 / CADENCE_MS;
+    assertClose(p.score, perBatch * batchesPerSec, 1e-6, "score is take x rate");
+
+    // And it is a rate a stream can really hit: at this weaken the pipeline
+    // needs 95 batches in flight, well inside MAX_IN_FLIGHT, so nothing caps it.
+    const depth = Math.ceil(38000 / CADENCE_MS);
+    assert(depth < mods["config"].MAX_IN_FLIGHT, "fixture must not be depth-capped");
+  },
+
+  "a target capped by depth is not scored as if it kept the cadence": async () => {
+    const { ns, math, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 1048576 },
+      servers: {
+        // Weaken long enough that the pipeline needs far more depth than
+        // MAX_IN_FLIGHT allows, so it lands cap/W - not one per cadence.
+        capped: {
+          moneyMax: 1e11, moneyAvailable: 1e11, minDifficulty: 5, hackDifficulty: 5,
+          hackPercentPerThread: 0.003, growBase: 1.0018,
+          weakenTime: 2400000, growTime: 1920000, hackTime: 600000,
+        },
+        // Same money, short weaken, so it genuinely keeps the cadence.
+        free: {
+          moneyMax: 1e11, moneyAvailable: 1e11, minDifficulty: 5, hackDifficulty: 5,
+          hackPercentPerThread: 0.003, growBase: 1.0018,
+          weakenTime: 20000, growTime: 16000, hackTime: 5000,
+        },
+      },
+    });
+    const { priceTargets } = mods["core"];
+    const { CADENCE_MS, MAX_IN_FLIGHT } = mods["config"];
+
+    // Identical money and hack chance, so the ONLY thing separating them is
+    // whether the depth cap lets them keep the cadence fed. Scoring both at the
+    // cadence rate would rank them equal and over-state the capped one - which
+    // on a live run was the shape of the two biggest targets.
+    const priced = priceTargets(
+      ns, math, ram, 0.5, [{ host: "capped", chance: 1 }, { host: "free", chance: 1 }],
+      new Set(), new Map(), 1e9,
+    );
+
+    assert(priced[0].host === "free", `ranked ${priced.map((p) => p.host)}`);
+
+    const ratio = priced.find((p) => p.host === "capped").score /
+      priced.find((p) => p.host === "free").score;
+    const expected = (MAX_IN_FLIGHT * 1000 / 2400000) / (1000 / CADENCE_MS);
+    assertClose(ratio, expected, 0.05, "the capped target should score at cap/W, not the cadence");
+  },
+
   "a re-created stream starts from what was learned, not the default": async () => {
     const { ns, math, pool, ram, mods } = await makeMath("analyze", {
       hosts: { home: 262144 },
@@ -2059,6 +3529,166 @@ export const tests = {
     // makes a target that is not ready today eligible tomorrow.
     assert(streams.length === 0, "an unprepped target must not be streamed");
     assert(preps.has("dirty"), "an unprepped candidate should be queued for prep");
+  },
+
+  "a host that grows is seen at the next sync": async () => {
+    const hosts = { home: 4096, a: 1024 };
+    const { pool } = await makeMath("analyze", { hosts });
+    const before = pool.usableRam;
+
+    // scripts/cloud.js upgrades purchased servers while the manager runs. The
+    // Server constructor sampled maxRam once and refresh() only ever re-read
+    // usedRam, so a live run spent ten minutes buying RAM the batcher never
+    // planned against - the slice sat at 12.73TB from first rescan to last.
+    hosts.a = 8192;
+    const grown = pool.sync();
+
+    assertClose(grown.grewGb, 7168, 1e-9, "the upgrade must be measured");
+    assertClose(pool.usableRam, before + 7168, 1e-9, "the pool must see the upgrade");
+  },
+
+  "a server bought after startup joins the pool and gets the workers": async () => {
+    const hosts = { home: 262144 };
+    const { ns, math, pool, ram, mods } = await makeMath("analyze", {
+      hosts,
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018,
+             weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+    const copied = [];
+    ns.scp = (files, host) => { copied.push(host); return true; };
+    ns.exec = () => 1;
+
+    hosts["pserv-0"] = 8192;
+    mods["core"].rescan(ns, math, {
+      pool, ram, steal: 0.1, maxTargets: 3, forced: null,
+      streams: [], preps: new Map(), log: () => {}, verbose: false,
+    });
+
+    assert(
+      pool.servers.some((s) => s.hostname === "pserv-0"),
+      "a newly bought server must join the pool",
+    );
+    // Not a tidy-up. exec returns a bare 0 for a script that is not on the host,
+    // which is the same value it returns for one the host refused - so a server
+    // without the workers reads as a RAM problem for ever.
+    assert(copied.includes("pserv-0"), "the workers must be deployed to it");
+  },
+
+  "the target count is chosen by income, not by how many fit": async () => {
+    const rich = (moneyMax) => ({
+      moneyMax, moneyAvailable: moneyMax, minDifficulty: 5, hackDifficulty: 5,
+      hackPercentPerThread: 0.003, growBase: 1.0018,
+      weakenTime: 600000, growTime: 480000, hackTime: 150000,
+    });
+    const servers = { a: rich(1e9), b: rich(9e8), c: rich(8e8) };
+
+    const run = async (homeRam) => {
+      const { ns, math, pool, ram, mods } = await makeMath("analyze", {
+        hosts: { home: homeRam }, servers,
+      });
+      ns.exec = () => 1;
+      return mods["core"].rescan(ns, math, {
+        pool, ram, steal: 0.1, maxTargets: 3, forced: null,
+        streams: [], preps: new Map(), log: () => {}, verbose: false,
+      });
+    };
+
+    // Running the most targets that fit is only right when the budget is not
+    // the constraint. When it is, the third target does not ADD its income - it
+    // buys it with a third of the budget taken from the best one. Measured on a
+    // live 1.6 TB pool: phantasy alone $2.84m/s, three targets $1.96m/s.
+    const tight = await run(2048);
+    assert(tight.length === 1, `a tight budget should run one target, got ${tight.length}`);
+
+    // And the ramp is the same arithmetic, not a separate rule: once every
+    // target can reach its ceiling a narrower slice costs nothing, so the count
+    // rises on its own as the pool grows.
+    // 32 PB, which is not gratuitous: these targets have a ten-minute weaken, so
+    // a pipeline of them is enormous and the cadence floor only starts binding
+    // once each slice can hold the whole thing. Below that RAM is still the
+    // constraint and concentrating still wins - correctly.
+    const roomy = await run(33554432);
+    assert(roomy.length === 3, `a roomy budget should run three, got ${roomy.length}`);
+  },
+
+  "prep slots scale with the RAM the streams will not use": async () => {
+    const dirty = (moneyMax) => ({
+      moneyMax, moneyAvailable: moneyMax * 0.2, minDifficulty: 5, hackDifficulty: 40,
+      hackPercentPerThread: 0.003, growBase: 1.0018,
+      weakenTime: 20000, growTime: 16000, hackTime: 5000,
+    });
+    const candidates = {};
+    for (let i = 0; i < 6; i++) candidates[`d${i}`] = dirty(1e9 - i * 1e7);
+
+    const run = async (prepped) => {
+      const { ns, math, pool, ram, mods } = await makeMath("analyze", {
+        hosts: { home: 262144 },
+        servers: { ...candidates, live: prepped },
+      });
+      const preps = new Map();
+      mods["core"].rescan(ns, math, {
+        pool, ram, steal: 0.1, maxTargets: 3, forced: null,
+        streams: [], preps, log: () => {}, verbose: false,
+      });
+      return { preps, mods };
+    };
+
+    // A prepped target small enough to leave most of the budget unused.
+    //
+    // Its op times are stated in CADENCE_MS, not in ms. What decides the slots
+    // is how much the stream COMMITS, which is its depth - weakenTime / cadence
+    // - so a fixture with fixed ms times quietly gets a deeper pipeline every
+    // time the spacer is tightened, and stops being the small target the test
+    // needs. Five cadences of weaken is that target at any spacer.
+    const { CADENCE_MS } = (await loadContinuous()).mods["config"];
+    const { preps: wide, mods } = await run({
+      moneyMax: 1e7, moneyAvailable: 1e7, minDifficulty: 5, hackDifficulty: 5,
+      hackPercentPerThread: 0.003, growBase: 1.0018,
+      weakenTime: 5 * CADENCE_MS, growTime: 4 * CADENCE_MS, hackTime: 1.25 * CADENCE_MS,
+    });
+    const { PREP_CONCURRENCY } = mods["config"];
+    assert(
+      wide.size === PREP_CONCURRENCY,
+      `a pool with room should still fan out to ${PREP_CONCURRENCY}, got ${wide.size}`,
+    );
+
+    // Same candidates; the only difference is a stream whose pipeline wants the
+    // whole budget. Measuring FREE RAM instead would grant every slot here too,
+    // because at rescan nothing is placed yet and the pool reads 100% idle -
+    // which is the exact moment four waves took a 1.6 TB pool and kept it.
+    const { preps: narrow } = await run({
+      moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+      hackPercentPerThread: 0.003, growBase: 1.0018,
+      weakenTime: 600000, growTime: 480000, hackTime: 150000,
+    });
+    assert(narrow.size === 1, `a fully-spoken-for pool preps one at a time, got ${narrow.size}`);
+  },
+
+  "a prep that never converges releases its slot": async () => {
+    const { ns, math, pool, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        stuck: {
+          moneyMax: 1e9, moneyAvailable: 2e8, minDifficulty: 5, hackDifficulty: 40,
+          hackPercentPerThread: 0.003, growBase: 1.0018,
+          weakenTime: 20000, growTime: 16000, hackTime: 5000,
+        },
+      },
+    });
+    const { servicePreps } = mods["core"];
+    const { PREP_MAX_CYCLES } = mods["config"];
+    ns.exec = () => 1;
+
+    // prepTargets has always had this bound; the supervisor path never did, and
+    // four concurrent slots hid the omission. Serialised on a small pool, one
+    // target that cannot be brought up blocks every other prep for the run.
+    const preps = new Map([["stuck", { wave: null, deadline: 0, waves: PREP_MAX_CYCLES }]]);
+    servicePreps(ns, { math, pool, ram, streams: [], preps, log: () => {} });
+
+    assert(!preps.has("stuck"), "a prep past its wave budget must release its slot");
   },
 
   "the stream set does not shrink as the streams fill the pool": async () => {
@@ -2150,6 +3780,22 @@ export const tests = {
     assert(findRivals(ns).length === 0, "the manager reported itself as a rival");
   },
 
+  "placeable RAM is below the raw byte total, because hosts floor threads": async () => {
+    const { pool } = await makePool({ home: 100, a: 63, b: 63 });
+
+    // CLAUDE.md: never size capacity as a byte total, because every host floors
+    // its own thread count. A live run budgeted against usableRam, calculated
+    // 84.9% steal, and then failed 402 of 439 dispatches with "no room" - the
+    // bytes existed and the threads did not fit.
+    const raw = pool.usableRam;
+    const placeable = pool.placeableRam(1.75);
+
+    assert(placeable < raw, `placeable ${placeable} should be under the ${raw} byte total`);
+    // 100 -> 57 threads (99.75), 63 -> 36 (63.00 exactly), so 99.75 + 63 + 63.
+    assertClose(placeable, 99.75 + 63 + 63, 1e-9, "per-host flooring");
+    assert(pool.placeableRam(0) === 0, "a zero thread cost is not an infinite pool");
+  },
+
   "maxEffectiveThreadsFor exceeds the raw count on a multi-core pool": async () => {
     const { ns, pool } = await makePool(
       { home: 1024, mid: 512, plain: 512 },
@@ -2167,5 +3813,226 @@ export const tests = {
       0,
     );
     assertClose(eff, expected, 1e-9, "effective capacity is not the core-weighted sum");
+  },
+
+  // -------------------------------------------------------------- share -----
+
+  // scripts/sharemode.js writes the marker and broadcasts the port, and
+  // scripts/share.js peeks that port to decide whether to keep running. Neither
+  // knows which batcher is up, so the two configs are not two settings - they
+  // are one protocol read from two places. A divergence here does not fail
+  // loudly: `sharemode.js on` would launch workers that read an empty port,
+  // parse it as off, and exit a millisecond after a perfectly valid pid.
+  "the share protocol matches the shotgun's exactly": async () => {
+    const root = (await loadScripts())["config"];
+    const { mods } = await loadContinuous();
+    const cont = mods["config"];
+
+    for (const key of ["SHARE_MARKER", "SHARE_PORT", "SHARE_WORKER",
+                       "SHARE_FRACTION", "SHARE_MAX_FRACTION", "SHARE_RAM_FALLBACK"]) {
+      assert(cont[key] === root[key],
+        `${key} diverged: continuous has ${JSON.stringify(cont[key])}, ` +
+          `scripts/config.js has ${JSON.stringify(root[key])}`);
+    }
+
+    // The parser too, not just the constants - it decides whether a worker
+    // lives, and "anything unreadable means OFF" is the load-bearing half.
+    for (const text of ["", "off", "false", "on", "true", "0.4", "9", "banana", "-1"]) {
+      assert(cont.shareFractionFrom(text) === root.shareFractionFrom(text),
+        `shareFractionFrom("${text}") diverged: ${cont.shareFractionFrom(text)} ` +
+          `vs ${root.shareFractionFrom(text)}`);
+    }
+  },
+
+  // The report port is drained with read(), which REMOVES the message. Sharing
+  // a port number with the gate - which is peeked, never drained - would have
+  // the drain loop eat the setting and every worker retire.
+  "the share gate is not the report port": async () => {
+    const { mods } = await loadContinuous();
+    const { SHARE_PORT, CONT_REPORT_PORT } = mods["config"];
+    assert(SHARE_PORT !== CONT_REPORT_PORT,
+      `share gate and report port are both ${SHARE_PORT}; the drain loop would eat the setting`);
+  },
+
+  // Sized against usableRam, not freeRam, and asked for repeatedly. Under
+  // continuous this is the difference between a working toggle and a runaway:
+  // a healthy stream holds nearly the whole pool, so a freeRam-based size would
+  // read "share wants nothing" exactly when things are going well.
+  "asking for the same fraction twice adds nothing the second time": async () => {
+    const { pool, mods } = await makePool({ home: 4096, p0: 2048, p1: 2048 });
+    const { planShare } = mods["lib/share"];
+
+    const first = planShare(pool, 4, 0.25, 0);
+    assert(first.deficit === first.want, `the first ask should want the lot, got ${first.deficit}`);
+
+    const second = planShare(pool, 4, 0.25, first.want);
+    assert(second.deficit === 0,
+      `a second ask at the same fraction should want nothing, got ${second.deficit}`);
+  },
+
+  "an over-supply is never turned into a negative deficit": async () => {
+    const { pool, mods } = await makePool({ home: 1024 });
+    const { planShare } = mods["lib/share"];
+    const r = planShare(pool, 4, 0.10, 1e6);
+    assert(r.deficit === 0, `deficit should floor at 0, got ${r.deficit}`);
+  },
+
+  // The shotgun's first live run filled home to the brim and swallowed the
+  // pool's largest host. It matters more here: the steal calculator sizes
+  // against placeableRam, which floors per host, so a hole punched in one big
+  // host can drop the fraction it will commit to - not just its bytes.
+  "share is spread proportionally, not poured into the biggest host": async () => {
+    const { ns, pool, mods } = await makePool({ home: 8192, p0: 1024, p1: 1024 });
+    const { topUpShare } = mods["lib/share"];
+    ns._files["/scripts/share.js"] = "x";
+
+    const res = topUpShare(ns, pool, 4, 0.25, 0);
+    const byHost = new Map(res.placements.map((p) => [p.host, p.threads]));
+
+    for (const s of pool.servers) {
+      const quota = Math.floor((s.usableRam * 0.25) / 4);
+      const got = byHost.get(s.hostname) ?? 0;
+      // Home may carry the rounding remainder, so it is allowed to exceed its
+      // own quota - by a handful of threads, not by the pool.
+      assert(got <= quota + 8,
+        `${s.hostname} took ${got}t against a quota of ${quota}t - placement is not proportional`);
+    }
+  },
+
+  // exec returns a bare 0 for a script that is not there AND for one the host
+  // refused. The remedies are opposite - deploy vs. free RAM - so a merged
+  // bucket sends the reader the wrong way. The shotgun did that twice.
+  "a missing worker and a refused exec are reported separately": async () => {
+    const { ns, pool, mods } = await makePool({ home: 4096, p0: 2048 });
+    const { topUpShare } = mods["lib/share"];
+
+    // Nobody has the file.
+    const none = topUpShare(ns, pool, 4, 0.25, 0);
+    assert(none.noFile.length === pool.servers.length,
+      `every host should be reported as missing the worker, got ${none.noFile.length}`);
+    assert(none.refused.length === 0, "a missing file is not a refusal");
+    assert(none.launched === 0, "nothing can launch without the worker");
+
+    // Everyone has the file, and every exec is refused.
+    ns._files["/scripts/share.js"] = "x";
+    const stubborn = { ...ns, exec: () => 0 };
+    const all = topUpShare(stubborn, pool, 4, 0.25, 0);
+    assert(all.noFile.length === 0, "the file is present - this must not read as a deploy problem");
+    assert(all.refused.length > 0, "a refused exec should be recorded");
+    assert(all.refused[0].freeGb > 0,
+      "a refusal must carry what the pool believed was free - that number IS the diagnosis");
+  },
+
+  // Share workers outlive the process that started them, so a manager restart -
+  // or a swap between the two batchers - finds them still running. Without
+  // adopting them it would launch a second full set on top, doubling the RAM
+  // share holds to buy 2.77 points of a logarithm.
+  "a restarted manager adopts the running share workers": async () => {
+    const { ns, pool, mods } = await makePool({ home: 4096, p0: 2048 });
+    const { shareCensus, topUpShare } = mods["lib/share"];
+    ns._files["/scripts/share.js"] = "x";
+
+    topUpShare(ns, pool, 4, 0.25, 0);
+    const census = shareCensus(ns, pool.servers.map((s) => s.hostname));
+    assert(census.threads > 0, "the first top-up should have launched something");
+
+    const again = topUpShare(ns, pool, 4, 0.25, census.threads, census.byHost);
+    assert(again.launched === 0,
+      `a second top-up launched ${again.launched}t on top of ${census.threads}t already running`);
+  },
+
+  // A reservation is released at the end of a cycle; a share worker is not. It
+  // runs until the port says stop, and the game already reports its RAM as used
+  // - so a reservation would have refresh() subtract the same bytes twice.
+  "the share top-up leaves no reservation behind": async () => {
+    const { ns, pool, mods } = await makePool({ home: 4096, p0: 2048 });
+    const { topUpShare } = mods["lib/share"];
+    ns._files["/scripts/share.js"] = "x";
+
+    topUpShare(ns, pool, 4, 0.25, 0);
+    for (const s of pool.servers) {
+      assert(!(s.pending > 0),
+        `${s.hostname} holds a ${s.pending}GB reservation for a worker that outlives the cycle`);
+    }
+  },
+
+  // Off must reach the fleet even when nothing is launched, and it can only get
+  // there on the PORT: ns.read resolves against the server the CALLING script
+  // runs on, and /data/share.txt exists on home alone. A worker anywhere else
+  // reading the file gets "" and stops dead - which is how the shotgun once
+  // counted 66 hosts sharing while 65 had already quit.
+  "the fraction is published on the port even when share is off": async () => {
+    const { ns, pool, mods } = await makePool({ home: 1024 });
+    const { serviceShare } = mods["lib/share"];
+    const { SHARE_PORT, SHARE_MARKER } = mods["config"];
+
+    ns._files[SHARE_MARKER] = "off";
+    const off = serviceShare(ns, pool, () => {});
+    assert(off === null, "share off with nothing running should say nothing");
+    assert(Number(ns.getPortHandle(SHARE_PORT).peek()) === 0,
+      "off must still be broadcast, or running workers never hear it");
+
+    ns._files[SHARE_MARKER] = "0.25";
+    ns._files["/scripts/share.js"] = "x";
+    serviceShare(ns, pool, () => {});
+    assert(Number(ns.getPortHandle(SHARE_PORT).peek()) === 0.25,
+      "the fraction should reach the port the workers peek");
+  },
+
+  // A host bought by cloud.js while the batcher runs is admitted by
+  // ServerPool.sync and gets the batch workers - but scripts/deploy.js only
+  // runs when root.js roots something NEW, and a purchased server arrives
+  // already rooted. Without share.js riding along, that host could never take
+  // its quota and would be reported under noFile for ever.
+  "the continuous deploy ships the share worker too": async () => {
+    const { mods } = await loadContinuous();
+    const { deployWorkers } = mods["lib/deploy"];
+    const { SHARE_WORKER } = mods["config"];
+
+    let sent = null;
+    const ns = { scp: (files) => { sent = files; return true; } };
+    deployWorkers(ns, ["p0"]);
+
+    assert(sent && sent.includes(SHARE_WORKER),
+      `a newly bought host must get ${SHARE_WORKER}, got ${JSON.stringify(sent)}`);
+  },
+
+  // servers.js is a report, so the only thing worth pinning is that its rows
+  // carry the prep verdict and a real fraction from the calculator, and that
+  // they come back richest first - a table that ranks differently from the
+  // thing it describes gets misread.
+  "servers.js reports prep state, a steal fraction and income order": async () => {
+    const { mods } = await loadContinuous();
+    const { ns, math, ram } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        rich: {
+          moneyMax: 1e10, moneyAvailable: 1e10, minDifficulty: 5, hackDifficulty: 5,
+          hackPercentPerThread: 0.003, growBase: 1.0018,
+          weakenTime: 20000, growTime: 16000, hackTime: 5000,
+        },
+        poor: {
+          moneyMax: 1e7, moneyAvailable: 2e6, minDifficulty: 5, hackDifficulty: 40,
+          hackPercentPerThread: 0.003, growBase: 1.0018,
+          weakenTime: 20000, growTime: 16000, hackTime: 5000,
+        },
+      },
+    });
+
+    const snaps = ["poor", "rich"].map((h) => math.snapshot(ns, h));
+    const rows = mods["servers"].buildRows(math, snaps, ram, 1e6);
+
+    assert(rows.length === 2, `expected 2 rows, got ${rows.length}`);
+    assert(rows[0].snap.host === "rich", `richest target must sort first, got ${rows[0].snap.host}`);
+    assert(rows[0].prepped === true, "rich is at max money and min security");
+    assert(rows[1].prepped === false, "poor is drained and dirty");
+    for (const r of rows) {
+      assert(r.fit.steal > 0 && r.fit.steal <= 1, `steal out of range: ${r.fit.steal}`);
+      assert(r.fit.hack >= 1, `hack threads must be at least 1, got ${r.fit.hack}`);
+    }
+    assert(
+      mods["servers"].incomePerSec(rows[0]) >= mods["servers"].incomePerSec(rows[1]),
+      "rows must be sorted by income",
+    );
   },
 };

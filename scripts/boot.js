@@ -2,6 +2,9 @@ import { loadCalibration, calibAgeMs } from "./calib.js";
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
          FORMULAS_PROGRAM, FORMULAS_MARKER, WORKER_LIST,
          DEPLOY_LIST, DEPLOY_MANIFEST } from "./config.js";
+// The continuous batcher's worker paths, for killOrphanWorkers. That file holds
+// no ns calls and imports nothing, so this is 0 GB - see the RAM note below.
+import { WORKER_LIST as CONT_WORKER_LIST } from "./continuous/config.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -9,15 +12,26 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
  * Each tick, in order:
  *   1. root.js      - open ports and NUKE anything new
  *   2. deploy.js    - push workers, but only if root.js actually rooted something
- *   3. calibrate.js - only when the cache is missing or stale (skipped entirely
- *                     when Formulas.exe is owned - see step 3 below)
+ *   3. calibrate.js - only when the cache is missing or stale, and only for the
+ *                     SHOTGUN's analyze build. Skipped entirely when Formulas.exe
+ *                     is owned, and skipped entirely under continuous, whose
+ *                     analyze backend keeps no cache and never reads one.
  *   4. cloud.js     - kept alive as a service (buys and upgrades servers), but
  *                     only until the fleet is maxed; see CLOUD_DONE_MARKER
- *   5. manager      - kept alive as a service (the volley loop). Two interchangeable
- *                     builds exist - manager.js (*Analyze API, always available)
- *                     and manager-formulas.js (ns.formulas, needs Formulas.exe,
- *                     more accurate) - and boot picks whichever is owned, EVERY
- *                     tick, since Formulas.exe can be bought or lost at any time.
+ *   5. manager      - kept alive as a service. FOUR files, two independent
+ *                     choices: which SYSTEM (continuous or shotgun) and which
+ *                     math BACKEND (formulas or analyze).
+ *
+ * TWO BATCHERS, ONE POOL. scripts/continuous/ is the JIT batcher - it streams
+ * batches at a cadence and sizes its own steal fraction from the server and the
+ * RAM it can have. scripts/manager.js is the shotgun - it fires a whole volley
+ * per weaken window. They are ALTERNATIVES in the strongest sense: each believes
+ * it owns the RAM pool and its report port, so two of them running is silent
+ * corruption, not a slow mode. Continuous is the default; --shotgun picks the
+ * other. See ensureOneManager, which has to police all four files, not two.
+ *
+ * The backend choice is re-made EVERY tick within whichever system is chosen,
+ * since Formulas.exe can be bought or lost at any time.
  *
  * TRANSIENTS RUN ONE AT A TIME, and the tick waits for each to exit before
  * starting the next. They all run on home, and the manager reserves everything
@@ -35,12 +49,16 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
  *         run scripts/boot.js --once              (one pass, then exit)
  *         run scripts/boot.js --no-cloud          (don't buy servers)
  *         run scripts/boot.js --no-formulas       (always use the analyze build)
+ *         run scripts/boot.js --shotgun           (the volley batcher, not the stream)
+ *         run scripts/boot.js --targets 5         (continuous only; shotgun ignores it)
  *         run scripts/boot.js --interval 30000
  *
  * RAM: 1.60 base + run 1.00 + ps 0.20 + kill 0.50 + fileExists 0.10
  *      + scan 0.20 (killOrphanWorkers must reach the whole network) = 3.60 GB
  * (the deploy manifest check is ns.read/ns.write, 0 GB, and DEPLOY_LIST is a
- * plain array of strings from config.js)
+ * plain array of strings from config.js. continuous/config.js is the same kind
+ * of file - constants only, no ns call anywhere in it - so importing the
+ * continuous worker paths adds nothing to this total.)
  * (calib.js is 0 GB, ns.read/ns.write are 0 GB, and root.js is imported only
  * for the marker path constant - a plain string, so it adds nothing.)
  */
@@ -49,8 +67,25 @@ const ROOT = "/scripts/root.js";
 const DEPLOY = "/scripts/deploy.js";
 const CALIBRATE = "/scripts/calibrate.js";
 const CLOUD = "/scripts/cloud.js";
-const MANAGER_ANALYZE = "/scripts/manager.js";
-const MANAGER_FORMULAS = "/scripts/manager-formulas.js";
+/**
+ * The manager files, by system and then by backend.
+ *
+ * A table rather than four constants because the two choices are INDEPENDENT:
+ * --shotgun picks the row, Formulas.exe picks the column, and every one of the
+ * other three files is a rival that must not be left running.
+ */
+const MANAGERS = {
+  continuous: {
+    analyze: "/scripts/continuous/manager.js",
+    formulas: "/scripts/continuous/manager-formulas.js",
+  },
+  shotgun: {
+    analyze: "/scripts/manager.js",
+    formulas: "/scripts/manager-formulas.js",
+  },
+};
+
+const ALL_MANAGERS = Object.values(MANAGERS).flatMap((m) => [m.analyze, m.formulas]);
 
 const DEFAULT_TICK_MS = 60000;
 
@@ -144,6 +179,13 @@ function reachableHosts(ns) {
  * is left alone. ps reports paths without a leading slash while WORKER_LIST
  * carries one, hence normPath on both sides.
  *
+ * BOTH SYSTEMS' WORKERS, always, whichever one is being started. The two use
+ * different worker files - scripts/hack.js against scripts/continuous/hack.js -
+ * so a set covering only the incoming system's would leave the outgoing one's
+ * batches running network-wide, which is the exact damage described above and
+ * the reason a swap kills anything at all. Killing a set that happens to be
+ * empty costs one ps per host, which this walk is already paying.
+ *
  * SHARE WORKERS ARE DELIBERATELY SPARED. They are not in WORKER_LIST, and that
  * is not an oversight: none of the reasoning above applies to them. They are
  * tied to no target, so they cannot churn a server nobody owns; they hold a
@@ -153,7 +195,7 @@ function reachableHosts(ns) {
  * nothing. Turning share off is the marker's job - see scripts/sharemode.js.
  */
 function killOrphanWorkers(ns, log) {
-  const workers = new Set(WORKER_LIST.map(normPath));
+  const workers = new Set([...WORKER_LIST, ...CONT_WORKER_LIST].map(normPath));
   let killed = 0;
   let threads = 0;
 
@@ -179,24 +221,35 @@ function killOrphanWorkers(ns, log) {
 /**
  * Ensure exactly one manager runs, and that it is the right one.
  *
- * The two managers are ALTERNATIVES, not separate services. killDuplicates only
- * dedupes by filename, so on its own it would happily leave an analyze manager
- * and a formulas manager running side by side - each believing it owned the RAM
- * pool and the report port, over-committing the same RAM and stealing each
- * other's completion reports.
+ * All four manager files are ALTERNATIVES, not separate services. killDuplicates
+ * only dedupes by filename, so on its own it would happily leave an analyze
+ * manager and a formulas manager running side by side - each believing it owned
+ * the RAM pool and the report port, over-committing the same RAM and stealing
+ * each other's completion reports.
  *
+ * `others` is a LIST rather than the single other build, and that is what makes
+ * the two systems switchable at all. scripts/continuous/core.js has its own
+ * guard - findRivals refuses to start beside any of the four - so a surviving
+ * shotgun manager does not merely coexist with an incoming continuous one, it
+ * makes it ABORT and exit. Boot would then see no manager next tick, start it
+ * again, and watch it abort again, once a minute forever. Killing every rival
+ * before the launch is the whole fix.
+ *
+ * @param {string[]} others every manager file that is not `wanted`
  * @returns {boolean} true if a manager is running when this returns
  */
-function ensureOneManager(ns, wanted, other, args, log) {
+function ensureOneManager(ns, wanted, others, args, log) {
   let swapped = false;
-  for (const p of instancesOf(ns, other)) {
-    ns.kill(p.pid);
-    log(`stopped ${other} - switching to ${wanted}`);
-    swapped = true;
+  for (const other of others) {
+    for (const p of instancesOf(ns, other)) {
+      ns.kill(p.pid);
+      log(`stopped ${other} - switching to ${wanted}`);
+      swapped = true;
+    }
   }
   killDuplicates(ns, wanted, log);
 
-  // Only after a real swap, and only once nothing of either build survives:
+  // Only after a real swap, and only once no manager of any build survives:
   // every worker still running then belongs to the manager just killed. Doing
   // this whenever a manager is killed would be wrong - killDuplicates keeps a
   // survivor whose own volley is in flight, and its workers are indistinguishable
@@ -251,17 +304,36 @@ export async function main(ns) {
   const noCloud = args.includes("--no-cloud");
   const noManager = args.includes("--no-manager");
   const noFormulas = args.includes("--no-formulas");
+  // Continuous by default. It is the measured better earner - $947m/s average
+  // against the shotgun on the same save - and it prices its own steal fraction
+  // per target instead of needing one chosen for it. --continuous is accepted
+  // and does nothing, so the command can say which system it means out loud.
+  const mode = args.includes("--shotgun") ? "shotgun" : "continuous";
   const tIdx = args.indexOf("--target");
   const target = tIdx >= 0 ? args[tIdx + 1] : null;
+  // Continuous supervises several targets at once and takes a count; the shotgun
+  // works one at a time and ignores the flag. Passed through rather than
+  // interpreted, so boot does not have to know which is which.
+  const nIdx = args.indexOf("--targets");
+  const targets = nIdx >= 0 ? args[nIdx + 1] : null;
+  const managerArgs = [
+    ...(target ? ["--target", target] : []),
+    ...(targets ? ["--targets", targets] : []),
+  ];
   const iIdx = args.indexOf("--interval");
   const tickMs = iIdx >= 0 ? Math.max(5000, Number(args[iIdx + 1]) || DEFAULT_TICK_MS) : DEFAULT_TICK_MS;
 
   const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
 
   ns.print(
-    `boot: tick ${Math.round(tickMs / 1000)}s, manager target ` +
+    `boot: ${mode}, tick ${Math.round(tickMs / 1000)}s, manager target ` +
       `${target ?? "auto"}${noCloud ? ", cloud off" : ""}${noManager ? ", manager off" : ""}`,
   );
+  // Said once, at startup, rather than as a skipped-step line every tick. The
+  // continuous analyze backend reads no calibration cache at all - see
+  // scripts/continuous/lib/mathAnalyze.js - so calibrating for it would be a
+  // 6.20 GB transient buying nothing.
+  if (mode === "continuous") ns.print("boot: continuous needs no calibration cache - skipping calibrate.js");
 
   let lastRootStamp = ns.read(ROOT_MARKER);
   let firstPass = true;
@@ -275,8 +347,13 @@ export async function main(ns) {
     // on its own has almost always hit a target with no cached growth base - a
     // newly rooted, richer server it auto-picked - so the cache must be
     // refreshed in THIS tick, before the restart, or it just dies again.
+    // Of the CHOSEN system's pair. A manager of the other system running is not
+    // this one surviving - it is a rival, and ensureOneManager is about to kill
+    // it - so counting it here would suppress the calibration refresh on exactly
+    // the tick that needs it.
+    const pair = MANAGERS[mode];
     const managerDied = !firstPass && !noManager
-      && !isUp(ns, MANAGER_ANALYZE) && !isUp(ns, MANAGER_FORMULAS);
+      && !isUp(ns, pair.analyze) && !isUp(ns, pair.formulas);
     if (managerDied) log("manager is not running - it exited since the last tick");
 
     // Re-checked every tick, not once at startup: Formulas.exe is lost on every
@@ -334,9 +411,15 @@ export async function main(ns) {
     // -- 3. calibrate -------------------------------------------------------
     // The calibration cache exists only to feed mathAnalyze. On the formulas
     // build it is dead weight, and calibrating costs a 6.20 GB transient.
-    const calib = hasFormulas ? null : loadCalibration(ns);
+    //
+    // Skipped outright under continuous. The cache exists to feed scripts/
+    // mathAnalyze.js; scripts/continuous/lib/mathAnalyze.js deliberately has no
+    // cache and never reads /data/calib.json, so under continuous this whole
+    // step is a 6.20 GB transient whose output nothing will open.
+    const wantsCalib = mode === "shotgun" && !hasFormulas;
+    const calib = wantsCalib ? loadCalibration(ns) : null;
     const age = calib ? calibAgeMs(calib) : Infinity;
-    if (!hasFormulas && (!calib || age > CALIB_MAX_AGE_MS || managerDied)) {
+    if (wantsCalib && (!calib || age > CALIB_MAX_AGE_MS || managerDied)) {
       log(
         !calib
           ? "no calibration cache - calibrating"
@@ -370,9 +453,8 @@ export async function main(ns) {
       }
     }
     if (!noManager) {
-      const wanted = hasFormulas ? MANAGER_FORMULAS : MANAGER_ANALYZE;
-      const other = hasFormulas ? MANAGER_ANALYZE : MANAGER_FORMULAS;
-      ensureOneManager(ns, wanted, other, target ? ["--target", target] : [], log);
+      const wanted = hasFormulas ? pair.formulas : pair.analyze;
+      ensureOneManager(ns, wanted, ALL_MANAGERS.filter((f) => f !== wanted), managerArgs, log);
     }
 
     firstPass = false;

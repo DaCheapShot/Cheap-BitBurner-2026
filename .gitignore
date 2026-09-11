@@ -4,3 +4,7 @@ NetScriptDefinitions.d.ts
 
 # SDD scratch workspace (ledger, briefs, review packages)
 .superpowers/
+
+# Run artifact: downloaded from the game with `download /data/continuous.log.txt`.
+# Overwritten every run, never source.
+scripts/continuous/continuous.log.txt
