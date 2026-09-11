@@ -550,6 +550,92 @@ export const CONT_REPORT_PORT = 3;
  */
 export const PORT_CAPACITY = 50;
 
+// ----------------------------------------------------------------- share ----
+
+/**
+ * Share mode, mirrored from scripts/config.js.
+ *
+ * EVERY VALUE BELOW MUST EQUAL THE SHOTGUN'S. This is not a copy that may
+ * diverge - it is the same protocol read from a second place. scripts/
+ * sharemode.js writes the marker and broadcasts the port, and scripts/share.js
+ * peeks that port to decide whether to keep running; neither of them knows
+ * which batcher is up. A different port number here would leave `sharemode.js
+ * on` looking simply broken under continuous - workers launched and exiting a
+ * millisecond later - so tests/continuous.test.mjs pins the equality.
+ *
+ * They are duplicated rather than imported because this tree may not import
+ * from scripts/, and because doing so would drag the shotgun's config into
+ * every continuous entry point. Only the values cross the boundary, never a
+ * module.
+ */
+
+/**
+ * Written by scripts/sharemode.js, read by the manager and by every share
+ * worker. Holds the FRACTION of the pool to devote to ns.share, not a bare
+ * on/off flag, so the amount is retunable from the terminal.
+ */
+export const SHARE_MARKER = "/data/share.txt";
+
+/**
+ * Port the share fraction is BROADCAST on, for the workers to read.
+ *
+ * The marker cannot do this job, and assuming it could cost the shotgun a live
+ * run: ns.read resolves against the server the CALLING script runs on, and
+ * /data/share.txt exists on home alone - so a share worker anywhere else read
+ * "", parsed it as off, and exited within milliseconds of a perfectly valid
+ * pid. Ports are the only channel a worker on a purchased server can hear.
+ *
+ * This is also why CONT_REPORT_PORT is 3 and not 2: the share gate is peeked,
+ * never drained, and a drain loop on it would consume the setting.
+ */
+export const SHARE_PORT = 2;
+
+/** The share worker. A path only - importing it would cost 2.40 GB for ns.share. */
+export const SHARE_WORKER = "/scripts/share.js";
+
+/** Per-thread RAM of the share worker: 1.60 base + 2.40 ns.share. */
+export const SHARE_RAM_FALLBACK = 4.00;
+
+/**
+ * Fraction of the pool `sharemode.js on` asks for.
+ *
+ * ns.share's bonus is 1 + ln(shareThreads)/25 (src/NetworkShare/Share.ts), so
+ * every DOUBLING of share RAM is worth a flat ln(2)/25 = 2.77 percentage points,
+ * forever, while hack income is roughly linear in RAM. The last three quarters
+ * of a pool buy 5.6 points and cost three quarters of the income. 25% sits near
+ * the knee.
+ */
+export const SHARE_FRACTION = 0.25;
+
+/**
+ * Hard clamp on the share fraction, whatever the marker says.
+ *
+ * The shotgun needs this to stop a 100% marker starving its prep gate into a
+ * boot restart loop. Continuous fails more gently - a stream that cannot fit
+ * simply refuses its batches and says so - but the clamp is kept identical
+ * anyway, because sharemode.js reports what it wrote against SHARE_MAX_FRACTION
+ * and a second, larger bound here would make that report a lie.
+ */
+export const SHARE_MAX_FRACTION = 0.90;
+
+/**
+ * Parse SHARE_MARKER's contents into a fraction in [0, SHARE_MAX_FRACTION].
+ *
+ * Anything unparseable reads as OFF rather than as a default. A NaN would
+ * compare false against every bound, so garbage in the marker must mean "stop",
+ * never "carry on with some number I invented".
+ *
+ * Pure arithmetic, no ns calls - this file must stay 0 GB.
+ */
+export function shareFractionFrom(text) {
+  const word = String(text ?? "").trim().split("\n")[0].trim().toLowerCase();
+  if (word === "" || word === "off" || word === "false") return 0;
+  if (word === "on" || word === "true") return SHARE_FRACTION;
+  const n = Number(word);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(n, SHARE_MAX_FRACTION);
+}
+
 // --------------------------------------------------------------- workers ----
 
 /**

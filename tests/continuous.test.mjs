@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { assert, assertClose } from "./harness.mjs";
+import { assert, assertClose, loadScripts } from "./harness.mjs";
 import { makeNs, withFormulas } from "./mockNs.mjs";
 
 /**
@@ -752,9 +752,17 @@ export const tests = {
 
     // The two backends must stay apart, and the totals are how that shows up as
     // a number rather than as a graph walk.
+    // 12.85 -> 12.95 when lib/share.js arrived: ns.fileExists, 0.10, which the
+    // top-up needs to tell a host that HAS NOT GOT share.js from one that has it
+    // and refused the exec. Those two return the same bare 0 from exec and have
+    // opposite remedies, and merging them cost the shotgun two live runs.
+    //
+    // The formulas total does not move at all - lib/mathFormulas.js already pays
+    // for fileExists to check for Formulas.exe - which is why share is the rare
+    // addition that is free on one build and cheap on the other.
     const analyze = ramOf("manager");
     const formulas = ramOf("manager-formulas");
-    assert(Math.abs(analyze - 12.85) < 0.011, `manager.js: expected 12.85 GB, got ${analyze.toFixed(2)}`);
+    assert(Math.abs(analyze - 12.95) < 0.011, `manager.js: expected 12.95 GB, got ${analyze.toFixed(2)}`);
     assert(Math.abs(formulas - 9.00) < 0.011, `manager-formulas.js: expected 9.00 GB, got ${formulas.toFixed(2)}`);
   },
 
@@ -3785,5 +3793,187 @@ export const tests = {
       0,
     );
     assertClose(eff, expected, 1e-9, "effective capacity is not the core-weighted sum");
+  },
+
+  // -------------------------------------------------------------- share -----
+
+  // scripts/sharemode.js writes the marker and broadcasts the port, and
+  // scripts/share.js peeks that port to decide whether to keep running. Neither
+  // knows which batcher is up, so the two configs are not two settings - they
+  // are one protocol read from two places. A divergence here does not fail
+  // loudly: `sharemode.js on` would launch workers that read an empty port,
+  // parse it as off, and exit a millisecond after a perfectly valid pid.
+  "the share protocol matches the shotgun's exactly": async () => {
+    const root = (await loadScripts())["config"];
+    const { mods } = await loadContinuous();
+    const cont = mods["config"];
+
+    for (const key of ["SHARE_MARKER", "SHARE_PORT", "SHARE_WORKER",
+                       "SHARE_FRACTION", "SHARE_MAX_FRACTION", "SHARE_RAM_FALLBACK"]) {
+      assert(cont[key] === root[key],
+        `${key} diverged: continuous has ${JSON.stringify(cont[key])}, ` +
+          `scripts/config.js has ${JSON.stringify(root[key])}`);
+    }
+
+    // The parser too, not just the constants - it decides whether a worker
+    // lives, and "anything unreadable means OFF" is the load-bearing half.
+    for (const text of ["", "off", "false", "on", "true", "0.4", "9", "banana", "-1"]) {
+      assert(cont.shareFractionFrom(text) === root.shareFractionFrom(text),
+        `shareFractionFrom("${text}") diverged: ${cont.shareFractionFrom(text)} ` +
+          `vs ${root.shareFractionFrom(text)}`);
+    }
+  },
+
+  // The report port is drained with read(), which REMOVES the message. Sharing
+  // a port number with the gate - which is peeked, never drained - would have
+  // the drain loop eat the setting and every worker retire.
+  "the share gate is not the report port": async () => {
+    const { mods } = await loadContinuous();
+    const { SHARE_PORT, CONT_REPORT_PORT } = mods["config"];
+    assert(SHARE_PORT !== CONT_REPORT_PORT,
+      `share gate and report port are both ${SHARE_PORT}; the drain loop would eat the setting`);
+  },
+
+  // Sized against usableRam, not freeRam, and asked for repeatedly. Under
+  // continuous this is the difference between a working toggle and a runaway:
+  // a healthy stream holds nearly the whole pool, so a freeRam-based size would
+  // read "share wants nothing" exactly when things are going well.
+  "asking for the same fraction twice adds nothing the second time": async () => {
+    const { pool, mods } = await makePool({ home: 4096, p0: 2048, p1: 2048 });
+    const { planShare } = mods["lib/share"];
+
+    const first = planShare(pool, 4, 0.25, 0);
+    assert(first.deficit === first.want, `the first ask should want the lot, got ${first.deficit}`);
+
+    const second = planShare(pool, 4, 0.25, first.want);
+    assert(second.deficit === 0,
+      `a second ask at the same fraction should want nothing, got ${second.deficit}`);
+  },
+
+  "an over-supply is never turned into a negative deficit": async () => {
+    const { pool, mods } = await makePool({ home: 1024 });
+    const { planShare } = mods["lib/share"];
+    const r = planShare(pool, 4, 0.10, 1e6);
+    assert(r.deficit === 0, `deficit should floor at 0, got ${r.deficit}`);
+  },
+
+  // The shotgun's first live run filled home to the brim and swallowed the
+  // pool's largest host. It matters more here: the steal calculator sizes
+  // against placeableRam, which floors per host, so a hole punched in one big
+  // host can drop the fraction it will commit to - not just its bytes.
+  "share is spread proportionally, not poured into the biggest host": async () => {
+    const { ns, pool, mods } = await makePool({ home: 8192, p0: 1024, p1: 1024 });
+    const { topUpShare } = mods["lib/share"];
+    ns._files["/scripts/share.js"] = "x";
+
+    const res = topUpShare(ns, pool, 4, 0.25, 0);
+    const byHost = new Map(res.placements.map((p) => [p.host, p.threads]));
+
+    for (const s of pool.servers) {
+      const quota = Math.floor((s.usableRam * 0.25) / 4);
+      const got = byHost.get(s.hostname) ?? 0;
+      // Home may carry the rounding remainder, so it is allowed to exceed its
+      // own quota - by a handful of threads, not by the pool.
+      assert(got <= quota + 8,
+        `${s.hostname} took ${got}t against a quota of ${quota}t - placement is not proportional`);
+    }
+  },
+
+  // exec returns a bare 0 for a script that is not there AND for one the host
+  // refused. The remedies are opposite - deploy vs. free RAM - so a merged
+  // bucket sends the reader the wrong way. The shotgun did that twice.
+  "a missing worker and a refused exec are reported separately": async () => {
+    const { ns, pool, mods } = await makePool({ home: 4096, p0: 2048 });
+    const { topUpShare } = mods["lib/share"];
+
+    // Nobody has the file.
+    const none = topUpShare(ns, pool, 4, 0.25, 0);
+    assert(none.noFile.length === pool.servers.length,
+      `every host should be reported as missing the worker, got ${none.noFile.length}`);
+    assert(none.refused.length === 0, "a missing file is not a refusal");
+    assert(none.launched === 0, "nothing can launch without the worker");
+
+    // Everyone has the file, and every exec is refused.
+    ns._files["/scripts/share.js"] = "x";
+    const stubborn = { ...ns, exec: () => 0 };
+    const all = topUpShare(stubborn, pool, 4, 0.25, 0);
+    assert(all.noFile.length === 0, "the file is present - this must not read as a deploy problem");
+    assert(all.refused.length > 0, "a refused exec should be recorded");
+    assert(all.refused[0].freeGb > 0,
+      "a refusal must carry what the pool believed was free - that number IS the diagnosis");
+  },
+
+  // Share workers outlive the process that started them, so a manager restart -
+  // or a swap between the two batchers - finds them still running. Without
+  // adopting them it would launch a second full set on top, doubling the RAM
+  // share holds to buy 2.77 points of a logarithm.
+  "a restarted manager adopts the running share workers": async () => {
+    const { ns, pool, mods } = await makePool({ home: 4096, p0: 2048 });
+    const { shareCensus, topUpShare } = mods["lib/share"];
+    ns._files["/scripts/share.js"] = "x";
+
+    topUpShare(ns, pool, 4, 0.25, 0);
+    const census = shareCensus(ns, pool.servers.map((s) => s.hostname));
+    assert(census.threads > 0, "the first top-up should have launched something");
+
+    const again = topUpShare(ns, pool, 4, 0.25, census.threads, census.byHost);
+    assert(again.launched === 0,
+      `a second top-up launched ${again.launched}t on top of ${census.threads}t already running`);
+  },
+
+  // A reservation is released at the end of a cycle; a share worker is not. It
+  // runs until the port says stop, and the game already reports its RAM as used
+  // - so a reservation would have refresh() subtract the same bytes twice.
+  "the share top-up leaves no reservation behind": async () => {
+    const { ns, pool, mods } = await makePool({ home: 4096, p0: 2048 });
+    const { topUpShare } = mods["lib/share"];
+    ns._files["/scripts/share.js"] = "x";
+
+    topUpShare(ns, pool, 4, 0.25, 0);
+    for (const s of pool.servers) {
+      assert(!(s.pending > 0),
+        `${s.hostname} holds a ${s.pending}GB reservation for a worker that outlives the cycle`);
+    }
+  },
+
+  // Off must reach the fleet even when nothing is launched, and it can only get
+  // there on the PORT: ns.read resolves against the server the CALLING script
+  // runs on, and /data/share.txt exists on home alone. A worker anywhere else
+  // reading the file gets "" and stops dead - which is how the shotgun once
+  // counted 66 hosts sharing while 65 had already quit.
+  "the fraction is published on the port even when share is off": async () => {
+    const { ns, pool, mods } = await makePool({ home: 1024 });
+    const { serviceShare } = mods["lib/share"];
+    const { SHARE_PORT, SHARE_MARKER } = mods["config"];
+
+    ns._files[SHARE_MARKER] = "off";
+    const off = serviceShare(ns, pool, () => {});
+    assert(off === null, "share off with nothing running should say nothing");
+    assert(Number(ns.getPortHandle(SHARE_PORT).peek()) === 0,
+      "off must still be broadcast, or running workers never hear it");
+
+    ns._files[SHARE_MARKER] = "0.25";
+    ns._files["/scripts/share.js"] = "x";
+    serviceShare(ns, pool, () => {});
+    assert(Number(ns.getPortHandle(SHARE_PORT).peek()) === 0.25,
+      "the fraction should reach the port the workers peek");
+  },
+
+  // A host bought by cloud.js while the batcher runs is admitted by
+  // ServerPool.sync and gets the batch workers - but scripts/deploy.js only
+  // runs when root.js roots something NEW, and a purchased server arrives
+  // already rooted. Without share.js riding along, that host could never take
+  // its quota and would be reported under noFile for ever.
+  "the continuous deploy ships the share worker too": async () => {
+    const { mods } = await loadContinuous();
+    const { deployWorkers } = mods["lib/deploy"];
+    const { SHARE_WORKER } = mods["config"];
+
+    let sent = null;
+    const ns = { scp: (files) => { sent = files; return true; } };
+    deployWorkers(ns, ["p0"]);
+
+    assert(sent && sent.includes(SHARE_WORKER),
+      `a newly bought host must get ${SHARE_WORKER}, got ${JSON.stringify(sent)}`);
   },
 };

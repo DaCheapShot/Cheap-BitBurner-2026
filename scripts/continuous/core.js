@@ -4,6 +4,7 @@ import { deployWorkers, describeDeploy } from "scripts/continuous/lib/deploy";
 import { clear } from "scripts/continuous/lib/report";
 import { isPrepped, rankTargets } from "scripts/continuous/lib/target";
 import { launchPrepWave, placePrepWave, prepTargets } from "scripts/continuous/lib/prep";
+import { serviceShare } from "scripts/continuous/lib/share";
 import { createStream } from "scripts/continuous/lib/stream";
 import {
   avgConcurrentRam,
@@ -32,6 +33,8 @@ import {
   PROMOTE_PREP_FIRST,
   REPREP_GRACE_MS,
   RESCAN_MS,
+  SHARE_RAM_FALLBACK,
+  SHARE_WORKER,
   STEAL_FRACTION,
   STREAM_TICK_MS,
   TARGET_RAM_BUDGET,
@@ -113,6 +116,18 @@ export function workerRam(ns) {
   }
   out.missing = missing;
   return out;
+}
+
+/**
+ * Per-thread RAM of the share worker, measured if it is here.
+ *
+ * NOT added to workerRam.missing: share.js belongs to the shotgun's deploy and
+ * a save that has never run it simply does not have the file. That is a reason
+ * for share to report nothing, not a reason for the batcher to refuse to start.
+ * The fallback keeps the arithmetic sane in the meantime.
+ */
+export function shareWorkerRam(ns) {
+  return ns.getScriptRam(SHARE_WORKER, "home") || SHARE_RAM_FALLBACK;
 }
 
 // -------------------------------------------------------------- admission ---
@@ -342,6 +357,7 @@ export async function run(ns, math) {
 
   await supervise(ns, math, {
     pool, ram, steal, pin, adaptive, maxTargets, forced, log, say, minutes, verbose,
+    shareRam: shareWorkerRam(ns),
   });
 }
 
@@ -561,6 +577,7 @@ export async function supervise(ns, math, opts) {
   const {
     pool, ram, steal, pin = null, maxTargets, forced, log, say, adaptive = true,
     minutes = 0, verbose = false, tick = STREAM_TICK_MS, rescanMs = RESCAN_MS,
+    shareRam = SHARE_RAM_FALLBACK,
   } = opts;
 
   const port = ns.getPortHandle(CONT_REPORT_PORT);
@@ -599,7 +616,7 @@ export async function supervise(ns, math, opts) {
       for (const s of streams) learned.set(s.host, s.steal);
       streams = rescan(ns, math, {
         pool, ram, steal, pin, adaptive, maxTargets, forced,
-        streams, preps, learned, log, verbose,
+        streams, preps, learned, log, verbose, shareRam,
       });
     }
 
@@ -665,6 +682,7 @@ export function rescan(ns, math, opts) {
   const {
     pool, ram, steal, pin = null, adaptive = true, maxTargets, forced,
     streams, preps, learned = new Map(), log, verbose,
+    shareRam = SHARE_RAM_FALLBACK,
   } = opts;
 
   const live = new Set(streams.filter((s) => !s.retiring).map((s) => s.host));
@@ -693,6 +711,18 @@ export function rescan(ns, math, opts) {
   if (grown.grewGb > 1) {
     log(`  pool grew ${(grown.grewGb / 1024).toFixed(2)}TB since the last rescan`);
   }
+
+  // Share BEFORE the budget, and the order is not cosmetic. Share workers exec
+  // outside the reservation system and are never released, so a budget measured
+  // first would price RAM share is about to take - and the calculator would then
+  // commit a steal fraction it cannot place, which reads in the log as "no room
+  // for batch" against a pool that looked fine one line earlier.
+  //
+  // refresh() rather than sync(): sync's job is to find hosts and capacity that
+  // did not exist, and neither changed. What changed is used RAM, on hosts we
+  // already know, which is exactly the shallow pass.
+  const share = serviceShare(ns, pool, log, { ramPerThread: shareRam });
+  if (share && share.launched > 0) pool.refresh();
 
   const ranked = rankTargets(ns, math, { steal });
   const candidates = forced ? ranked.filter((t) => t.host === forced) : ranked;

@@ -1,4 +1,4 @@
-import { WORKER_LIST } from "scripts/continuous/config";
+import { SHARE_WORKER, WORKER_LIST } from "scripts/continuous/config";
 
 /**
  * Worker distribution for the continuous batcher.
@@ -43,6 +43,22 @@ import { WORKER_LIST } from "scripts/continuous/config";
  */
 
 /**
+ * Everything a host needs before this manager can exec on it.
+ *
+ * scripts/share.js rides along, and it is not this system's file. It belongs to
+ * scripts/deploy.js, which broadcasts on a trigger this system cannot fire:
+ * deploy runs when root.js roots something NEW, and buying a server roots
+ * nothing - purchased servers arrive rooted. So a host bought by cloud.js while
+ * the batcher runs is admitted by ServerPool.sync, gets the three batch
+ * workers, and would be permanently unable to take its share quota. lib/share.js
+ * would report it under `noFile` for ever, honestly and uselessly.
+ *
+ * A path string, not an import: importing share.js would cost 2.40 GB for
+ * ns.share, which this file never calls.
+ */
+const DEPLOY_FILES = [...WORKER_LIST, SHARE_WORKER];
+
+/**
  * Copy every worker to every host given, home excluded.
  *
  * @param {NS} ns
@@ -63,7 +79,7 @@ export function deployWorkers(ns, hosts) {
       skipped++;
       continue;
     }
-    if (ns.scp(WORKER_LIST, host, "home")) copied++;
+    if (ns.scp(DEPLOY_FILES, host, "home")) copied++;
     else failed.push(host);
   }
 
