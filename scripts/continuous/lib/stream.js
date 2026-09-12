@@ -1,3 +1,4 @@
+import { fmtMoney } from "scripts/continuous/lib/fmt";
 import {
   baselineDrift,
   batchRam,
@@ -404,8 +405,8 @@ export function createStream(ns, math, opts) {
       if (baselineStrikes >= strikeLimit) {
         stopped = "off baseline";
         log(
-          `  ${host}: OFF BASELINE - $${(snap.money / 1e6).toFixed(1)}m of ` +
-            `$${(snap.maxMoney / 1e6).toFixed(1)}m (floor $${(drift.moneyFloor / 1e6).toFixed(1)}m), ` +
+          `  ${host}: OFF BASELINE - ${fmtMoney(snap.money)} of ` +
+            `${fmtMoney(snap.maxMoney)} (floor ${fmtMoney(drift.moneyFloor)}), ` +
             `sec ${snap.sec.toFixed(2)} of ${snap.minSec.toFixed(2)} ` +
             `(ceiling ${drift.secCeiling.toFixed(2)}). Stream stopped for re-prep.`,
         );

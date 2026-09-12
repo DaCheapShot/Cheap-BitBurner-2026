@@ -77,14 +77,6 @@ function fmtRam(gb) {
   return `${gb.toFixed(2)}GB`;
 }
 
-function fmtMoney(m) {
-  const units = [[1e12, "t"], [1e9, "b"], [1e6, "m"], [1e3, "k"]];
-  for (const [div, suf] of units) {
-    if (Math.abs(m) >= div) return `$${(m / div).toFixed(2)}${suf}`;
-  }
-  return `$${m.toFixed(0)}`;
-}
-
 function fmtTime(ms) {
   if (ms >= 60000) return `${(ms / 60000).toFixed(2)}m`;
   return `${(ms / 1000).toFixed(2)}s`;
