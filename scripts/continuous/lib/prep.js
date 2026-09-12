@@ -29,6 +29,23 @@ import {
  * Unlike a batch, a prep wave has no partial-failure mode that loses money.
  * Grow and weaken can only move a server TOWARD prepped, so a wave that gets
  * half of what it asked for is simply slower, never harmful.
+ *
+ * ---------------------------------------------------------------------------
+ * ...until need exceeds the pool, which is why `shrunk` exists
+ *
+ * "Sized by need" is a statement about the ASK, not about what gets placed. The
+ * x0.7 retry loop below backs the grow request down until it fits, so a second
+ * prep on an almost-full pool does not fail and skip its turn - it gets a
+ * SMALLER wave. Early in a BitNode, where one target's need exceeds the whole
+ * pool, three queued preps therefore split it three ways, politely, and all
+ * three crawl at a third of the rate one alone would have had.
+ *
+ * So every caller that places waves for more than one target has to know
+ * whether a wave got everything it asked for. `shrunk` is that answer, and it
+ * is computed HERE rather than at the call site: allocateEffective returns as
+ * soon as the remaining need is within RAM_EPS, so `grow.effective` can land a
+ * float sliver under `growWanted` on a wave that was fully satisfied. The
+ * integer `growEff` is exact.
  */
 
 /**
@@ -51,8 +68,10 @@ import {
  * op that makes irreversible progress toward minimum security, and dropping it
  * to fit more grow would mean growing at a security level we chose not to fix.
  *
- * @returns {{grow, weaken, excessSec, growSec, growWanted} | null} null when
- *   not even a bare weaken fits - a full pool, which is transient.
+ * @returns {{grow, weaken, excessSec, growSec, growWanted, partial, shrunk} |
+ *   null} null when not even a bare weaken fits - a full pool, which is
+ *   transient. `shrunk` is true when the wave got less than it asked for, i.e.
+ *   the pool is the constraint and there are no leftovers for another target.
  */
 export function placePrepWave(pool, ram, math, snap) {
   const weakenPer = math.weakenPerThread();
@@ -119,12 +138,24 @@ export function placePrepWave(pool, ram, math, snap) {
       });
       if (!partial) return null;
 
-      return { grow: empty, weaken: partial, excessSec, growSec: 0, growWanted, partial: true };
+      return {
+        grow: empty, weaken: partial, excessSec, growSec: 0, growWanted,
+        partial: true,
+        // The weaken here is sized by what the pool could afford, which is the
+        // definition of short however much grow was wanted.
+        shrunk: true,
+      };
     }
 
     if (grow.rawThreads === 0 && weaken.rawThreads === 0) return null;
 
-    return { grow, weaken, excessSec, growSec, growWanted, partial: false };
+    return {
+      grow, weaken, excessSec, growSec, growWanted,
+      partial: false,
+      // growEff, not grow.effective: the loop above may have backed the request
+      // down, and only this integer says so exactly.
+      shrunk: growEff < growWanted,
+    };
   }
 
   return null;
@@ -229,10 +260,19 @@ export async function prepTargets(ns, math, hosts, opts) {
     // Place first, launch second, for every target - so a later target can only
     // ever take RAM that an earlier one did not want. Reversing this would let
     // the lowest-value target outbid the one the stream is waiting on.
+    //
+    // And stop at the first wave that came up short. "A later target takes only
+    // what an earlier one did not want" is true of the ASK and false of the
+    // placement: placePrepWave backs grow down until it fits, so on a pool too
+    // small for one target's need the second prep does not fail, it takes a
+    // share. Three targets then split a pool sized for less than one and all
+    // three crawl. `shrunk` is the pool saying it is the constraint.
     const waves = [];
     for (const snap of todo) {
       const wave = placePrepWave(pool, ram, math, snap);
-      if (wave) waves.push({ snap, wave });
+      if (!wave) break;
+      waves.push({ snap, wave });
+      if (wave.shrunk) break;
     }
 
     if (waves.length === 0) {

@@ -205,6 +205,41 @@ async function makeMath(which, opts = {}) {
   return { ns, math, pool, mods, ram: { hack: 1.7, grow: 1.75, weaken: 1.75 } };
 }
 
+/** A prep entry as rescan would queue it: marked, with no wave placed yet. */
+const freshPrepEntry = () => ({ wave: null, deadline: 0, waves: 0, shrunk: false });
+
+/**
+ * Two equally drained targets over a pool of the given size, with exec recorded.
+ *
+ * Both want far more grow than a small pool can hold, which is the situation at
+ * the start of a BitNode: prep need is set by the target's deficit, not by the
+ * pool, so one target's ask can exceed the whole of it.
+ *
+ * `targets()` returns the target hosts prep actually exec'd against, in order -
+ * launchPrepWave passes it as the fourth argument. That, not the prep map, is
+ * what proves no RAM went to a second target.
+ */
+async function prepFixture(homeRam) {
+  const drained = {
+    moneyMax: 1e9, moneyAvailable: 1e3, minDifficulty: 5, hackDifficulty: 5,
+    hackPercentPerThread: 0.003, growBase: 1.0018,
+    weakenTime: 20000, growTime: 16000, hackTime: 5000,
+  };
+
+  const made = await makeMath("analyze", {
+    hosts: { home: homeRam },
+    servers: { a: { ...drained }, b: { ...drained } },
+  });
+
+  const seen = [];
+  made.ns.exec = (...args) => {
+    if (!seen.includes(args[3])) seen.push(args[3]);
+    return 1;
+  };
+
+  return { ...made, targets: () => seen };
+}
+
 /**
  * A stream over a big single-core pool against a prepped target, with exec
  * recorded rather than run.
@@ -3758,6 +3793,131 @@ export const tests = {
     servicePreps(ns, { math, pool, ram, streams: [], preps, log: () => {} });
 
     assert(!preps.has("stuck"), "a prep past its wave budget must release its slot");
+  },
+
+  // -------------------------------------------------------- serial prep ----
+  //
+  // The five tests below exist because the slot math in rescan cannot see the
+  // thing that actually matters. A wave sized by NEED is small only relative to
+  // the pool it lands in, and placePrepWave backs grow down x0.7 until it fits
+  // rather than failing - so on a pool too small for one target's need, a second
+  // prep does not skip its turn, it takes a share. At the start of a BitNode
+  // that split the 32 GB home three ways and nothing finished prepping.
+
+  "a prep that came up short reports it": async () => {
+    const drained = {
+      moneyMax: 1e9, moneyAvailable: 1e3, minDifficulty: 5, hackDifficulty: 5,
+      hackPercentPerThread: 0.003, growBase: 1.0018,
+      weakenTime: 20000, growTime: 16000, hackTime: 5000,
+    };
+
+    const place = async (homeRam) => {
+      const { ns, math, pool, ram, mods } = await makeMath("analyze", {
+        hosts: { home: homeRam },
+        servers: { t: drained },
+      });
+      const wave = mods["lib/prep"].placePrepWave(pool, ram, math, math.snapshot(ns, "t"));
+      assert(wave, `expected a wave on a ${homeRam} GB pool`);
+      return wave;
+    };
+
+    // Room for the whole ask: shrunk must be FALSE. This is the assertion that
+    // pins why shrunk is computed inside placePrepWave from the integer growEff
+    // rather than by comparing grow.effective to growWanted at the call site -
+    // allocateEffective returns once the remaining need is within RAM_EPS, so
+    // effective can land a float sliver low on a wave that was fully satisfied,
+    // and the outside comparison would call that short.
+    const roomy = await place(262144);
+    assert(
+      roomy.shrunk === false,
+      `a wave that got its whole ask must not read as shrunk ` +
+        `(grow ${roomy.grow.effective} eff of ${roomy.growWanted} wanted)`,
+    );
+
+    // Same target, pool far too small for it.
+    const tight = await place(2048);
+    assert(
+      tight.shrunk === true,
+      `a backed-off wave must report shrunk ` +
+        `(grow ${tight.grow.effective} eff of ${tight.growWanted} wanted)`,
+    );
+    assert(
+      tight.grow.effective < tight.growWanted,
+      "the tight fixture is not actually tight - pick a smaller pool",
+    );
+  },
+
+  "prep serialises when the pool cannot cover one target's need": async () => {
+    const { ns, math, pool, ram, mods, targets } = await prepFixture(2048);
+    const { servicePreps } = mods["core"];
+
+    const preps = new Map([["a", freshPrepEntry()], ["b", freshPrepEntry()]]);
+    servicePreps(ns, { math, pool, ram, streams: [], preps, log: () => {} });
+
+    assert(preps.get("a").wave, "the first prep must still get its wave");
+    assert(
+      !preps.get("b").wave,
+      "a second prep must not take a share of what the first could not cover",
+    );
+    assert(
+      targets().join() === "a",
+      `only the first target may be exec'd against, got [${targets()}]`,
+    );
+  },
+
+  "prep still fans out when the pool has room for both": async () => {
+    const { ns, math, pool, ram, mods, targets } = await prepFixture(262144);
+    const { servicePreps } = mods["core"];
+
+    const preps = new Map([["a", freshPrepEntry()], ["b", freshPrepEntry()]]);
+    servicePreps(ns, { math, pool, ram, streams: [], preps, log: () => {} });
+
+    // The gate is need-against-capacity, not a concurrency cap: a pool with real
+    // leftovers must still prep several targets at once, which is the case the
+    // whole concurrent-prep design was built for.
+    assert(preps.get("a").wave && preps.get("b").wave, "both preps should get a wave");
+    assert(
+      targets().join() === "a,b",
+      `both targets should be exec'd against, got [${targets()}]`,
+    );
+  },
+
+  "a short wave still in flight keeps the pool to itself": async () => {
+    const { ns, math, pool, ram, mods } = await prepFixture(2048);
+    const { servicePreps } = mods["core"];
+
+    const preps = new Map([["a", freshPrepEntry()], ["b", freshPrepEntry()]]);
+    const opts = { math, pool, ram, streams: [], preps, log: () => {} };
+
+    servicePreps(ns, opts);
+    // Second tick well inside the first wave's deadline. Without the flag being
+    // carried on the prep entry the gate only moves the split from space into
+    // time: a holds a short wave, b takes the crumbs, a releases, b holds.
+    servicePreps(ns, opts);
+
+    assert(
+      !preps.get("b").wave,
+      "b must stay unplaced while a's short wave is still in flight",
+    );
+  },
+
+  "a stopped stream is repaired before a target that never streamed": async () => {
+    const { ns, math, pool, ram, mods, targets } = await prepFixture(2048);
+    const { servicePreps } = mods["core"];
+
+    // "a" is queued first, so insertion order alone would hand it the pool. A
+    // stopped stream is a target already admitted that earns nothing until it is
+    // back on baseline, so with prep serialised it has to go first.
+    const preps = new Map([["a", freshPrepEntry()], ["b", freshPrepEntry()]]);
+    const stopped = {
+      host: "b", stopped: true, retiring: false, depth: 0, resume: () => {},
+    };
+
+    servicePreps(ns, { math, pool, ram, streams: [stopped], preps, log: () => {} });
+
+    assert(preps.get("b").wave, "the stopped stream must be the one repaired");
+    assert(!preps.get("a").wave, "the never-streamed target must wait its turn");
+    assert(targets().join() === "b", `expected only b, got [${targets()}]`);
   },
 
   "the stream set does not shrink as the streams fill the pool": async () => {
