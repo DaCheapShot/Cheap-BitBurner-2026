@@ -186,10 +186,14 @@ export function admitTargets(priced, budget, maxTargets, opts = {}) {
 // ------------------------------------------------------------------- run ----
 
 /**
+ * Named runContinuous, not run. The game's RAM checker bills identifiers rather
+ * than call sites, and a function named `run` resolves against ns.run for
+ * 1.00 GB in every entry point that imports it.
+ *
  * @param {NS} ns
  * @param {object} math one of lib/mathAnalyze or lib/mathFormulas
  */
-export async function run(ns, math) {
+export async function runContinuous(ns, math) {
   ns.disableLog("ALL");
   ns.ui.openTail();
 
@@ -722,8 +726,10 @@ export function rescan(ns, math, opts) {
   // refresh() rather than sync(): sync's job is to find hosts and capacity that
   // did not exist, and neither changed. What changed is used RAM, on hosts we
   // already know, which is exactly the shallow pass.
-  const share = serviceShare(ns, pool, log, { ramPerThread: shareRam });
-  if (share && share.launched > 0) pool.refresh();
+  // `shared`, not `share`: the RAM checker bills the identifier, and a local
+  // named `share` buys ns.share at 2.40 GB for a function only the WORKER calls.
+  const shared = serviceShare(ns, pool, log, { ramPerThread: shareRam });
+  if (shared && shared.launched > 0) pool.refresh();
 
   const ranked = rankTargets(ns, math, { steal });
   const candidates = forced ? ranked.filter((t) => t.host === forced) : ranked;

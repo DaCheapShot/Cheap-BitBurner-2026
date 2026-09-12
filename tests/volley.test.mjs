@@ -113,7 +113,7 @@ export const tests = {
 
     // Any ReferenceError, TDZ error or bad call site inside run() surfaces here
     // and nowhere else in this suite.
-    await managerCore.run(ns, mathAnalyze);
+    await managerCore.runVolley(ns, mathAnalyze);
 
     const log = logOf(ns);
     assert(/cycle\s+1/.test(log), `no cycle was reported:\n${log}`);
@@ -125,7 +125,7 @@ export const tests = {
     const ns = volleyNs({ formulas: true });
     assert(mathFormulas.prepare(ns).ok, "prepare failed");
 
-    await managerCore.run(ns, mathFormulas);
+    await managerCore.runVolley(ns, mathFormulas);
     assert(/landed \d+ ok/.test(logOf(ns)), "the formulas build produced no landing summary");
   },
 
@@ -136,7 +136,7 @@ export const tests = {
     const ns = volleyNs();
     assert(mathAnalyze.prepare(ns).ok, "prepare failed");
 
-    await managerCore.run(ns, mathAnalyze);
+    await managerCore.runVolley(ns, mathAnalyze);
 
     const log = logOf(ns);
     for (const line of [
@@ -164,12 +164,12 @@ export const tests = {
 
     const off = volleyNs();
     assert(mathAnalyze.prepare(off).ok, "prepare failed");
-    await managerCore.run(off, mathAnalyze);
+    await managerCore.runVolley(off, mathAnalyze);
     const offLog = logOf(off);
 
     const on = volleyNs({ share: 0.25 });
     assert(mathAnalyze.prepare(on).ok, "prepare failed");
-    await managerCore.run(on, mathAnalyze);
+    await managerCore.runVolley(on, mathAnalyze);
     const onLog = logOf(on);
 
     assert(!/share \d+t on/.test(offLog), `share is off but a share line was printed:
@@ -191,7 +191,7 @@ ${onLog}`);
     const ns = volleyNs();
     assert(mathAnalyze.prepare(ns).ok, "prepare failed");
 
-    await managerCore.run(ns, mathAnalyze);
+    await managerCore.runVolley(ns, mathAnalyze);
     // Workers hand their RAM back on landing, so anything still held is a
     // reservation the cycle failed to release.
     assert(Object.values(ns._used).every((v) => v < 1e-6),

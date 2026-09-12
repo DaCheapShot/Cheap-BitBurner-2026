@@ -43,9 +43,12 @@ export async function main(ns) {
     if (!src) stale.push(`${file} (not on home at all)`);
     else if (!src.includes(REQUIRED_IN_WORKER)) stale.push(`${file} (no result reporting)`);
   }
-  const share = ns.read(SHARE_WORKER);
-  if (!share) stale.push(`${SHARE_WORKER} (not on home at all)`);
-  else if (!share.includes(REQUIRED_IN_SHARE)) stale.push(`${SHARE_WORKER} (does not call ns.share)`);
+  // `shareSrc`, not `share`. The RAM checker bills identifiers rather than call
+  // sites, so a local named `share` charged this script 2.40 GB for ns.share -
+  // a function only the worker it is reading ever calls.
+  const shareSrc = ns.read(SHARE_WORKER);
+  if (!shareSrc) stale.push(`${SHARE_WORKER} (not on home at all)`);
+  else if (!shareSrc.includes(REQUIRED_IN_SHARE)) stale.push(`${SHARE_WORKER} (does not call ns.share)`);
 
   if (stale.length) {
     ns.tprint(

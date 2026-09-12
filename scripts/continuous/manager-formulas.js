@@ -1,4 +1,4 @@
-import { run } from "scripts/continuous/core";
+import { runContinuous } from "scripts/continuous/core";
 import * as math from "scripts/continuous/lib/mathFormulas";
 
 /**
@@ -20,5 +20,5 @@ import * as math from "scripts/continuous/lib/mathFormulas";
 
 /** @param {NS} ns */
 export async function main(ns) {
-  await run(ns, math);
+  await runContinuous(ns, math);
 }

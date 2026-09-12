@@ -893,11 +893,15 @@ function serviceShare(ns, pool, ramPerThread, log, prefix = INDENT) {
 }
 
 /**
+ * Named runVolley, not run. The game's RAM checker bills identifiers rather than
+ * call sites, so a function named `run` resolves against ns.run and charges
+ * 1.00 GB to every entry point that imports it.
+ *
  * @param {NS} ns
  * @param {object} math injected math implementation - see the math interface
  *                      documented in mathAnalyze.js / mathFormulas.js
  */
-export async function run(ns, math) {
+export async function runVolley(ns, math) {
   ns.disableLog("ALL");
   ns.ui.openTail();
 

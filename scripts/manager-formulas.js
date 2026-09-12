@@ -1,4 +1,4 @@
-import { run } from "./managerCore.js";
+import { runVolley } from "./managerCore.js";
 import * as math from "./mathFormulas.js";
 
 /**
@@ -18,5 +18,5 @@ import * as math from "./mathFormulas.js";
 
 /** @param {NS} ns */
 export async function main(ns) {
-  await run(ns, math);
+  await runVolley(ns, math);
 }

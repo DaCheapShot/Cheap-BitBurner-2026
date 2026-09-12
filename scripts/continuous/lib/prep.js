@@ -70,10 +70,15 @@ export function placePrepWave(pool, ram, math, snap) {
   const empty = { placements: [], rawThreads: 0, effective: 0 };
   let growEff = growWanted;
 
-  // 0.7 per step reaches 1 thread from a million in about 40 attempts; 30 is
+  // 0.7 per step reaches 1 thread from a million in about 40 tries; 30 is
   // plenty for any realistic wave, and the loop is bounded so a pathological
   // pool cannot hang the manager.
-  for (let attempt = 0; attempt < 30; attempt++) {
+  //
+  // The counter is `step` and MUST NOT be called `attempt`. The game's RAM
+  // checker bills identifiers, not call sites, and `attempt` resolves against
+  // ns.codingcontract.attempt - 10.00 GB on every script that reaches this
+  // module, for a function nothing here calls.
+  for (let step = 0; step < 30; step++) {
     const grow = growEff > 0
       ? pool.allocateEffective(ram.grow, growEff, bonus, { order: OP_FILL_ORDER.G })
       : empty;
