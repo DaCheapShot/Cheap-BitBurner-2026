@@ -917,41 +917,47 @@ export const REPREP_GRACE_MS = 2000;
 export const RESCAN_MS = 60000;
 
 /**
- * MAXIMUM unprepped targets to prep at once, alongside the running streams.
+ * MAXIMUM unprepped targets QUEUED for prep at once, alongside the streams.
  *
- * A ceiling, not a target - see PREP_SPARE_SHARE for what actually decides the
- * number. "Prep waves are sized by need and so are individually small" is true
- * only relative to the pool they are placed in, and that assumption was written
- * against a 26 PB one.
+ * A bound on the QUEUE, not on RAM. How many of the queued preps actually place
+ * a wave on a given tick is decided by `servicePreps`, which stops at the first
+ * wave the pool could not cover in full - so this number and PREP_SPARE_SHARE
+ * below cap how long the prep list gets, and nothing more. Queuing is free:
+ * an entry with no wave placed costs a map slot and reserves nothing.
  *
  * Prep runs CONCURRENTLY with streaming, never before it. Blocking the whole
  * run until every target was prepped meant the already-prepped ones - the good
  * ones, which is why they were picked - sat idle earning nothing while a deep,
  * dirty target was brought up. That is backwards.
  *
- * This is now the REAL ceiling. It used to be unreachable: rescan queued only
- * the top maxTargets * 2 candidates, and the streams occupied most of those, so
- * the queue ran out before the slots did however much RAM was spare. The queue
- * is the whole ranking now, which makes this number and PREP_SPARE_SHARE the
- * only two things deciding the count.
+ * It used to be unreachable: rescan queued only the top maxTargets * 2
+ * candidates, and the streams occupied most of those, so the queue ran out
+ * before the slots did however much RAM was spare. The queue is the whole
+ * ranking now, so this is the real bound on its length.
  */
 export const PREP_CONCURRENCY = 4;
 
 /**
- * How much of the pool must be FREE to earn each prep slot beyond the first.
+ * How much of the pool must be idle to earn each queued prep beyond the first.
  *
- * The flat PREP_CONCURRENCY above is right on a large pool and ruinous on a
- * small one, because a wave sized "by need" takes whatever the pool has when
- * need exceeds it. On a 1.6 TB pool four queued preps reserved 1.58 TB, held it
- * for a weaken window each, and left `pool 0.00TB free` on every report - the
- * one live stream aborted 169 of 170 batches for want of RAM, and none of the
- * four targets finished prepping either, because each was crawling at a quarter
- * of the rate one alone would have had.
+ * Also a QUEUE bound - it was written as the RAM throttle and could not be one.
+ * A wave sized "by need" takes whatever the pool has when need exceeds it, and
+ * on a 1.6 TB pool four queued preps reserved 1.58 TB, held it for a weaken
+ * window each, and left `pool 0.00TB free` on every report: the one live stream
+ * aborted 169 of 170 batches for want of RAM, and none of the four finished
+ * prepping either, each crawling at a quarter of the rate one alone would have.
  *
- * So: one prep always, and one more per quarter of the pool that is genuinely
- * idle. That reproduces today's behaviour exactly where it was measured - an
- * idle pool at startup still grants all four - and collapses to serial prep
- * when the pool is full, which is the case that was broken.
+ * Scaling the count by idle budget was the first fix and it only moved the
+ * failure. A ratio of RAM shares cannot answer "does one target's need fit",
+ * because prep need is set by the target's excess security and money deficit,
+ * not by the pool - and at the start of a BitNode no target is prepped, so
+ * nothing is admitted, `spent` is 0, `idle` is the whole budget and all four
+ * are granted on a 32 GB home exactly as readily as on 26 PB. That is the
+ * original 1.6 TB failure arrived at from the other end.
+ *
+ * The RAM decision therefore lives in `servicePreps`, where a wave's ask can be
+ * compared against what was actually placed (`shrunk`). This constant survives
+ * only to keep the queue - and the prep list in the report - a sane length.
  */
 export const PREP_SPARE_SHARE = 0.25;
 

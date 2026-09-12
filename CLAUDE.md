@@ -420,9 +420,26 @@ narrows the slice for all of them and income is near-linear in the slice — a l
 phantasy alone at $2.84m/s against $1.96m/s for three. `rescan` prices 1..N and takes the best
 total, so the count rises to 3 on its own as the pool grows.
 
-**Prep runs concurrently with streaming**, one target at a time unless RAM is genuinely spare
-(`PREP_SPARE_SHARE`). Four concurrent preps on a 1.6 TB pool reserved the whole of it and
-starved the only live stream to 169 aborts in 170 batches.
+**Prep runs concurrently with streaming**, one target at a time unless the pool genuinely has
+leftovers. Four concurrent preps on a 1.6 TB pool reserved the whole of it and starved the only
+live stream to 169 aborts in 170 batches.
+
+**The prep count is decided at PLACEMENT, not by a RAM share.** `servicePreps` stops at the
+first wave the pool could not cover in full — `placePrepWave` reports that as `shrunk` — so
+extras only ever get leftovers. It has to be placement that decides, because prep need is set
+by the target's excess security and money deficit, not by the pool, and one target's need
+routinely exceeds the whole pool early in a BitNode. `PREP_CONCURRENCY` and `PREP_SPARE_SHARE`
+survive as bounds on how many hosts are QUEUED; queuing reserves nothing. Both were written as
+the RAM throttle and neither could be one: a ratio of shares cannot answer "does one target's
+need fit", and at the start of a BitNode nothing is prepped, so nothing is admitted, `spent` is
+0, `idle` is the whole budget and all four slots are granted on a 32 GB home exactly as readily
+as on 26 PB — the 1.6 TB failure reached from the other end.
+
+The gate is carried on the prep entry, not recomputed per tick, because a short wave is still
+the constraint while it is in flight. Without that the split just moves from space into time:
+one target holds a short wave, the next takes the crumbs, the first releases, the next holds.
+Repairs are serviced before never-streamed targets — a stopped stream is a target already
+admitted that earns nothing until it is back on baseline.
 
 **Share works here too**, through `lib/share.js` — the same marker, the same port 2, the same
 `sharemode.js`. It is a port of `managerCore`'s, not a rewrite, and every rule in it is one the

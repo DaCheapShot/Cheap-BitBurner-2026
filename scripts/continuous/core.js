@@ -915,7 +915,25 @@ export function rescan(ns, math, opts) {
   // Prep the best candidates that are not ready, up to the concurrency limit.
   // These are the ones a future rescan will want; prepping them now is what
   // makes "better servers become available" mean anything.
+  // Who is already at baseline, and therefore must never be queued for prep.
+  //
+  // `priced` is NOT the answer to that question, though it was used as one.
+  // priceTargets only ever sees candidates.slice(0, maxTargets * 3) and drops
+  // anything that fails to price, so a prepped target below that cutoff is
+  // absent from it and reads as unprepped. With one prep slot - which is what a
+  // pool the streams have fully spoken for grants - it then takes that slot on
+  // every rescan and hands it straight back: a live run sat on
+  // `~nectar-net: queued for prep` / `nectar-net: prepped, eligible from the
+  // next rescan` once a minute forever, at rank 10 of 17, while iron-gym,
+  // the-hub, neo-net and zer0 were never prepped at all.
+  //
+  // So test the snapshot rankTargets already took. It costs nothing - the same
+  // snap is what the ranking table prints prepped/unprepped from - and it
+  // cannot be fooled by a pricing failure or a cutoff.
   const prepped = new Set(priced.map((p) => p.host));
+  for (const t of candidates) {
+    if (isPrepped(t.snap)) prepped.add(t.host);
+  }
   const streaming = new Set(next.map((s) => s.host));
 
   // What the WORST admitted target is worth. Anything an unprepped candidate
@@ -944,21 +962,20 @@ export function rescan(ns, math, opts) {
     ...candidates.map((t) => ({ host: t.host, why: "next in line" })),
   ];
 
-  // Prep one target at a time unless the pool has real room to spare.
-  //
-  // A wave is sized by NEED, which is only small relative to the pool it is
-  // placed in - and that assumption was written against 26 PB. On a 1.6 TB pool
-  // four queued preps reserved 1.58 TB, held it for a weaken window each, and
-  // left `pool 0.00TB free` on every report: the one live stream aborted 169 of
-  // 170 batches for want of RAM, and none of the four finished prepping either,
-  // because each was crawling at a quarter of the rate one alone would have had.
+  // How many targets may be QUEUED for prep. Not how many get RAM - that is
+  // decided by servicePreps, which stops at the first wave the pool could not
+  // cover in full. Queuing reserves nothing, so an extra entry here costs a map
+  // slot and a line in the report.
   //
   // Spare is what the ADMITTED STREAMS will not use, NOT what happens to be free
   // this instant. Free RAM was the first attempt and it is wrong at exactly the
   // moment that matters: at startup nothing is placed yet, so the pool reads
-  // 100% idle and every slot is granted - whereupon the preps take it and the
-  // streams never get a look in. `committed` is the calculator's own figure for
-  // what the streams will occupy in steady state, which is the honest answer.
+  // 100% idle and every slot is granted. `spent` is the calculator's own figure
+  // for what the streams will occupy in steady state, which is the honest
+  // answer - but note it does not save this from the startup case either, since
+  // with no target prepped there is nothing to admit and `spent` is 0. Only
+  // placement knows whether one target's need fits; see the `tight` gate in
+  // servicePreps.
   const capacity = pool.placeableRam(ram.grow);
   const idle = Math.max(0, budget - spent);
   const spare = capacity > 0 ? Math.floor(idle / (capacity * PREP_SPARE_SHARE)) : 0;
@@ -984,9 +1001,10 @@ export function rescan(ns, math, opts) {
  *
  * Always an object, never a bare null, because `waves` has to survive the gaps
  * BETWEEN waves - the entry is cleared every time one lands, and a give-up
- * condition needs a count that outlives that.
+ * condition needs a count that outlives that. `shrunk` outlives the wave for
+ * the same reason: it has to still be readable while the wave is in flight.
  */
-const freshPrep = () => ({ wave: null, deadline: 0, waves: 0 });
+const freshPrep = () => ({ wave: null, deadline: 0, waves: 0, shrunk: false });
 
 /**
  * Advance every prep in flight by one tick: place a wave, wait for it to land,
@@ -995,6 +1013,11 @@ const freshPrep = () => ({ wave: null, deadline: 0, waves: 0 });
  * Serves both jobs, because they are the same job - bringing a target to
  * baseline. A host arrives here either because rescan queued it (never streamed
  * yet) or because its stream drifted and stopped.
+ *
+ * How many of the queued preps actually get a wave is decided HERE, not by the
+ * slot count rescan granted - see the `tight` gate below. On a pool with room
+ * every queued prep gets one; on a pool that cannot cover a single target's
+ * need, exactly one does.
  *
  * Deliberately NOT prepTargets, which drains the port itself and awaits its own
  * waves. The first would eat live batches' reports; the second would freeze
@@ -1016,8 +1039,38 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
     if (!preps.has(s.host)) preps.set(s.host, freshPrep());
   }
 
-  for (const [host, active] of [...preps]) {
-    if (active.wave && now < active.deadline) continue;
+  // Extras get LEFTOVERS, never a share of what the first prep needed.
+  //
+  // A wave is sized by need, but placePrepWave backs the grow request down x0.7
+  // until it fits, so a second prep on an almost-full pool does not fail and
+  // wait - it gets a smaller wave. Early in a BitNode, where one target's need
+  // exceeds the whole pool, three queued preps split it three ways and all three
+  // crawl instead of one finishing and starting to earn.
+  //
+  // PREP_SPARE_SHARE cannot catch this. It compares RAM SHARES, and at startup
+  // no target is prepped, so nothing is admitted, `spent` is 0, `idle` is the
+  // whole budget and every slot is granted however small the pool is. Need
+  // against capacity is knowable only here, at placement.
+  let tight = false;
+
+  // Repairs before fresh preps. A stopped stream is a target we already admitted
+  // that earns nothing until it is back on baseline, so with prep serialised it
+  // must not queue behind a host that has never streamed. Stable sort, so queue
+  // order - which is rank order - still decides within each group.
+  const ordered = [...preps].sort(
+    (a, b) => Number(byHost.get(b[0])?.stopped ?? false)
+            - Number(byHost.get(a[0])?.stopped ?? false),
+  );
+
+  for (const [host, active] of ordered) {
+    if (active.wave && now < active.deadline) {
+      // A short wave still in flight is still the pool's constraint. Without
+      // this the gate just moves the split from space into time: this host holds
+      // a short wave, the next takes the crumbs, this one releases, the next
+      // holds, and the pool is halved all the same.
+      if (active.shrunk) tight = true;
+      continue;
+    }
 
     if (active.wave) {
       // The wave has landed. Its reservations were never committed - a prep
@@ -1064,14 +1117,21 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
       continue;
     }
 
+    // Placed only AFTER the release, finish and abandon handling above, which
+    // every entry still needs every tick - skipping the release would leak the
+    // reservation of a wave that has already landed.
+    if (tight) continue;
+
     const wave = placePrepWave(pool, ram, math, snap);
-    if (!wave) continue; // pool busy - try again next tick
+    if (!wave) { tight = true; continue; } // pool busy - try again next tick
 
     const times = math.opTimes(snap);
     const res = launchPrepWave(ns, snap, wave, `pr${Date.now() % 100000}:${host}`, { times, log });
     active.wave = wave;
     active.deadline = res.landAt + REPREP_GRACE_MS;
     active.waves++;
+    active.shrunk = wave.shrunk;
+    if (wave.shrunk) tight = true;
   }
 
   return finished;
