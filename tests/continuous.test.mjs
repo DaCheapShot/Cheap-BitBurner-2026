@@ -3795,6 +3795,44 @@ export const tests = {
     assert(!preps.has("stuck"), "a prep past its wave budget must release its slot");
   },
 
+  "a prepped target below the pricing cutoff is not queued for prep": async () => {
+    // priceTargets only sees candidates.slice(0, maxTargets * 3), so with one
+    // target that is the top three. Ranking here is by maxMoney, so `low` sits
+    // outside the cutoff while being perfectly prepped, and `dirty` is the only
+    // candidate that genuinely needs a wave.
+    const at = (moneyMax, over = {}) => ({
+      moneyMax, moneyAvailable: moneyMax, minDifficulty: 5, hackDifficulty: 5,
+      hackPercentPerThread: 0.003, growBase: 1.0018,
+      weakenTime: 20000, growTime: 16000, hackTime: 5000,
+      ...over,
+    });
+
+    const { ns, math, pool, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        top: at(1e12), mid: at(1e11), third: at(1e10),
+        low: at(1e9),
+        dirty: at(1e8, { moneyAvailable: 1e3, hackDifficulty: 40 }),
+      },
+    });
+    ns.exec = () => 1;
+
+    const preps = new Map();
+    mods["core"].rescan(ns, math, {
+      pool, ram, steal: 0.1, maxTargets: 1, forced: null,
+      streams: [], preps, log: () => {}, verbose: false,
+    });
+
+    // Inferring "prepped" from membership in `priced` read `low` as unprepped
+    // and handed it the single prep slot on every rescan, which it returned
+    // immediately - so the target that actually needed prepping never got one.
+    assert(
+      !preps.has("low"),
+      "a prepped target outside the pricing cutoff must not be queued for prep",
+    );
+    assert(preps.has("dirty"), "the genuinely unprepped target should take the slot");
+  },
+
   // -------------------------------------------------------- serial prep ----
   //
   // The five tests below exist because the slot math in rescan cannot see the

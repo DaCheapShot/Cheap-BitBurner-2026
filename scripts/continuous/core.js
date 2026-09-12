@@ -915,7 +915,25 @@ export function rescan(ns, math, opts) {
   // Prep the best candidates that are not ready, up to the concurrency limit.
   // These are the ones a future rescan will want; prepping them now is what
   // makes "better servers become available" mean anything.
+  // Who is already at baseline, and therefore must never be queued for prep.
+  //
+  // `priced` is NOT the answer to that question, though it was used as one.
+  // priceTargets only ever sees candidates.slice(0, maxTargets * 3) and drops
+  // anything that fails to price, so a prepped target below that cutoff is
+  // absent from it and reads as unprepped. With one prep slot - which is what a
+  // pool the streams have fully spoken for grants - it then takes that slot on
+  // every rescan and hands it straight back: a live run sat on
+  // `~nectar-net: queued for prep` / `nectar-net: prepped, eligible from the
+  // next rescan` once a minute forever, at rank 10 of 17, while iron-gym,
+  // the-hub, neo-net and zer0 were never prepped at all.
+  //
+  // So test the snapshot rankTargets already took. It costs nothing - the same
+  // snap is what the ranking table prints prepped/unprepped from - and it
+  // cannot be fooled by a pricing failure or a cutoff.
   const prepped = new Set(priced.map((p) => p.host));
+  for (const t of candidates) {
+    if (isPrepped(t.snap)) prepped.add(t.host);
+  }
   const streaming = new Set(next.map((s) => s.host));
 
   // What the WORST admitted target is worth. Anything an unprepped candidate
