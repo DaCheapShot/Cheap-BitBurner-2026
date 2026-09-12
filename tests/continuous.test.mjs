@@ -274,6 +274,9 @@ async function makeStream(over = {}) {
   // what happened when the default moved from 10% to the ceiling.
   const s = mods["lib/stream"].createStream(ns, math, {
     host: "t", pool, ram, log: () => {}, steal: over.steal ?? 0.1,
+    // Both undefined by default, which is the point: most stream tests want the
+    // configured cadence and no slice, so nothing re-paces under them.
+    slice: over.slice, cadence: over.cadence,
   });
 
   // Plan a batch AND launch every op of it.
@@ -3272,6 +3275,49 @@ export const tests = {
     const slow = { host: "slow", gb: 1, times: { weaken: MAX_IN_FLIGHT * 2 * CADENCE_MS } };
     const { admitted } = admitTargets([slow], Infinity, 12);
     assert(admitted[0].depth === MAX_IN_FLIGHT, `depth ${admitted[0].depth} ignored the cap`);
+  },
+
+  "a stream paces for the batch it is sending, not the one rescan priced": async () => {
+    const slice = 5000;
+
+    // What the pipeline would really occupy at the pace the stream settled on.
+    // Little's law on the batch the stream ACTUALLY planned - which is the whole
+    // question, since rescan prices the cadence at its own chosen fraction and
+    // the controller ramps toward that in x1.5 steps.
+    const occupancy = async (steal) => {
+      const { s, ns, math, ram, mods } = await makeStream({ steal, slice });
+      const { batchRamSeconds, heldAllAtOnce } = mods["lib/plan"];
+      assert(s.dispatch().dispatched, `steal ${steal} failed to dispatch`);
+      const times = math.opTimes(math.snapshot(ns, "t"));
+      const th = s.stats.lastThreads;
+      const held = heldAllAtOnce(times);
+      return {
+        cadence: s.cadence,
+        gb: batchRamSeconds(th, ram, held, th.weaken2) / s.cadence,
+      };
+    };
+
+    // A live run sat at 3.2% against a 29% optimum on a cadence priced for 29%,
+    // and left 17.25TB of a committed pool idle at depth 9. Both fractions must
+    // fill the slice they were handed, not just the one the calculator picked.
+    const low = await occupancy(0.032);
+    const high = await occupancy(0.29);
+    assertClose(low.gb, slice, slice * 0.01, "the ramping fraction under-fills its slice");
+    assertClose(high.gb, slice, slice * 0.01, "the optimum fraction under-fills its slice");
+
+    // Not vacuous: the two cadences have to actually differ, or the assertions
+    // above would pass on a stream that never re-paced at all.
+    assert(low.cadence < high.cadence / 2, `cadence did not track the fraction: ${low.cadence} vs ${high.cadence}`);
+  },
+
+  "a stream with no slice keeps the cadence it was seeded with": async () => {
+    // The pinned-pace path. Rescan always hands a slice, but capacity.js and the
+    // tests drive streams directly, and a stream that silently re-paced itself
+    // under them would make every timing fixture a measurement of the fixture's
+    // RAM instead of its clock.
+    const { s, fire } = await makeStream({ cadence: 777 });
+    fire();
+    assertClose(s.cadence, 777, 1e-9, "an unsliced stream re-paced itself");
   },
 
   // ---------------------------------------------------------- supervisor ---

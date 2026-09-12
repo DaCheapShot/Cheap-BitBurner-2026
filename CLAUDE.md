@@ -407,6 +407,19 @@ log-spaced and takes the best income, subject to two separate bounds:
 
 `--steal` still exists and pins the fraction, for controlled measurement only.
 
+**A stream owns its SLICE, not its cadence.** `chooseSteal` returns both together, sized at the
+fraction *it* chose - but the controller runs at its own fraction and ramps toward that optimum in
+`STEAL_STEP_UP` steps, each gated on `STEAL_MIN_SAMPLES` clean batches. Handing the stream the
+cadence paces it for a batch it is not sending: a live run sat at 3.2% against a 29% optimum on a
+17.6s cadence priced for 29%, held depth 9, and left 17.25 TB of an already-committed pool idle at
+a ninth of the income the slice was carved out for. It was self-sustaining too - the ramp needs 8
+landings per step, so a cadence too slow for the batch starves the evidence that would correct it
+(141s per step, ~13 minutes to climb back). So rescan calls `setSlice`, and `stream.pace` re-derives
+the cadence at every dispatch from the batch it just planned, where the fraction, the hacking level
+and the drift budget are all already in hand for free. `pace` uses `heldAllAtOnce` on purpose,
+matching `chooseSteal`: it over-states JIT holding by ~20%, and a stream disagreeing with the
+calculator that admitted it about the same batch would be worse than the conservatism.
+
 **The grow margin is derived from measured drift**, not flat. Drift is hack effectiveness rising
 between dispatch and landing; the controller measures it two ways (from reports, and from the
 trend in `hackFractionPerThread` over a weaken window) and sizes every batch for
