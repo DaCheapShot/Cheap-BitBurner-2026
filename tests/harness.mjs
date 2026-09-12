@@ -19,7 +19,31 @@ const SCRIPTS = path.resolve(import.meta.dirname, "..", "scripts");
  * tests/continuous.test.mjs; mirroring it here would mean two loaders that have
  * to agree about that.
  */
-const NESTED = ["continuous/config.js"];
+const NESTED = [
+  "continuous/config.js",
+  // The gang subsystem's pure modules. gang/math.js is where every gang
+  // decision is made and it holds no ns call, so it is testable directly -
+  // which is the point of putting the decisions there rather than in the
+  // transients that act on them.
+  "gang/config.js",
+  "gang/math.js",
+  "gang/marker.js",
+  // The gang entry points hold ns calls, but only inside main() - nothing runs
+  // at import time, so Node can load them and a test can drive gang.js's loop
+  // with a mock ns.
+  //
+  // All of them are listed, including the ones no test drives, because merely
+  // importing a module PARSES it. Nothing else in this repo parses the gang
+  // transients, and a `node --check` cannot be run on them: there is no
+  // package.json, so Node reads a bare .js as CommonJS and rejects `export`.
+  // Two runtime errors have already reached the live game past a clean check.
+  "gang/gang.js",
+  "gang/tick.js",
+  "gang/ascend.js",
+  "gang/equip.js",
+  "gang/war.js",
+  "gang/create.js",
+];
 
 /**
  * Mirror scripts/ into a temp dir as .mjs so Node can import them.
@@ -43,8 +67,13 @@ export async function loadScripts() {
     fs.writeFileSync(dest, rewritten);
   }
 
+  // Nested modules are keyed by their nested name ("gang/math"), so a caller
+  // asking for a flat script cannot collide with one. They are imported here
+  // rather than left as mirrored files because every one of them is constants
+  // or pure arithmetic - nothing in NESTED may run an ns call at IMPORT
+  // time, or loading it under Node would fail.
   const mods = {};
-  for (const f of names) {
+  for (const f of [...names, ...NESTED]) {
     const bare = f.replace(/\.js$/, "");
     const url = pathToFileURL(path.join(dir, bare + ".mjs")).href;
     mods[bare] = await import(url);

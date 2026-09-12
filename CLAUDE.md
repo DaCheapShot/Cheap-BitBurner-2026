@@ -68,6 +68,8 @@ run scripts/sharemode.js                # share status: power, pool, what each f
 run scripts/sharemode.js on             # trade SHARE_FRACTION of the pool for faction rep
 run scripts/sharemode.js off            # every share thread exits within 10s
 run scripts/sharemode.js 0.5            # retune live, no restart
+run scripts/gang/create.js "Slum Snakes"  # found the gang, once, by hand
+run scripts/gang/gang.js                # the gang supervisor (boot starts it too)
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -241,6 +243,15 @@ editor's RAM panel when one moves.
 | `sharemode.js` | the share toggle | 4.20 |
 | `continuous/manager.js` | entry: continuous core + its mathAnalyze | 13.35 |
 | `continuous/manager-formulas.js` | entry: continuous core + its mathFormulas | 9.40 |
+| `gang/config.js` | gang tunables, paths, STAT_KEYS | 0 |
+| `gang/math.js` | the game's gain formulas + every gang decision | 0 |
+| `gang/marker.js` | reads `/data/gang.txt` | 0 |
+| `gang/gang.js` | entry: resident scheduler, holds no gang API at all | 2.80 |
+| `gang/create.js` | entry: found the gang, hand-run once | 2.60 |
+| `gang/ascend.js` | transient: ascension decisions | 8.60 |
+| `gang/war.js` | transient: clash engage/disengage | 11.60 |
+| `gang/tick.js` | transient: recruit, tasks, wanted governor | 11.60 |
+| `gang/equip.js` | transient: equipment buying | 12.70 |
 
 The continuous entries are the two that have to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds them under 16 GB for that reason. The
@@ -465,6 +476,80 @@ prices RAM share is about to take, and the calculator then commits a fraction it
 Its log mirrors to `/data/continuous.log.txt`. That file is written to the GAME's filesystem and
 filesync only pushes the other way, so getting it onto disk means `download /data/continuous.log.txt`
 from the terminal.
+
+### The gang subsystem (`scripts/gang/`)
+
+Self-contained like `continuous/`: it never imports from `scripts/`, and `scripts/` reads exactly
+one 0 GB path constant out of it (`boot.js` imports `GANG_SERVICE`). It shares no RAM pool, no
+port and no marker with the batcher, so the two cannot interfere.
+
+**There is no tick to detect.** `ns.gang.nextUpdate()` is **0 GB** and resolves on the next gang
+update, returning the ms of gang time processed. The gang tick is **2 s** (`minCyclesToProcess =
+2000 / MilliPerCycle`), up to 5 s per update while bonus time drains (`maxCyclesToProcess`), and
+territory/power update separately every `CyclesPerTerritoryAndPowerUpdate = 100` cycles. Watching
+stats change to infer a timer measures the same thing worse and drifts.
+
+**A scheduler plus four transients, because the gang API is priced off `GangApiBase = 4`.** The
+surface this needs is ~37 GB held together, which would not start on a fresh BitNode's 32 GB home
+beside `boot.js`, `cloud.js` and a continuous manager. So `gang.js` holds **no gang call at all**
+(1.60 + `run` + `ps` = 2.80) and `ns.run`s the expensive ones. Each transient **reads and acts in
+one process**, so there is no port protocol, no data handoff and nothing to get out of step.
+`runOne` **awaits** each — that is the whole argument; fired unawaited they stack to ~46 GB.
+They run on home only and are never `scp`'d, so the "a worker's imports must be deployed with it"
+trap does not apply here.
+
+`/data/gang.txt` exists only so `ascend.js` and `equip.js` can skip a 2.00 GB
+`getGangInformation` for three numbers, exactly as `calib.js` spares the manager the analyze
+functions. `marker.js` collapses missing, corrupt and schema-invalid to `null`, same idiom.
+
+**Two identifier collisions cost real GB here**, both of them fields the API hands you:
+
+- `GangMemberInfo.hack` (also `GangTaskStats`, `GangMemberAscension`) — `m.hack` is 0.10 GB in the
+  file that writes it *and* in every importer. `STAT_KEYS` + `m[k]` is why `gang/math.js` is 0 GB.
+- `GangGenInfo.respectForNextRecruit` is also a **1.00 GB `ns.gang` function**. `tick.js` reads it
+  as `info["respectForNextRecruit"]`; a computed key is a Literal and costs nothing.
+
+Two tests in `tests/gang.test.mjs` pin both, because neither has a symptom short of the game
+refusing to start the script.
+
+**Every decision lives in `gang/math.js`**, which is a line-for-line port of
+`src/Gang/formulas/formulas.ts` plus the planning on top. Reproduced rather than called through
+`ns.formulas.gang` because that needs Formulas.exe and takes `GangMember` objects the API never
+hands out — only `GangMemberInfo`. `tests/gang.test.mjs` transcribes the same formulas a second
+time, flat, rather than reusing the module's helpers.
+
+Things that look arbitrary in there and aren't:
+
+- **A task below its difficulty pays exactly zero**, not a little — every formula subtracts a
+  multiple of `difficulty` from the weighted stat sum and returns 0 if that goes non-positive.
+  That is the entire reason `TRAIN_STAT_FLOOR` exists; "assign the best task" without it parks the
+  opening roster on nothing.
+- **`GANG_SOFTCAP` cancels out of ranking.** It appears only in the gain exponent and `pow` is
+  monotonic, so task order is the same for any positive exponent. Worth knowing before paying
+  4.00 GB and a Source-File for `ns.getBitNodeMultipliers`.
+- **The wanted governor is sized, not guessed.** Vigilante Justice has `baseWanted: -0.001`, so its
+  contribution is a computable negative; the governor flips the worst offenders until *net* wanted
+  gain is non-positive and no further. It runs **last** in `planTasks` because it needs the real
+  total, which is not known until everyone else is placed. No hysteresis, deliberately: flipping
+  drops wanted, which releases them, and a limit cycle around the floor is the right steady state.
+- **`phaseFor` keys TRAIN on "no member is ready"**, not "some member is training" — otherwise one
+  freshly ascended member drags eleven earners back to the training yard.
+- **Territory warfare takes the WEAKEST earners** (same power, least forgone income), and
+  `warDecision` engages on the **minimum** win chance across rivals, with hysteresis. A clash is
+  drawn against one gang at a time, so five safe matchups do not make a sixth safe, and losing one
+  kills a member.
+- **Ascension is refused when it would cost the next recruit.** `result.respect` is respect *lost*,
+  and respect is what gates recruiting; under a full roster a recruit beats a multiplier on one
+  member. `ascend.js` decrements its own running total rather than re-reading the gang.
+- **Augmentations survive ascension and gear does not** (`ascend()` reapplies only augs), so gear
+  waits for `BUY_GEAR_PHASES`. Purchases are planned **item-major**, cheapest first: member-major
+  lets the first member empty the budget on its own wishlist.
+
+`boot.js` gates the service on `ns.gang.inGang()` (0 GB) rather than starting it blind — without a
+gang the supervisor exits at once and `ensureService` would relaunch it every tick forever, the
+same trap `CLOUD_DONE_MARKER` closes for cloud. `--no-gang` opts out. A bare `gang` identifier
+costs nothing: `findFunc` matches a key only when its value is a function or a number, so it
+descends into the namespace and finds no leaf of that name.
 
 ### Invariants that look arbitrary but aren't
 

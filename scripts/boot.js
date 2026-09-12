@@ -5,6 +5,9 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
 // The continuous batcher's worker paths, for killOrphanWorkers. That file holds
 // no ns calls and imports nothing, so this is 0 GB - see the RAM note below.
 import { WORKER_LIST as CONT_WORKER_LIST } from "./continuous/config.js";
+// The gang supervisor's path. Same kind of import as the line above - that file
+// is constants only, no ns call anywhere in it, so this is 0 GB.
+import { GANG_SERVICE } from "./gang/config.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -21,6 +24,10 @@ import { WORKER_LIST as CONT_WORKER_LIST } from "./continuous/config.js";
  *   5. manager      - kept alive as a service. FOUR files, two independent
  *                     choices: which SYSTEM (continuous or shotgun) and which
  *                     math BACKEND (formulas or analyze).
+ *   6. gang         - kept alive as a service, but ONLY once a gang exists.
+ *                     ns.gang.inGang() is 0 GB, so the check costs nothing on
+ *                     every BitNode that will never have one. The gang
+ *                     supervisor holds no gang API itself; it runs transients.
  *
  * TWO BATCHERS, ONE POOL. scripts/continuous/ is the JIT batcher - it streams
  * batches at a cadence and sizes its own steal fraction from the server and the
@@ -48,6 +55,7 @@ import { WORKER_LIST as CONT_WORKER_LIST } from "./continuous/config.js";
  *         run scripts/boot.js --target joesguns   (pin the manager's target)
  *         run scripts/boot.js --once              (one pass, then exit)
  *         run scripts/boot.js --no-cloud          (don't buy servers)
+ *         run scripts/boot.js --no-gang           (don't supervise the gang)
  *         run scripts/boot.js --no-formulas       (always use the analyze build)
  *         run scripts/boot.js --shotgun           (the volley batcher, not the stream)
  *         run scripts/boot.js --targets 5         (continuous only; shotgun ignores it)
@@ -58,7 +66,11 @@ import { WORKER_LIST as CONT_WORKER_LIST } from "./continuous/config.js";
  * (the deploy manifest check is ns.read/ns.write, 0 GB, and DEPLOY_LIST is a
  * plain array of strings from config.js. continuous/config.js is the same kind
  * of file - constants only, no ns call anywhere in it - so importing the
- * continuous worker paths adds nothing to this total.)
+ * continuous worker paths adds nothing to this total, and neither does
+ * gang/config.js. ns.gang.inGang() is 0 GB, and the `gang` namespace itself
+ * resolves to nothing: findFunc in RamCalculations.ts matches a key only when
+ * its value is a function or a number, so a bare `gang` descends into the
+ * namespace, finds no leaf of that name, and adds 0.)
  * (calib.js is 0 GB, ns.read/ns.write are 0 GB, and root.js is imported only
  * for the marker path constant - a plain string, so it adds nothing.)
  */
@@ -302,6 +314,7 @@ export async function main(ns) {
   const args = ns.args.map(String);
   const once = args.includes("--once");
   const noCloud = args.includes("--no-cloud");
+  const noGang = args.includes("--no-gang");
   const noManager = args.includes("--no-manager");
   const noFormulas = args.includes("--no-formulas");
   // Continuous by default. It is the measured better earner - $947m/s average
@@ -455,6 +468,15 @@ export async function main(ns) {
     if (!noManager) {
       const wanted = hasFormulas ? pair.formulas : pair.analyze;
       ensureOneManager(ns, wanted, ALL_MANAGERS.filter((f) => f !== wanted), managerArgs, log);
+    }
+    // The gang supervisor. Gated on inGang() rather than started unconditionally
+    // because the script exits immediately without a gang, and ensureService
+    // would then relaunch it every tick forever - the same trap CLOUD_DONE_MARKER
+    // exists to avoid. inGang() is 0 GB, so the gate is free on every BitNode
+    // that never founds one.
+    if (!noGang && ns.gang.inGang()) {
+      killDuplicates(ns, GANG_SERVICE, log);
+      ensureService(ns, GANG_SERVICE, [], log);
     }
 
     firstPass = false;
