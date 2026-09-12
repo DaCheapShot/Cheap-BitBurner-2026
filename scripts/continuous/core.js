@@ -872,7 +872,12 @@ export function rescan(ns, math, opts) {
       // fault keeps its reduced fraction and climbs back toward this.
       const base = baseFor.get(p.host);
       if (base !== undefined) existing.setBase(base);
-      if (p.picked) existing.setCadence(p.picked.cadence);
+      // The slice, not the cadence. picked.cadence is priced at picked.steal,
+      // and a stream still ramping toward that optimum sends batches a fraction
+      // of the size - so handing it the cadence paces it for a batch it is not
+      // sending and idles the RAM this slice was carved out of. The stream has
+      // the batch; give it the budget and let it divide. See stream.pace.
+      existing.setSlice(slice);
       next.push(existing);
       continue;
     }
@@ -898,7 +903,11 @@ export function rescan(ns, math, opts) {
     );
     next.push(createStream(ns, math, {
       host: p.host, pool, ram, steal: start, cap: base, adaptive, log,
+      // Both: the cadence seeds the pace for the very first dispatch and for
+      // the no-room path that precedes it, the slice is what every dispatch
+      // after that re-derives from.
       cadence: p.picked?.cadence,
+      slice,
       idPrefix: `${p.host.slice(0, 6)}${Date.now() % 1000}-`,
     }));
   }

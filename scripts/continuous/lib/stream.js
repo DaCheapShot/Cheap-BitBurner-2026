@@ -2,8 +2,10 @@ import { fmtMoney } from "scripts/continuous/lib/fmt";
 import {
   baselineDrift,
   batchRam,
+  batchRamSeconds,
   batchVerdict,
   delayFor,
+  heldAllAtOnce,
   landingOffsets,
   nextAnchor,
   maxStealForDrift,
@@ -101,6 +103,7 @@ export function createStream(ns, math, opts) {
     cap: initialCap = MAX_STEAL_FRACTION,
     adaptive = true,
     cadence: initialCadence = CADENCE_MS,
+    slice: initialSlice = 0,
     spacer = SPACER_MS,
     maxInFlight = MAX_IN_FLIGHT,
     minLead = MIN_LEAD_MS,
@@ -118,7 +121,23 @@ export function createStream(ns, math, opts) {
   // does not fit its RAM budget at the configured rate - fewer, bigger batches
   // beat a floor of one-hack-thread batches that still do not fit. CADENCE_MS is
   // the floor; nothing ever runs faster.
+  //
+  // Seeded from rescan's plan and then re-derived at every dispatch from `slice`
+  // and the batch actually being sent. See pace().
   let cadence = Math.max(CADENCE_MS, initialCadence);
+
+  /**
+   * GB this target is allowed to occupy on average - its share of the pool.
+   *
+   * The stream owns this rather than the cadence, because the cadence is a
+   * function of the slice AND of the batch, and only one of those two rescan can
+   * see. The batch size moves with the controller's fraction, the hacking level
+   * and the drift budget, all of which change between rescans.
+   *
+   * Zero means "nobody told us", and then the seeded cadence stands unchanged -
+   * which is what the stream tests rely on to pin a pace by hand.
+   */
+  let slice = initialSlice > 0 ? initialSlice : 0;
 
   const inFlight = new Map();
 
@@ -418,6 +437,26 @@ export function createStream(ns, math, opts) {
     const times = math.opTimes(snap);
     if (!(times.weaken > 0)) return skip("no weaken time");
     lastWeaken = times.weaken;
+
+    // Pace for the batch being sent NOW, not for the one rescan priced.
+    //
+    // This is the line that makes the slice the stream's rather than the
+    // cadence's. chooseSteal returns both together, sized at the fraction IT
+    // chose - but the controller runs at its own fraction and ramps toward that
+    // optimum in x1.5 steps, each gated on STEAL_MIN_SAMPLES clean batches. A
+    // live run sat at 3.2% against a 29% optimum, sending batches a ninth of the
+    // size its 17.6s cadence had been priced for: depth 9, 17.25TB of the pool
+    // idle, and income at a ninth of what the slice had been handed out for.
+    //
+    // It was also self-sustaining. The ramp needs 8 landings per step, so a
+    // cadence too slow for the batch starves the very evidence that would have
+    // corrected it - 141s per step, 13 minutes to climb back, all of it spent
+    // idling RAM that had already been committed to this target.
+    //
+    // Re-derived per dispatch rather than on steal changes alone: `th` and
+    // `times` are already in hand here, so it costs no ns call, and the batch
+    // also moves with hacking level and the drift budget, which no setter sees.
+    pace(th, times);
 
     // Free: planThreads already measured it, and this is the only place that
     // knows both the value and the window it has to be compared across.
@@ -981,21 +1020,48 @@ export function createStream(ns, math, opts) {
   }
 
   /**
-   * Set the pace this target's budget can sustain.
+   * Hand this stream its share of the pool, in GB.
    *
    * Unlike setBase this IS an assignment, not a ceiling, and the asymmetry is
    * real: the fraction is something the controller has evidence about from its
-   * own landings, while the cadence is pure arithmetic on the RAM budget, which
-   * only rescan can see. There is nothing for a controller to disagree with.
+   * own landings, while the slice is a division of RAM among targets, which only
+   * rescan can see. There is nothing for a controller to disagree with.
+   *
+   * Nothing is re-paced here. The cadence follows from the slice AND the batch,
+   * and the next dispatch has both - so a slice that changes takes effect on the
+   * next batch, and changing it cannot re-pace a pipeline mid-flight.
+   */
+  function setSlice(gb) {
+    const next = Number(gb);
+    if (!(next > 0)) return;
+    slice = next;
+  }
+
+  /**
+   * Re-derive the cadence from the slice and the batch about to be sent.
+   *
+   * Little's law, the same arithmetic chooseSteal uses: a batch occupies
+   * `batchRamSeconds` GB-ms and one is launched per cadence, so the cadence at
+   * which the pipeline exactly fills its slice is that over the slice. Floored
+   * at CADENCE_MS, which is set by jitter against the spacer and has nothing to
+   * do with RAM.
+   *
+   * heldAllAtOnce deliberately, even though this dispatcher is just-in-time and
+   * the real holding is ~20% less. Two reasons: it is the model chooseSteal
+   * prices with, so a stream and the calculator that admitted it never disagree
+   * about the same batch; and over-stating occupancy is the safe direction for a
+   * number that decides how much of the pool to commit. Moving BOTH to the real
+   * per-op durations is a separate change - see the note on heldAllAtOnce.
    *
    * Anchors are monotonic, so a cadence that narrows takes effect on the next
    * dispatch and one that widens takes effect immediately - nextAnchor keeps
    * every batch already in the air where it was scheduled either way.
    */
-  function setCadence(ms) {
-    const next = Math.max(CADENCE_MS, Number(ms) || 0);
-    if (!(next > 0)) return;
-    cadence = next;
+  function pace(th, times) {
+    if (!(slice > 0)) return;
+    const ramSeconds = batchRamSeconds(th, ram, heldAllAtOnce(times, spacer), th.weaken2);
+    if (!(ramSeconds > 0)) return;
+    cadence = Math.max(CADENCE_MS, ramSeconds / slice);
   }
 
   return {
@@ -1006,8 +1072,9 @@ export function createStream(ns, math, opts) {
     windDown,
     reinstate,
     setBase,
-    setCadence,
+    setSlice,
     get cadence() { return cadence; },
+    get slice() { return slice; },
     credit,
     retire,
     stats,
