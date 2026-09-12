@@ -928,6 +928,12 @@ export const RESCAN_MS = 60000;
  * run until every target was prepped meant the already-prepped ones - the good
  * ones, which is why they were picked - sat idle earning nothing while a deep,
  * dirty target was brought up. That is backwards.
+ *
+ * This is now the REAL ceiling. It used to be unreachable: rescan queued only
+ * the top maxTargets * 2 candidates, and the streams occupied most of those, so
+ * the queue ran out before the slots did however much RAM was spare. The queue
+ * is the whole ranking now, which makes this number and PREP_SPARE_SHARE the
+ * only two things deciding the count.
  */
 export const PREP_CONCURRENCY = 4;
 

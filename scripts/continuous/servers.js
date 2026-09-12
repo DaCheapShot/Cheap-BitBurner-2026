@@ -1,6 +1,7 @@
 import { ServerPool } from "scripts/continuous/lib/server";
 import { candidates, isPrepped } from "scripts/continuous/lib/target";
 import { chooseSteal } from "scripts/continuous/lib/plan";
+import { fmtMoney } from "scripts/continuous/lib/fmt";
 import * as math from "scripts/continuous/lib/mathAnalyze";
 import {
   HOME_RESERVE_GB,
@@ -17,10 +18,15 @@ import {
  * Launches nothing, allocates nothing, touches no port - safe to run beside a
  * manager of either system.
  *
- *   run scripts/continuous/servers.js
+ *   run scripts/continuous/servers.js                 one pass, then exit
+ *   run scripts/continuous/servers.js --loop           redraw every 5s
+ *   run scripts/continuous/servers.js --loop 15000     redraw every 15s
  *
  * Output goes to the SCRIPT LOG (ns.ui.openTail), not the terminal. That is the
- * point of it: the table is wide and is meant to be left open and re-read.
+ * point of it: the table is wide and is meant to be left open and re-read - and
+ * with --loop it re-reads itself. The loop clears the log each pass rather than
+ * appending, so the window shows the current state instead of a scrollback that
+ * has to be hunted through for the newest table.
  *
  * The steal figure is `chooseSteal` - the same function the batcher calls, at
  * the same provisional slice rescan prices targets against
@@ -34,7 +40,8 @@ import {
  * current security and so over-states grow threads (and therefore under-states
  * steal). Unprepped rows are flagged for that reason.
  *
- * RAM cost: base 1.60 + lib/server.js 0.35 + lib/mathAnalyze.js (hackAnalyze,
+ * RAM cost is the same looping or not - clearLog, sleep and args are all 0 GB.
+ * Base 1.60 + lib/server.js 0.35 + lib/mathAnalyze.js (hackAnalyze,
  * growthAnalyze, weakenAnalyze, hackAnalyzeSecurity, growthAnalyzeSecurity,
  * hackAnalyzeChance at 1.00 each is the bulk) + getServerRequiredHackingLevel
  * 0.10 + getHackingLevel 0.05 + getScriptRam 0.10. Cores are NOT read:
@@ -44,13 +51,6 @@ import {
 
 const pad = (s, n) => String(s).padEnd(n);
 const padL = (s, n) => String(s).padStart(n);
-
-function fmtMoney(m) {
-  for (const [div, suf] of [[1e12, "t"], [1e9, "b"], [1e6, "m"], [1e3, "k"]]) {
-    if (Math.abs(m) >= div) return `$${(m / div).toFixed(2)}${suf}`;
-  }
-  return `$${m.toFixed(0)}`;
-}
 
 const fmtRam = (gb) => (gb >= 1024 ? `${(gb / 1024).toFixed(2)}TB` : `${gb.toFixed(2)}GB`);
 
@@ -96,24 +96,27 @@ export function buildRows(math, snaps, ram, slice) {
   return rows;
 }
 
-/** @param {NS} ns */
-export async function main(ns) {
-  ns.disableLog("ALL");
-  ns.ui.openTail();
-
-  const ready = math.prepare(ns);
-  if (!ready.ok) {
-    ns.print(`ERROR: ${ready.error}`);
-    return;
-  }
-
-  const ram = workerRam(ns);
+/**
+ * One pass: measure, price, print.
+ *
+ * The pool is REBUILT each pass rather than refreshed. cloud.js buys servers and
+ * root.js roots them while this runs, and build is the only path that picks up a
+ * host that did not exist before - a refresh would keep reporting a slice priced
+ * against the network as it stood when the script started. It allocates nothing
+ * and touches no port either way, so it stays safe beside a running manager.
+ */
+function render(ns, ram) {
   const pool = ServerPool.build(ns, { homeReserve: HOME_RESERVE_GB });
   const slice = (pool.placeableRam(ram.grow) * TARGET_RAM_BUDGET) / MAX_TARGETS;
   const rows = buildRows(math, candidates(ns).map((h) => math.snapshot(ns, h)), ram, slice);
 
   ns.print("");
-  ns.print(`=== TARGETS (${rows.length} hackable) ${"=".repeat(30)}`);
+  // Stamped so a window left open is visibly stale when the script has died -
+  // a frozen table and a live one look identical otherwise.
+  ns.print(
+    `=== TARGETS (${rows.length} hackable) ${new Date().toLocaleTimeString()} ` +
+      "=".repeat(18),
+  );
   ns.print(
     `pool ${fmtRam(pool.totalRam)}, placeable ${fmtRam(pool.placeableRam(ram.grow))}, ` +
       `free ${fmtRam(pool.freeRam)}  =>  slice ${fmtRam(slice)} ` +
@@ -164,4 +167,34 @@ export async function main(ns) {
     `STEAL is what chooseSteal picks for a target admitted now at the slice above. ` +
       `A live stream adapts from there - its own log is the authority.`,
   );
+}
+
+/** @param {NS} ns */
+export async function main(ns) {
+  ns.disableLog("ALL");
+  ns.ui.openTail();
+
+  const args = ns.args.map(String);
+  const lIdx = args.indexOf("--loop");
+  const loopMs = lIdx >= 0 ? Math.max(1000, Number(args[lIdx + 1]) || 5000) : 0;
+
+  // Outside the loop on purpose. prepare() caches game constants that do not
+  // move - weakenAnalyze(1,1) and the two security-per-thread figures - so
+  // re-calling it every pass would re-pay 3 GB of analyze calls for an answer
+  // that cannot have changed.
+  const ready = math.prepare(ns);
+  if (!ready.ok) {
+    ns.print(`ERROR: ${ready.error}`);
+    return;
+  }
+
+  const ram = workerRam(ns);
+
+  // do/while, so no flag runs exactly one pass and exits - the behaviour every
+  // existing invocation of this script expects.
+  do {
+    if (loopMs) ns.clearLog();
+    render(ns, ram);
+    if (loopMs) await ns.sleep(loopMs);
+  } while (loopMs);
 }

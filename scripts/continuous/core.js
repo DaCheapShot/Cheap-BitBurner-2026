@@ -2,6 +2,7 @@ import { ServerPool } from "scripts/continuous/lib/server";
 import { coreMap } from "scripts/continuous/lib/cores";
 import { deployWorkers, describeDeploy } from "scripts/continuous/lib/deploy";
 import { clear } from "scripts/continuous/lib/report";
+import { fmtMoney } from "scripts/continuous/lib/fmt";
 import { isPrepped, rankTargets } from "scripts/continuous/lib/target";
 import { launchPrepWave, placePrepWave, prepTargets } from "scripts/continuous/lib/prep";
 import { serviceShare } from "scripts/continuous/lib/share";
@@ -310,10 +311,10 @@ export async function run(ns, math) {
   for (const t of show) {
     log(
       `${INDENT}${t.host.padEnd(20)}` +
-        `$${(t.perBatch / 1e6).toFixed(2)}m/batch  ` +
+        `${fmtMoney(t.perBatch)}/batch  ` +
         `chance ${(t.chance * 100).toFixed(0)}%  ` +
         `depth ${String(t.depth).padStart(4)}  ` +
-        `$${(t.moneyPerSecPerDepth / 1e3).toFixed(1)}k/s/depth  ` +
+        `${fmtMoney(t.moneyPerSecPerDepth)}/s/depth  ` +
         `${isPrepped(t.snap) ? "prepped" : "unprepped"}`,
     );
   }
@@ -335,7 +336,7 @@ export async function run(ns, math) {
       const s = math.snapshot(ns, host);
       say(
         `${INDENT}${result.prepped.includes(host) ? "PREPPED  " : "PENDING  "} ${host.padEnd(20)}` +
-          `$${(s.money / 1e6).toFixed(2)}m/$${(s.maxMoney / 1e6).toFixed(2)}m  ` +
+          `${fmtMoney(s.money)}/${fmtMoney(s.maxMoney)}  ` +
           `sec ${s.sec.toFixed(2)}/${s.minSec.toFixed(2)}`,
       );
     }
@@ -797,7 +798,7 @@ export function rescan(ns, math, opts) {
   for (let n = 1; n <= feasible.length; n++) {
     const cand = evaluate(n);
     if (!cand) continue;
-    totals.push(`${n}:$${(cand.total / 1e6).toFixed(2)}m/s`);
+    totals.push(`${n}:${fmtMoney(cand.total)}/s`);
     if (!plan || cand.total > plan.total) plan = cand;
   }
 
@@ -839,7 +840,7 @@ export function rescan(ns, math, opts) {
           // The plan's OWN income, not p.score - that was priced against the
           // provisional slice and disagrees with this one whenever the chosen
           // count is not maxTargets, which is exactly when it is read.
-          `($${((picked.income * 1000 * (p.chance ?? 1)) / 1e6).toFixed(2)}m/s, ${picked.hack}t hack, ` +
+          `(${fmtMoney(picked.income * 1000 * (p.chance ?? 1))}/s, ${picked.hack}t hack, ` +
           `${(picked.gb / 1024).toFixed(2)}TB of a ${(slice / 1024).toFixed(2)}TB slice` +
           `${picked.capped ? ", at the ceiling" : ""}` +
           // Not an error any more. A target too big for its budget slows down
@@ -885,7 +886,7 @@ export function rescan(ns, math, opts) {
       // made a live log read `batch 9.29TB x depth 1 = 0.5TB`, which is three
       // numbers that cannot all be true at once.
       `  +${p.host}: batch ${((p.picked?.peak ?? p.gb) / 1024).toFixed(2)}TB x depth ${p.depth} = ` +
-        `${(p.want / 1024).toFixed(1)}TB, $${(p.score / 1e3).toFixed(2)}k/GB-s` +
+        `${(p.want / 1024).toFixed(1)}TB, ${fmtMoney(p.score)}/GB-s` +
         `, steal ${(start * 100).toFixed(1)}%` +
         (start < base ? ` (resuming below the ${(base * 100).toFixed(1)}% optimum)` : ""),
     );
@@ -926,9 +927,15 @@ export function rescan(ns, math, opts) {
     : [];
 
   const promote = potential.filter((p) => p.score > weakest);
+  // The whole ranking, not a slice of it. A cutoff of maxTargets * 2 is mostly
+  // consumed by the streams themselves - three running out of six eligible -
+  // so the slot math below could grant four slots and find only one host to
+  // put in them, and the pool's spare RAM went unused however idle it got.
+  // Nothing bounds the queue now because nothing needs to: `slots` bounds how
+  // many are taken and the dedupe below skips the rest, both per entry.
   const queue = [
-    ...promote.map((p) => ({ host: p.host, why: `would displace at $${(p.score / 1e3).toFixed(2)}k/GB-s` })),
-    ...candidates.slice(0, maxTargets * 2).map((t) => ({ host: t.host, why: "next in line" })),
+    ...promote.map((p) => ({ host: p.host, why: `would displace at ${fmtMoney(p.score)}/GB-s` })),
+    ...candidates.map((t) => ({ host: t.host, why: "next in line" })),
   ];
 
   // Prep one target at a time unless the pool has real room to spare.
@@ -1045,7 +1052,7 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
       preps.delete(host);
       log(
         `  ${host}: prep ABANDONED after ${active.waves} waves - ` +
-          `$${(snap.money / 1e6).toFixed(2)}m of $${(snap.maxMoney / 1e6).toFixed(2)}m, ` +
+          `${fmtMoney(snap.money)} of ${fmtMoney(snap.maxMoney)}, ` +
           `sec ${snap.sec.toFixed(2)} of ${snap.minSec.toFixed(2)}. Slot released.`,
       );
       continue;
@@ -1100,8 +1107,8 @@ function report({ streams, preps, pool, started, orphans, sawFull, repaired, log
         `sent ${String(st.dispatched).padStart(5)}  done ${String(st.retired).padStart(5)}  ` +
         `ok ${String(st.ok).padStart(5)}  bad ${String(st.bad).padStart(4)}  ` +
         `hit ${hitRate.toFixed(0)}%  ` +
-        `$${(st.stolen / 1e9).toFixed(2)}b  $${(recent / 1e6).toFixed(2)}m/s now` +
-        `  ($${(st.stolen / secs / 1e6).toFixed(2)}m/s avg)`,
+        `${fmtMoney(st.stolen)}  ${fmtMoney(recent)}/s now` +
+        `  (${fmtMoney(st.stolen / secs)}/s avg)`,
     );
     log(
       `${INDENT}${" ".repeat(18)}jitter avg ${avgJitter.toFixed(0)}ms max ${st.jitterMax.toFixed(0)}ms` +
@@ -1164,9 +1171,9 @@ function report({ streams, preps, pool, started, orphans, sawFull, repaired, log
 
   if (streams.length > 1) {
     log(
-      `${INDENT}${"TOTAL".padEnd(18)}$${(totalStolen / 1e9).toFixed(2)}b  ` +
-        `$${(totalRecent / 1e6).toFixed(2)}m/s now  ` +
-        `($${(totalStolen / secs / 1e6).toFixed(2)}m/s avg) across ${streams.length} target(s)`,
+      `${INDENT}${"TOTAL".padEnd(18)}${fmtMoney(totalStolen)}  ` +
+        `${fmtMoney(totalRecent)}/s now  ` +
+        `(${fmtMoney(totalStolen / secs)}/s avg) across ${streams.length} target(s)`,
     );
   }
 

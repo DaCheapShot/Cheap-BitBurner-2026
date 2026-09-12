@@ -520,6 +520,75 @@ export const tests = {
     }
   },
 
+  // ----------------------------------------------------------------- fmt ----
+
+  // Money formatting failed SILENTLY: the old formatters stopped their suffix
+  // list at "t" or earlier and the mantissa then grew without bound instead of
+  // rolling over, so a live report read "$2219301.35b" for what the game calls
+  // $2.22q. The number stays correct and becomes unreadable, which nothing but
+  // a check on the output can catch.
+  //
+  // Expected strings are the GAME's, from the suffix list in
+  // src/ui/formatNumber.ts: ["", k, m, b, t, q, Q, s, S, o, n], powers of 1000.
+
+  "the money suffix rolls over instead of growing the mantissa": async () => {
+    const { mods } = await loadContinuous();
+    const { fmtMoney } = mods["lib/fmt"];
+
+    // The three figures from the live report that prompted this.
+    assert(fmtMoney(2219301.35e9) === "$2.22q", `got ${fmtMoney(2219301.35e9)}`);
+    assert(fmtMoney(309727.81e9) === "$309.73t", `got ${fmtMoney(309727.81e9)}`);
+    assert(fmtMoney(1939158.48e6) === "$1.94t", `got ${fmtMoney(1939158.48e6)}`);
+  },
+
+  "every suffix in the game's list is reachable": async () => {
+    const { mods } = await loadContinuous();
+    const { fmtMoney } = mods["lib/fmt"];
+
+    const want = ["", "k", "m", "b", "t", "q", "Q", "s", "S", "o", "n"];
+    for (let i = 0; i < want.length; i++) {
+      const got = fmtMoney(1000 ** i);
+      assert(got === `$1.00${want[i]}`, `10^${3 * i} formatted as ${got}`);
+    }
+    // Past the end of the list the mantissa DOES grow - there is no suffix left
+    // - but it must not print "undefined".
+    assert(fmtMoney(1000 ** 11) === "$1000.00n", `got ${fmtMoney(1000 ** 11)}`);
+  },
+
+  "no money is printed without going through the formatter": async () => {
+    const { sources } = await loadContinuous();
+
+    // Not a style rule. Every figure that overflowed its suffix did so because
+    // the call site scaled and labelled the number by hand - "/1e9" with a
+    // literal "b" glued on - and that is invisible until the value outgrows the
+    // label. Two separate passes over this file missed sites, which is exactly
+    // the kind of miss a grep catches and a reader does not: $/GB-s looked too
+    // small to matter right up until a live log printed $72614.35k/GB-s.
+    const offenders = [];
+    for (const [rel, src] of sources) {
+      if (rel === "lib/fmt.js") continue; // the formatter itself, obviously
+      src.split(/\r?\n/).forEach((line, i) => {
+        if (line.includes("$${")) offenders.push(`${rel}:${i + 1} ${line.trim()}`);
+      });
+    }
+    assert(
+      offenders.length === 0,
+      `format these with fmtMoney from lib/fmt.js: ${offenders.join(" | ")}`,
+    );
+  },
+
+  "a money figure that is not a number prints a dash, never NaN": async () => {
+    const { mods } = await loadContinuous();
+    const { fmtMoney } = mods["lib/fmt"];
+
+    // Rates are divided by elapsed seconds and by depth, both of which can be
+    // zero before the first batch lands.
+    assert(fmtMoney(NaN) === "$-", `got ${fmtMoney(NaN)}`);
+    assert(fmtMoney(Infinity) === "$-", `got ${fmtMoney(Infinity)}`);
+    assert(fmtMoney(0) === "$0.00", `got ${fmtMoney(0)}`);
+    assert(fmtMoney(-5e9) === "$-5.00b", `got ${fmtMoney(-5e9)}`);
+  },
+
   // -------------------------------------------------------------- report ----
 
   "drain buckets reports by batch id and empties the port": async () => {
