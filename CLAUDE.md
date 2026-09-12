@@ -157,9 +157,35 @@ across `scripts/` because it cannot tell a nested block from a different functio
 Bitburner charges a script for **every `ns.*` function reachable through its imports**, whether
 called or not. Consequences that shape the whole codebase:
 
-- `config.js` and `verify.js` contain **no `ns` calls at all**; `calib.js` uses only `ns.read`,
-  which is 0 GB. So all three are free to import. Keep it that way — adding one billed `ns`
-  call to `config.js` taxes every script in the repo.
+**It bills NAMES, not call sites.** This is the expensive half of the rule and it is not
+obvious from the docs. `src/Script/RamCalculations.ts`: `addRef` does `s.add(name)` — the
+comment there reads *"For builtins like hack."* — and the `MemberExpression` visitor walks
+`node.object` **and** `node.property`. `findFunc` then searches the cost table recursively by
+bare name, so a namespaced function is charged by its last segment. So a local variable, a
+parameter, a loop counter or a property read costs the same as calling the function it is named
+after, anywhere in the import closure:
+
+| written | charged |
+|---|---|
+| `function nextSteal(steal, window, …)` | 25.00 GB — `window` resolves to `RamCostConstants.Dom` |
+| `for (let attempt = 0; …)` | 10.00 GB — `ns.codingcontract.attempt` |
+| `const share = serviceShare(…)` | 2.40 GB — `ns.share` |
+| `export async function run(ns, math)` | 1.00 GB — `ns.run` |
+| `const probe = (hack) => …` | 0.20 GB — this fork's `ns.dnet.probe` |
+| `times.hack`, `ram.grow`, `threads.weaken1` | 0.40 GB — the three worker ops |
+
+Those five lines were real, and together they cost `continuous/manager-formulas.js` 39.00 of
+its 48.00 GB — enough that it would not start on a fresh BitNode's 32 GB home while the shotgun
+ran fine. String and template literals are free (`Literal` nodes), and so are non-computed
+object keys (`{ hack: 1.70 }`), because acorn-walk's `Property` visitor only walks a computed
+key. `tests/ram.test.mjs` models all of this and has a guard test naming the expensive
+collisions; it is the only thing standing between this repo and a 25 GB variable.
+
+- `config.js` and `calib.js` are genuinely free to import: `config.js` has no `ns` call and
+  mentions `hack`/`grow`/`weaken` only as object keys, `calib.js` uses only `ns.read` at 0 GB.
+  Keep it that way — one billed `ns` call in `config.js` taxes every script in the repo.
+- `verify.js` has no `ns` call either but still costs **0.25 GB** to import, because it reads
+  `.hack` and `.grow` off result objects. Nothing to fix; know it before budgeting.
 - `ram.js` deliberately touches only four cheap functions and **no analyze functions**.
 - Constants that are linear in threads are measured once by `calibrate.js`, cached to
   `/data/calib.json`, and read back through `calib.js` at 0 GB. This replaces `weakenAnalyze`,
@@ -188,27 +214,41 @@ security. That asymmetry is deliberate and tested — do not "fix" it into an eq
 
 Layers, bottom up:
 
+Costs below are what the GAME charges, identifier collisions included — module rows are the
+marginal cost of importing them, entry rows the script's whole total. Every figure comes from
+`ramOf()` in `tests/ram.test.mjs`, which reproduces the game's own breakdown; check against the
+editor's RAM panel when one moves.
+
 | module | role | cost |
 |---|---|---|
 | `config.js` | every tunable, shared so nothing drifts | 0 |
 | `calib.js` | reads `/data/calib.json` | 0 |
-| `verify.js` | landing analysis — the definition of "landed correctly" | 0 |
+| `verify.js` | landing analysis — the definition of "landed correctly" | 0.25 |
 | `ram.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
-| `prepper.js` | prep as a module (manager runs it in-process) | 2.00 |
+| `prepper.js` | prep as a module (manager runs it in-process) | 2.40 |
 | `mathAnalyze.js` | math interface via *Analyze + calibration cache | 2.55 |
 | `mathFormulas.js` | math interface via `ns.formulas` | 2.50 |
-| `managerCore.js` | the volley loop + share top-up, math-free | 2.40 |
-| `manager.js` | entry: core + mathAnalyze (always works) | 6.55 |
-| `manager-formulas.js` | entry: core + mathFormulas | 6.50 |
-| `prep.js` | entry: prepper + mathAnalyze | 6.15 |
-| `prep-formulas.js` | entry: prepper + mathFormulas | 6.10 |
+| `managerCore.js` | the volley loop + share top-up, math-free | 2.80 |
+| `manager.js` | entry: core + mathAnalyze (always works) | 6.95 |
+| `manager-formulas.js` | entry: core + mathFormulas | 6.90 |
+| `prep.js` | entry: prepper + mathAnalyze | 6.55 |
+| `prep-formulas.js` | entry: prepper + mathFormulas | 6.50 |
 | `boot.js` | supervisor, picks the batcher | 3.60 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
+| `deploy.js` | scp workers home → every rooted host | 2.50 |
 | `share.js` | one `ns.share()` loop | 4.00 **per thread** |
-| `sharemode.js` | the share toggle | 3.80 |
+| `sharemode.js` | the share toggle | 4.20 |
+| `continuous/manager.js` | entry: continuous core + its mathAnalyze | 13.35 |
+| `continuous/manager-formulas.js` | entry: continuous core + its mathFormulas | 9.40 |
 
-`connectme.js` (3.80) prints the terminal `connect` chain to a host. It trims the
+The continuous entries are the two that have to fit a fresh BitNode's 32 GB home alongside
+`boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds them under 16 GB for that reason. The
+analyze build carries 3.00 GB of *Analyze functions the shotgun caches away through
+`calibrate.js`, and 2.00 GB for the `ns.getServer` in `continuous/lib/cores.js`; porting the
+calibration pair into that folder is the next 5 GB if one is ever needed.
+
+`connectme.js` (3.85) prints the terminal `connect` chain to a host. It trims the
 chain wherever `src/Terminal/commands/connect.ts` permits a direct jump - that is,
 to any host with `backdoorInstalled` or `purchasedByPlayer` - which is the only
 reason it pays for `getServer`. `--factions` reports the four servers whose backdoor
@@ -219,7 +259,7 @@ and company rep, so its backdoor never invites on its own. `w0r1d_d43m0n` is off
 network until The Red Pill is installed (`Prestige.ts` links it to `The-Cave` there),
 so unreachable rows are dropped rather than reported as an error.
 
-`capacity.js` (~7.75) is the surviving diagnostic. It ranks targets by real throughput, which
+`capacity.js` (8.15) is the surviving diagnostic. It ranks targets by real throughput, which
 the manager does not do — `pickTarget` chooses the richest *hackable* server, not the most
 profitable one. `prep.js` / `prep-formulas.js` and `calibrate.js` are manual entry points to
 logic the supervisor otherwise drives. `scan.js` predates the batcher.

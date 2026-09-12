@@ -7,7 +7,7 @@ import * as math from "./mathAnalyze.js";
  *
  * All the logic lives in scripts/prepper.js (prepCli) - shared with
  * scripts/prep-formulas.js so the two CLIs can't drift apart, the same shape
- * managerCore.run() already shares between manager.js and manager-formulas.js.
+ * managerCore.runVolley() already shares between manager.js and manager-formulas.js.
  * The manager still calls prep() in-process rather than through this file -
  * only one process may own the ServerPool and the report port at a time.
  *

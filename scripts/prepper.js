@@ -690,7 +690,7 @@ export async function prep(ns, host, opts = {}) {
  * CLI body shared by scripts/prep.js and scripts/prep-formulas.js.
  *
  * The two entry scripts are identical apart from which math module they inject
- * - the same shape managerCore.run() already shares between manager.js and
+ * - the same shape managerCore.runVolley() already shares between manager.js and
  * manager-formulas.js. Pulling the body out here stops the two prep CLIs
  * drifting apart the way they had.
  *

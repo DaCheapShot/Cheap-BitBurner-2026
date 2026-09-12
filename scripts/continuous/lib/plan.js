@@ -205,7 +205,7 @@ export function growMarginFor(steal, drift = GROW_DRIFT_TOLERANCE) {
 }
 
 /**
- * Decide the next steal fraction from what the last window of batches actually
+ * Decide the next steal fraction from what the last sample of batches actually
  * did.
  *
  * The shotgun could never do this: it sizes a volley, fires it, and by the time
@@ -221,8 +221,8 @@ export function growMarginFor(steal, drift = GROW_DRIFT_TOLERANCE) {
  * the tolerance rather than from its edge.
  *
  * @param {number} steal current fraction
- * @param {object} window evidence since the last change:
- *   `batches`    retired in the window
+ * @param {object} sample evidence since the last change:
+ *   `batches`    retired in the sample
  *   `bad`        judged not ok (order, intrusion, incomplete)
  *   `worstOver`  max(stolen / plannedTake - 1). Money clamps at maxMoney, so a
  *                POSITIVE value can only mean hack effectiveness rose between
@@ -231,10 +231,17 @@ export function growMarginFor(steal, drift = GROW_DRIFT_TOLERANCE) {
  *                when the hack landed, ie. the previous batch did not restore.
  *   `attempts`   dispatch attempts
  *   `noRoom`     of those, ones the pool could not seat
+ * The evidence parameter is `sample` and MUST NOT be called `window`. The game's
+ * RAM checker bills identifiers, not call sites: RamCalculations.ts resolves a
+ * ref named `window` (or `document`) to RamCostConstants.Dom and adds 25 GB. A
+ * parameter here named `window` put 25 GB on every script that reaches this
+ * module - the continuous managers, and servers.js - which is most of why
+ * manager-formulas.js cost 48.00 GB and would not start on a 32 GB home.
+ *
  * @param {number} cap MAX_STEAL_FRACTION
  * @returns {{steal: number, reason: string, changed: boolean}}
  */
-export function nextSteal(steal, window, cap = MAX_STEAL_FRACTION, opts = {}) {
+export function nextSteal(steal, sample, cap = MAX_STEAL_FRACTION, opts = {}) {
   const {
     up = STEAL_STEP_UP,
     down = STEAL_STEP_DOWN,
@@ -250,7 +257,7 @@ export function nextSteal(steal, window, cap = MAX_STEAL_FRACTION, opts = {}) {
 
   // Absent fields default to "nothing seen", so a caller that only tracks some
   // of the signals still gets sane decisions from the ones it does track.
-  window = { batches: 0, bad: 0, worstOver: 0, worstUnder: 0, attempts: 0, noRoom: 0, ...window };
+  sample = { batches: 0, bad: 0, worstOver: 0, worstUnder: 0, attempts: 0, noRoom: 0, ...sample };
 
   const tol = stealTolerance(steal, growMargin, drift);
   const hold = (reason) => ({ steal, reason, changed: false });
@@ -268,15 +275,15 @@ export function nextSteal(steal, window, cap = MAX_STEAL_FRACTION, opts = {}) {
   // subsequent batch cheaper to get wrong while the cause is unknown - but not
   // to a single one, which on a stream carrying jitter close to the spacer is
   // ordinary. See BAD_BATCH_TOLERANCE for the run this cost 40 points.
-  if (window.bad > badTolerance) return back(`${window.bad} bad batch(es)`);
+  if (sample.bad > badTolerance) return back(`${sample.bad} bad batch(es)`);
 
   // Took MORE than the grow was sized to put back. Since money clamps at
   // maxMoney, a positive `over` can only come from hack effectiveness rising
   // between dispatch and landing - which is precisely the drift the ceiling
   // exists to bound, now measured instead of assumed.
-  if (window.worstOver > tol) {
+  if (sample.worstOver > tol) {
     return back(
-      `overshoot ${(window.worstOver * 100).toFixed(2)}% past the ` +
+      `overshoot ${(sample.worstOver * 100).toFixed(2)}% past the ` +
         `${(tol * 100).toFixed(2)}% tolerance`,
     );
   }
@@ -285,9 +292,9 @@ export function nextSteal(steal, window, cap = MAX_STEAL_FRACTION, opts = {}) {
   // full when the hack landed. The batch before it did not restore, so a
   // smaller bite is the only thing that lets the target climb back while still
   // earning.
-  if (window.worstUnder < -drainUnder) {
+  if (sample.worstUnder < -drainUnder) {
     return back(
-      `target only ${((1 + window.worstUnder) * 100).toFixed(0)}% full when a hack landed`,
+      `target only ${((1 + sample.worstUnder) * 100).toFixed(0)}% full when a hack landed`,
     );
   }
 
@@ -295,22 +302,22 @@ export function nextSteal(steal, window, cap = MAX_STEAL_FRACTION, opts = {}) {
   // dispatch that fails loses a slot it never gets back, and at high steal a
   // batch is over ten times its size at 10%, so a smaller batch is the fix -
   // not a queue, and not dropping the target.
-  if (window.attempts > 0 && window.noRoom / window.attempts > noRoomTol) {
+  if (sample.attempts > 0 && sample.noRoom / sample.attempts > noRoomTol) {
     return back(
-      `${window.noRoom}/${window.attempts} dispatches found no room`,
+      `${sample.noRoom}/${sample.attempts} dispatches found no room`,
     );
   }
 
-  if (window.batches < minSamples) return hold("not enough samples yet");
+  if (sample.batches < minSamples) return hold("not enough samples yet");
 
-  if (window.worstOver <= tol * headroom) {
+  if (sample.worstOver <= tol * headroom) {
     const next = Math.min(cap, steal * up);
     if (next === steal) return hold("at the ceiling");
     return {
       steal: next,
       changed: true,
-      reason: `${window.batches} clean, worst overshoot ` +
-        `${(Math.max(0, window.worstOver) * 100).toFixed(2)}% of a ` +
+      reason: `${sample.batches} clean, worst overshoot ` +
+        `${(Math.max(0, sample.worstOver) * 100).toFixed(2)}% of a ` +
         `${(tol * 100).toFixed(2)}% tolerance`,
     };
   }
@@ -618,7 +625,7 @@ export function chooseSteal(math, snap, ram, budgetGb, opts = {}) {
 
   const budget = budgetGb > 0 ? budgetGb : Infinity;
 
-  const probe = (hack) => {
+  const priceAt = (hack) => {
     const threads = planThreadsForHack(math, snap, hack, perThread, { growMargin, drift });
     if (!threads) return null;
     // What the pool must hold at ONE INSTANT. Every op of a batch is live just
@@ -647,11 +654,11 @@ export function chooseSteal(math, snap, ram, budgetGb, opts = {}) {
   };
 
   const ceiling = Math.max(1, Math.floor((pin ?? protectable) / perThread));
-  if (pin !== null) return probe(ceiling) ?? probe(1);
+  if (pin !== null) return priceAt(ceiling) ?? priceAt(1);
 
   let best = null;
   const consider = (hack) => {
-    const r = probe(hack);
+    const r = priceAt(hack);
     // A plan whose single batch does not fit is not a slower plan, it is one
     // that never places an op. Excluded rather than scored down, because its
     // income figure is honest arithmetic about a batch that cannot run.
@@ -677,7 +684,7 @@ export function chooseSteal(math, snap, ram, budgetGb, opts = {}) {
   // Not even one hack thread's batch fits the budget. Reported rather than
   // returned as null: the caller knows whether this target was pinned by hand
   // or picked by ranking, and it needs a `take` to score it with either way.
-  if (!best) return probe(1);
+  if (!best) return priceAt(1);
   return { ...best, capped: best.hack >= ceiling };
 }
 

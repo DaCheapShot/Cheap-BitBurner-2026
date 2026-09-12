@@ -1,4 +1,4 @@
-import { run } from "./managerCore.js";
+import { runVolley } from "./managerCore.js";
 import * as math from "./mathAnalyze.js";
 
 /**
@@ -22,5 +22,5 @@ export async function main(ns) {
   if (ns.fileExists("Formulas.exe", "home")) {
     ns.print("note: Formulas.exe is available - scripts/manager-formulas.js is more accurate");
   }
-  await run(ns, math);
+  await runVolley(ns, math);
 }
