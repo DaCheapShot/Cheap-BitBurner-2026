@@ -25,8 +25,19 @@ export function readMarker(ns) {
     written: Number(lines[5]),
   };
   if (!state.phase) return null;
-  for (const k of ["respect", "nextRecruitAt", "memberCount", "territory"]) {
+  for (const k of ["respect", "memberCount", "territory"]) {
     if (!Number.isFinite(state[k])) return null;
   }
+  // nextRecruitAt is INFINITY at a full roster, not a number.
+  // Gang.respectForNextRecruit() returns Infinity verbatim once members.length
+  // reaches MaximumGangMembers, tick.js writes it through, and Number("Infinity")
+  // reads it back as Infinity - so a finiteness check on this one field rejected
+  // the whole marker from the instant the 12th member joined and never stopped.
+  // ascend.js and equip.js then reported "no gang marker yet" forever, which is
+  // the one message that reads like the loop has not started.
+  //
+  // NaN is still fatal: an unreachable threshold is a legal value, an unparseable
+  // one is not, and NaN compares false against every bound in shouldAscend.
+  if (Number.isNaN(state.nextRecruitAt)) return null;
   return state;
 }

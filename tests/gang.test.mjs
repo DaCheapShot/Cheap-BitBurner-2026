@@ -395,6 +395,21 @@ export const tests = {
     const ok = readMarker(makeNs({ files: { [GANG_MARKER]: "money\n1\n2\n3\n0.5\n99" } }));
     assert(ok && ok.phase === "money" && ok.nextRecruitAt === 2 && ok.memberCount === 3,
       "a well-formed marker should parse");
+
+    // The full-roster marker. Gang.respectForNextRecruit() returns Infinity at
+    // MaximumGangMembers, so this is what tick.js writes for the whole rest of
+    // the run - and a finiteness check on the field killed ascend.js and
+    // equip.js from the moment the 12th member joined, with a log line that
+    // blamed tick.js for never having run.
+    const full = readMarker(
+      makeNs({ files: { [GANG_MARKER]: "territory\n1600000\nInfinity\n12\n0.143\n99" } }),
+    );
+    assert(full !== null, "a full roster writes Infinity and the marker must still parse");
+    assert(full.nextRecruitAt === Infinity, "Infinity must survive as Infinity, not become NaN or 0");
+    assert(full.memberCount === 12 && full.phase === "territory", "the rest of a full-roster marker parses");
+
+    assert(readMarker(makeNs({ files: { [GANG_MARKER]: "money\n1\nNaN\n3\n0.5\n99" } })) === null,
+      "NaN is still fatal - an unreachable threshold is legal, an unparseable one is not");
   },
 
   // The RAM argument for the whole split. Fired unawaited these would stack to
