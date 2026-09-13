@@ -380,30 +380,41 @@ export const tests = {
   // No combat task weights hacking above zero, so a Rootkit in a combat gang
   // buys a stat nobody can earn from - and cheapest-first handed a $5m NUKE
   // Rootkit priority over a $12m Katana the gang could actually use.
-  "a combat gang buys hack-only items last, not never": async () => {
+  "the hack tier stays shut until every member owns the combat list": async () => {
     const mods = await loadScripts();
-    const { eligibleItems, planPurchases } = mods["gang/math"];
+    const { planPurchases } = mods["gang/math"];
     const { PHASE_MONEY } = mods["gang/config"];
 
     // Costs and stats are the game's, from src/Gang/data/upgrades.ts.
-    const items = [
-      { name: "NUKE Rootkit", cost: 5e6, type: "Rootkit", stats: { hack: 1.05 } },
-      { name: "Katana", cost: 12e6, type: "Weapon", stats: { str: 1.08, def: 1.08, dex: 1.08 } },
-    ];
+    const rootkit = { name: "NUKE Rootkit", cost: 5e6, type: "Rootkit", stats: { hack: 1.05 } };
+    const katana = { name: "Katana", cost: 12e6, type: "Weapon", stats: { str: 1.08, dex: 1.08 } };
+    const armor = { name: "LiquidArmor", cost: 25e6, type: "Armor", stats: { def: 1.15 } };
+    const items = [rootkit, katana, armor];
+    const one = [member("a", 100)];
 
-    const order = eligibleItems(items, PHASE_MONEY).map((i) => i.name);
-    assert(order[0] === "Katana" && order[1] === "NUKE Rootkit",
-      `the dearer combat item must outrank the cheaper hack-only one, got ${order}`);
+    // The case ordering alone could not fix. $20m buys the Katana, cannot
+    // afford the armor, and must NOT spend the $8m remainder on the Rootkit:
+    // the combat list is still incomplete, so the tier is shut.
+    const leak = planPurchases(one, items, PHASE_MONEY, 20e6).map((b) => b.item);
+    assert(leak.length === 1 && leak[0] === "Katana",
+      `leftover budget must be held while combat gear is unbought, got ${leak}`);
 
-    // Sunk, not filtered: with money to spare the Rootkit is still an upgrade.
-    const rich = planPurchases([member("a", 100)], items, PHASE_MONEY, 1e9);
-    assert(rich.length === 2, "a budget covering both should buy both");
-    assert(rich[0].item === "Katana", "but the combat item goes first");
+    // Still not never: a budget that finishes the combat list opens the tier.
+    const rich = planPurchases(one, items, PHASE_MONEY, 1e9).map((b) => b.item);
+    assert(rich.length === 3, `a full budget buys everything, got ${rich}`);
+    assert(rich[2] === "NUKE Rootkit", `the Rootkit goes last, got ${rich}`);
 
-    // A budget covering only one must spend it on the one that earns.
-    const tight = planPurchases([member("a", 100)], items, PHASE_MONEY, 12e6);
-    assert(tight.length === 1 && tight[0].item === "Katana",
-      `a tight budget must not go on the Rootkit, got ${JSON.stringify(tight)}`);
+    // A member who already owns the combat list opens it on any budget.
+    const kitted = [member("a", 100, { upgrades: ["Katana", "LiquidArmor"] })];
+    const opened = planPurchases(kitted, items, PHASE_MONEY, 6e6).map((b) => b.item);
+    assert(opened.length === 1 && opened[0] === "NUKE Rootkit",
+      `an owned combat list must open the hack tier, got ${opened}`);
+
+    // ONE member short is enough to keep it shut - it is every member, not any.
+    const mixed = [member("a", 100, { upgrades: ["Katana", "LiquidArmor"] }), member("b", 100)];
+    const shut = planPurchases(mixed, items, PHASE_MONEY, 6e6).map((b) => b.item);
+    assert(!shut.includes("NUKE Rootkit"),
+      `one unequipped member keeps the tier shut, got ${shut}`);
   },
 
   // "Only" is the operative word: an item raising hack AND a combat stat is
@@ -411,26 +422,28 @@ export const tests = {
   // must be ranked on its merits rather than demoted for the hack field.
   "hack-only means only, and a hacking gang is left alone": async () => {
     const mods = await loadScripts();
-    const { eligibleItems, isHackingItem } = mods["gang/math"];
+    const { considerItems, isHackingItem } = mods["gang/math"];
     const { PHASE_MONEY } = mods["gang/config"];
 
     assert(isHackingItem({ stats: { hack: 1.05 } }), "a pure hack item is one");
     assert(!isHackingItem({ stats: { hack: 1.05, str: 1.1 } }), "a mixed item is NOT");
     assert(!isHackingItem({ stats: { cha: 1.1 } }), "a charisma item is not");
-    assert(!isHackingItem({}), "an item with no stats must not throw or sink");
+    assert(!isHackingItem({}), "an item with no stats must not throw or be held back");
 
     const items = [
       { name: "rootkit", cost: 10, type: "Augmentation", stats: { hack: 1.1 } },
       { name: "blade", cost: 100, type: "Augmentation", stats: { str: 1.3 } },
     ];
-    assert(eligibleItems(items, PHASE_MONEY, false)[0].name === "blade",
-      "a combat gang sinks the rootkit behind the dearer blade");
+    const members = [member("a", 100)];
+    const combat = considerItems(members, items, PHASE_MONEY, false).map((i) => i.name);
+    assert(combat.length === 1 && combat[0] === "blade",
+      `a combat gang must not even consider the rootkit yet, got ${combat}`);
 
     // The mirrored rule is deliberately NOT implemented - a hacking gang keeps
-    // the plain cheapest-first order, not combat-last.
-    const hacking = eligibleItems(items, PHASE_MONEY, true).map((i) => i.name);
+    // the plain cheapest-first list, with nothing held back.
+    const hacking = considerItems(members, items, PHASE_MONEY, true).map((i) => i.name);
     assert(hacking[0] === "rootkit" && hacking[1] === "blade",
-      `a hacking gang must sort by cost alone, got ${hacking}`);
+      `a hacking gang considers everything, cheapest first, got ${hacking}`);
   },
 
   // Missing, corrupt and schema-invalid all collapse to null, exactly as
@@ -768,6 +781,13 @@ export const tests = {
   // literally named `hack`, and RamCalculations.ts bills bare identifiers - so
   // `m.hack` costs 0.10 GB in the file that writes it AND in every importer.
   // STAT_KEYS exists to keep that out of the shared modules.
+  // Comments and quoted strings are stripped; TEMPLATE literals deliberately
+  // are not. A template can interpolate - `${m.hack}` is a real 0.10 GB read
+  // and has to stay visible - and telling its literal text from its ${} parts
+  // by regex is exactly the kind of half-right matcher that turns a guard into
+  // a suggestion. So prose inside a backtick string trips this too. That is a
+  // false positive, and the fix is to reword the log line ("hacking-only", not
+  // "hack-only"), not to loosen the strip.
   "no gang file spells a stat as .hack": () => {
     const dir = path.resolve(import.meta.dirname, "..", "scripts", "gang");
     for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".js"))) {

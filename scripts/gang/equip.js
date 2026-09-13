@@ -1,4 +1,4 @@
-import { planPurchases, equipBudget, eligibleItems } from "./math.js";
+import { planPurchases, equipBudget, eligibleItems, considerItems } from "./math.js";
 import { readMarker } from "./marker.js";
 import { report } from "./report.js";
 
@@ -15,10 +15,9 @@ import { report } from "./report.js";
  * from a combat one. Every Rootkit and three of the augmentations raise
  * hacking and nothing else, and no combat task weights hacking above zero, so
  * cheapest-first would otherwise buy a $5m NUKE Rootkit ahead of a $12m Katana
- * the gang can actually use. isHackingItem in math.js reads the stats; the sort
- * in eligibleItems sinks those to the back of the queue rather than dropping
- * them, because once the combat wishlist is bought out the budget has nothing
- * better to do with the money.
+ * the gang can actually use. isHackingItem in math.js reads the stats;
+ * considerItems holds those back as a separate TIER, opened only once every
+ * member owns the whole combat list.
  *
  * It is still NOT used to score gear against gear. Cheapest-first inside a
  * budget is close enough for that, and this is the most expensive of the four
@@ -57,19 +56,25 @@ export async function main(ns) {
   // from the log: a blank. That cost a live round trip to diagnose, which is
   // the whole thing this repo's logging rules exist to stop.
   if (buys.length === 0) {
-    const eligible = eligibleItems(items, state.phase, state.isHacking);
-    // Min over the list, not eligible[0]. The shortlist is no longer sorted by
-    // cost alone - hack-only items sink to the back whatever they cost - so the
-    // first entry is the cheapest USEFUL item, and reporting it as "the
-    // cheapest" would name a figure the budget may in fact clear.
-    const cheapest = eligible.length ? Math.min(...eligible.map((i) => i.cost)) : 0;
+    const eligible = eligibleItems(items, state.phase);
+    // What the PLANNER would look at, not merely what the phase allows. The
+    // two differ whenever the hack tier is gated shut, and reporting the
+    // cheapest ELIGIBLE item there names a $5m Rootkit as "over budget" on an
+    // $8m budget - a line that contradicts itself and sends you at the wrong
+    // threshold. Re-derived through considerItems so it cannot drift.
+    const pool = considerItems(members, items, state.phase, state.isHacking);
+    const cheapest = pool.length ? pool[0].cost : 0;
+    const gated = eligible.length - pool.length;
     let why;
     if (!eligible.length) {
       why = "no item is eligible - see BUY_GEAR_PHASES, augmentations only outside it";
     } else if (cheapest > budget) {
-      why = `cheapest eligible is $${ns.format.number(cheapest, 2)}, over budget`;
+      why = `cheapest is $${ns.format.number(cheapest, 2)}, over budget`;
     } else {
-      why = "the gang already owns every eligible item it can afford";
+      why = "the gang already owns every item it can afford";
+    }
+    if (gated > 0) {
+      why += `; ${gated} hacking-only item(s) held back until every member owns the combat list`;
     }
     report(ns, "equip",
       `nothing bought in ${state.phase}: ${eligible.length}/${items.length} items eligible, ` +

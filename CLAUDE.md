@@ -581,16 +581,27 @@ Things that look arbitrary in there and aren't:
   not RESPECT, which looks inconsistent and isn't: in TRAIN nobody has cleared the stat floor, so
   gear buys stats that earn nothing before the next ascension wipes them, while in RESPECT the
   members are already working and the gear pays for itself first.
-- **Hack-only items go LAST in a combat gang, not never.** Every Rootkit and three augmentations
-  (BitWire, Neuralstimulator, DataJack) carry `mults: { hack: x }` and nothing else, and no combat
-  task weights hacking above zero - so cheapest-first handed a $5m NUKE Rootkit priority over a
-  $12m Katana. `isHackingItem` decides that from `getEquipmentStats`, not from a list of names,
-  because the upgrade roster is exactly the kind of thing a fork edits and a stale list would go on
-  mis-sorting with no symptom. It is the only thing that 2.00 GB buys; gear is still not scored
-  against gear. Sunk rather than filtered because once the combat wishlist is bought out the budget
-  has nothing better to do. The mirrored rule for a hacking gang is deliberately NOT implemented -
-  `tick.js` refuses those outright, so nothing writes `isHacking` true; the marker carries the flag
-  anyway so the sort is right on the day that changes rather than silently backwards.
+- **Hack-only items are a separate TIER, opened only when every member owns the combat list.**
+  Every Rootkit and three augmentations (BitWire, Neuralstimulator, DataJack) carry
+  `mults: { hack: x }` and nothing else, and no combat task weights hacking above zero - so
+  cheapest-first handed a $5m NUKE Rootkit priority over a $12m Katana. `isHackingItem` decides
+  that from `getEquipmentStats`, not from a list of names, because the upgrade roster is exactly
+  the kind of thing a fork edits and a stale list would go on mis-sorting with no symptom. It is
+  the only thing that 2.00 GB buys; gear is still not scored against gear.
+
+  **Ordering alone was not enough, and the gap is easy to miss.** The planner skips an item it
+  cannot afford and moves to the next, so with hack items merely sorted last a $20m budget bought
+  a $12m Katana, skipped a $25m Liquid Body Armor and spent the $8m remainder on the Rootkit
+  anyway. `considerItems` is the gate, and it is the only implementation of it - `planPurchases`
+  calls it twice against the same mutating `owned` map so a sweep big enough to finish the combat
+  list opens the tier in that sweep rather than ~30 s later, and `equip.js` re-derives the log's
+  shortlist through it so a zero-buy line cannot name a cause the planner did not use. The price
+  is idle cash in the window `cloud.js` is bidding for it; the budget is re-priced every sweep, so
+  the money is offered elsewhere rather than lost.
+
+  The mirrored rule for a hacking gang is deliberately NOT implemented - `tick.js` refuses those
+  outright, so nothing writes `isHacking` true; the marker carries the flag anyway so the gate is
+  right on the day that changes rather than silently backwards.
 - **A pass that buys nothing must say WHY.** `equip.js` originally printed only when it bought
   something, so "the phase excludes gear", "the gang already owns everything", "the budget is too
   small" and "no marker yet" were all one blank line. `eligibleItems` is exported so the log

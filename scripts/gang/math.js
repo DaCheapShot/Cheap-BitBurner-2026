@@ -379,40 +379,87 @@ export function isHackingItem(item) {
   return (stats[CHA_KEY] ?? 1) <= 1;
 }
 
-export function eligibleItems(items, phase, isHacking = false) {
+export function eligibleItems(items, phase) {
   const gearOk = BUY_GEAR_PHASES.includes(phase);
-  // Hack-only items go to the BACK of a combat gang's queue rather than out of
-  // it. They are still an upgrade, and once the combat wishlist is bought out
-  // the budget has nothing better to do - but until then the cheapest-first
-  // sort would hand a $5m NUKE Rootkit priority over a $12m Katana that the
-  // gang can actually use. Last, not never.
-  //
-  // Left strictly alone for a hacking gang: the mirrored rule (combat gear
-  // last) is the obvious next thought and is not what was asked for, and
-  // nothing writes isHacking true today - see the note in tick.js.
-  const sink = isHacking ? () => false : isHackingItem;
   return items
     .filter((i) => (i.type === EQUIP_AUGMENTATION || gearOk) && i.cost > 0)
-    .sort((a, b) => (sink(a) - sink(b)) || (a.cost - b.cost));
+    .sort((a, b) => a.cost - b.cost);
+}
+
+/** Upgrades and augmentations both count as owned; the API lists them apart. */
+function ownedSet(m) {
+  return new Set([...(m.upgrades ?? []), ...(m.augmentations ?? [])]);
+}
+
+/**
+ * What this sweep will actually consider, in buy order.
+ *
+ * Hack-only items are a separate TIER, not merely a later position in one
+ * queue. The tier opens only once every other eligible item is owned by every
+ * member - so leftover budget is HELD rather than spent on a Rootkit while a
+ * dearer combat item the gang can use is still unbought.
+ *
+ * Ordering alone was not enough, and the difference is easy to miss: the
+ * planner skips an item it cannot afford and moves to the next one, so with
+ * hack items merely sorted last, a $20m budget bought a $12m Katana, skipped a
+ * $25m Liquid Body Armor and then spent the $8m remainder on a $5m NUKE
+ * Rootkit. Combat-first held, but the remainder still leaked into a stat no
+ * combat task weights above zero.
+ *
+ * The cost is idle cash in exactly the window cloud.js is bidding for it. That
+ * is the trade being made on purpose: the budget is re-priced every sweep
+ * (~30 s), so money not spent here is not lost, only offered elsewhere.
+ *
+ * Left strictly alone for a hacking gang. The mirrored rule - combat gear last -
+ * is the obvious next thought and is not what was asked for, and nothing writes
+ * isHacking true today; see the note in tick.js.
+ *
+ * Exported so equip.js's zero-buy diagnostic re-derives the shortlist through
+ * the same function the planner used. A copy of this gate in the transient
+ * would drift and name a cause that is not the real one, which is the specific
+ * failure the reporting rules in CLAUDE.md exist to stop.
+ */
+export function considerItems(members, items, phase, isHacking = false, owned = null) {
+  const shortlist = eligibleItems(items, phase);
+  if (isHacking) return shortlist;
+
+  const usable = shortlist.filter((i) => !isHackingItem(i));
+  if (usable.length === shortlist.length) return shortlist;
+
+  // `owned` is passed in by planPurchases so the gate can be re-asked partway
+  // through a sweep, against what that sweep has already planned rather than
+  // against the state it started from. Without it a budget large enough to
+  // finish the combat list in one pass still deferred the hack tier to the
+  // NEXT sweep, because the list was drawn up before anything was bought.
+  const has = owned ?? new Map(members.map((m) => [m.name, ownedSet(m)]));
+  const complete = usable.every((i) => members.every((m) => has.get(m.name).has(i.name)));
+  return complete ? shortlist : usable;
 }
 
 export function planPurchases(members, items, phase, budget, isHacking = false) {
-  const shortlist = eligibleItems(items, phase, isHacking);
-
-  const owned = new Map(
-    members.map((m) => [m.name, new Set([...(m.upgrades ?? []), ...(m.augmentations ?? [])])]),
-  );
+  const owned = new Map(members.map((m) => [m.name, ownedSet(m)]));
 
   const buys = [];
   let left = budget;
-  for (const i of shortlist) {
-    for (const m of members) {
-      if (i.cost > left) break;
-      if (owned.get(m.name).has(i.name)) continue;
-      left -= i.cost;
-      owned.get(m.name).add(i.name);
-      buys.push({ member: m.name, item: i.name, cost: i.cost });
+  const spend = (list) => {
+    for (const i of list) {
+      for (const m of members) {
+        if (i.cost > left) break;
+        if (owned.get(m.name).has(i.name)) continue;
+        left -= i.cost;
+        owned.get(m.name).add(i.name);
+        buys.push({ member: m.name, item: i.name, cost: i.cost });
+      }
     }
-  }
+  };
+
+  // Twice, because the first pass can OPEN the tier: a budget big enough to
+  // finish the combat list should go on to the hack items in the same sweep,
+  // not wait ~30 s for the next one. considerItems is re-asked against the
+  // mutated `owned`, so the gate has exactly one implementation and the second
+  // call is a no-op whenever the first did not complete the list - everything
+  // already planned is in `owned` and skipped.
+  spend(considerItems(members, items, phase, isHacking, owned));
+  spend(considerItems(members, items, phase, isHacking, owned));
   return buys;
 }
