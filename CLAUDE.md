@@ -258,7 +258,7 @@ editor's RAM panel when one moves.
 | `gang/ascend.js` | transient: ascension decisions | 8.60 |
 | `gang/war.js` | transient: clash engage/disengage | 11.60 |
 | `gang/tick.js` | transient: recruit, tasks, wanted governor | 11.60 |
-| `gang/equip.js` | transient: equipment buying | 12.70 |
+| `gang/equip.js` | transient: equipment buying | 14.70 |
 
 The continuous entries are the two that have to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds them under 16 GB for that reason. The
@@ -581,6 +581,16 @@ Things that look arbitrary in there and aren't:
   not RESPECT, which looks inconsistent and isn't: in TRAIN nobody has cleared the stat floor, so
   gear buys stats that earn nothing before the next ascension wipes them, while in RESPECT the
   members are already working and the gear pays for itself first.
+- **Hack-only items go LAST in a combat gang, not never.** Every Rootkit and three augmentations
+  (BitWire, Neuralstimulator, DataJack) carry `mults: { hack: x }` and nothing else, and no combat
+  task weights hacking above zero - so cheapest-first handed a $5m NUKE Rootkit priority over a
+  $12m Katana. `isHackingItem` decides that from `getEquipmentStats`, not from a list of names,
+  because the upgrade roster is exactly the kind of thing a fork edits and a stale list would go on
+  mis-sorting with no symptom. It is the only thing that 2.00 GB buys; gear is still not scored
+  against gear. Sunk rather than filtered because once the combat wishlist is bought out the budget
+  has nothing better to do. The mirrored rule for a hacking gang is deliberately NOT implemented -
+  `tick.js` refuses those outright, so nothing writes `isHacking` true; the marker carries the flag
+  anyway so the sort is right on the day that changes rather than silently backwards.
 - **A pass that buys nothing must say WHY.** `equip.js` originally printed only when it bought
   something, so "the phase excludes gear", "the gang already owns everything", "the budget is too
   small" and "no marker yet" were all one blank line. `eligibleItems` is exported so the log

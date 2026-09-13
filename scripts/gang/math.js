@@ -1,5 +1,5 @@
 import {
-  STAT_KEYS, WEIGHT_KEYS, COMBAT_STAT_KEYS, CHA_KEY, GANG_SOFTCAP,
+  STAT_KEYS, WEIGHT_KEYS, COMBAT_STAT_KEYS, CHA_KEY, HACK_KEY, GANG_SOFTCAP,
   TRAIN_STAT_FLOOR, TRAIN_CHA_FLOOR, MAX_MEMBERS, TERRITORY_TARGET,
   WANTED_PENALTY_FLOOR, WANTED_MIN_LEVEL, ASCEND_MULT_THRESHOLD, WAR_MEMBER_FRACTION,
   WAR_WIN_THRESHOLD, WAR_DISENGAGE_THRESHOLD, EQUIP_BUDGET_FRACTION,
@@ -350,15 +350,54 @@ export function equipBudget(money) {
  * Augmentations are bought in every phase and gear only in BUY_GEAR_PHASES,
  * because ascend() reapplies augmentations and discards everything else.
  */
-export function eligibleItems(items, phase) {
-  const gearOk = BUY_GEAR_PHASES.includes(phase);
-  return items
-    .filter((i) => (i.type === EQUIP_AUGMENTATION || gearOk) && i.cost > 0)
-    .sort((a, b) => a.cost - b.cost);
+/**
+ * Does this item raise ONLY hacking?
+ *
+ * Every Rootkit and three of the augmentations (BitWire, Neuralstimulator,
+ * DataJack) carry `mults: { hack: x }` and nothing else, so in a combat gang
+ * they buy a stat no task weights above zero - Human Trafficking, Terrorism,
+ * Territory Warfare and the rest are all hackWeight 0. Money spent there is
+ * money not spent on str/def/dex/agi, which is the entire wishlist.
+ *
+ * Decided from the game's own stats rather than a list of names here, the same
+ * rule that keeps the task table out of config.js: the upgrade roster is
+ * exactly the kind of thing a fork edits, and a stale name list would go on
+ * mis-sorting with no symptom.
+ *
+ * "Only" is the operative word. An item that raised hack AND a combat stat
+ * would still be worth its place, so the test is that nothing else moves -
+ * no item in the stock roster mixes them, but the check costs one loop and
+ * means a fork that adds one is handled rather than mis-ranked.
+ */
+export function isHackingItem(item) {
+  const stats = item?.stats;
+  if (!stats) return false;
+  if ((stats[HACK_KEY] ?? 1) <= 1) return false;
+  for (const k of COMBAT_STAT_KEYS) {
+    if ((stats[k] ?? 1) > 1) return false;
+  }
+  return (stats[CHA_KEY] ?? 1) <= 1;
 }
 
-export function planPurchases(members, items, phase, budget) {
-  const shortlist = eligibleItems(items, phase);
+export function eligibleItems(items, phase, isHacking = false) {
+  const gearOk = BUY_GEAR_PHASES.includes(phase);
+  // Hack-only items go to the BACK of a combat gang's queue rather than out of
+  // it. They are still an upgrade, and once the combat wishlist is bought out
+  // the budget has nothing better to do - but until then the cheapest-first
+  // sort would hand a $5m NUKE Rootkit priority over a $12m Katana that the
+  // gang can actually use. Last, not never.
+  //
+  // Left strictly alone for a hacking gang: the mirrored rule (combat gear
+  // last) is the obvious next thought and is not what was asked for, and
+  // nothing writes isHacking true today - see the note in tick.js.
+  const sink = isHacking ? () => false : isHackingItem;
+  return items
+    .filter((i) => (i.type === EQUIP_AUGMENTATION || gearOk) && i.cost > 0)
+    .sort((a, b) => (sink(a) - sink(b)) || (a.cost - b.cost));
+}
+
+export function planPurchases(members, items, phase, budget, isHacking = false) {
+  const shortlist = eligibleItems(items, phase, isHacking);
 
   const owned = new Map(
     members.map((m) => [m.name, new Set([...(m.upgrades ?? []), ...(m.augmentations ?? [])])]),

@@ -11,13 +11,22 @@ import { report } from "./report.js";
  * spends cheapest-item-first across the whole gang rather than emptying the
  * budget on one member's wishlist.
  *
- * Skipped: ns.gang.getEquipmentStats (2.00 GB). Cheapest-first inside a budget
- * is close enough to a scored choice, and this is already the most expensive of
- * the four transients. Add it if gear selection ever looks visibly wrong.
+ * getEquipmentStats (2.00 GB) is here for ONE job: telling a hack-only item
+ * from a combat one. Every Rootkit and three of the augmentations raise
+ * hacking and nothing else, and no combat task weights hacking above zero, so
+ * cheapest-first would otherwise buy a $5m NUKE Rootkit ahead of a $12m Katana
+ * the gang can actually use. isHackingItem in math.js reads the stats; the sort
+ * in eligibleItems sinks those to the back of the queue rather than dropping
+ * them, because once the combat wishlist is bought out the budget has nothing
+ * better to do with the money.
+ *
+ * It is still NOT used to score gear against gear. Cheapest-first inside a
+ * budget is close enough for that, and this is the most expensive of the four
+ * transients.
  *
  * RAM: 1.60 base + getMemberNames 1.00 + getMemberInformation 2.00
- *      + getEquipmentCost 2.00 + getEquipmentType 2.00 + purchaseEquipment 4.00
- *      + getServerMoneyAvailable 0.10 = 12.70 GB
+ *      + getEquipmentCost 2.00 + getEquipmentType 2.00 + getEquipmentStats 2.00
+ *      + purchaseEquipment 4.00 + getServerMoneyAvailable 0.10 = 14.70 GB
  * (getEquipmentNames is 0 GB.)
  */
 
@@ -36,10 +45,11 @@ export async function main(ns) {
     name: n,
     cost: ns.gang.getEquipmentCost(n),
     type: ns.gang.getEquipmentType(n),
+    stats: ns.gang.getEquipmentStats(n),
   }));
 
   const budget = equipBudget(ns.getServerMoneyAvailable("home"));
-  const buys = planPurchases(members, items, state.phase, budget);
+  const buys = planPurchases(members, items, state.phase, budget, state.isHacking);
 
   // A pass that buys nothing MUST say why. The first version printed only when
   // it bought something, so "the phase excludes gear", "the gang already owns
@@ -47,8 +57,12 @@ export async function main(ns) {
   // from the log: a blank. That cost a live round trip to diagnose, which is
   // the whole thing this repo's logging rules exist to stop.
   if (buys.length === 0) {
-    const eligible = eligibleItems(items, state.phase);
-    const cheapest = eligible.length ? eligible[0].cost : 0;
+    const eligible = eligibleItems(items, state.phase, state.isHacking);
+    // Min over the list, not eligible[0]. The shortlist is no longer sorted by
+    // cost alone - hack-only items sink to the back whatever they cost - so the
+    // first entry is the cheapest USEFUL item, and reporting it as "the
+    // cheapest" would name a figure the budget may in fact clear.
+    const cheapest = eligible.length ? Math.min(...eligible.map((i) => i.cost)) : 0;
     let why;
     if (!eligible.length) {
       why = "no item is eligible - see BUY_GEAR_PHASES, augmentations only outside it";

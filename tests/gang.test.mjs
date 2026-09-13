@@ -377,6 +377,62 @@ export const tests = {
       "upgrades AND augmentations both count as owned");
   },
 
+  // No combat task weights hacking above zero, so a Rootkit in a combat gang
+  // buys a stat nobody can earn from - and cheapest-first handed a $5m NUKE
+  // Rootkit priority over a $12m Katana the gang could actually use.
+  "a combat gang buys hack-only items last, not never": async () => {
+    const mods = await loadScripts();
+    const { eligibleItems, planPurchases } = mods["gang/math"];
+    const { PHASE_MONEY } = mods["gang/config"];
+
+    // Costs and stats are the game's, from src/Gang/data/upgrades.ts.
+    const items = [
+      { name: "NUKE Rootkit", cost: 5e6, type: "Rootkit", stats: { hack: 1.05 } },
+      { name: "Katana", cost: 12e6, type: "Weapon", stats: { str: 1.08, def: 1.08, dex: 1.08 } },
+    ];
+
+    const order = eligibleItems(items, PHASE_MONEY).map((i) => i.name);
+    assert(order[0] === "Katana" && order[1] === "NUKE Rootkit",
+      `the dearer combat item must outrank the cheaper hack-only one, got ${order}`);
+
+    // Sunk, not filtered: with money to spare the Rootkit is still an upgrade.
+    const rich = planPurchases([member("a", 100)], items, PHASE_MONEY, 1e9);
+    assert(rich.length === 2, "a budget covering both should buy both");
+    assert(rich[0].item === "Katana", "but the combat item goes first");
+
+    // A budget covering only one must spend it on the one that earns.
+    const tight = planPurchases([member("a", 100)], items, PHASE_MONEY, 12e6);
+    assert(tight.length === 1 && tight[0].item === "Katana",
+      `a tight budget must not go on the Rootkit, got ${JSON.stringify(tight)}`);
+  },
+
+  // "Only" is the operative word: an item raising hack AND a combat stat is
+  // still worth its place. No stock item mixes them, but a fork that adds one
+  // must be ranked on its merits rather than demoted for the hack field.
+  "hack-only means only, and a hacking gang is left alone": async () => {
+    const mods = await loadScripts();
+    const { eligibleItems, isHackingItem } = mods["gang/math"];
+    const { PHASE_MONEY } = mods["gang/config"];
+
+    assert(isHackingItem({ stats: { hack: 1.05 } }), "a pure hack item is one");
+    assert(!isHackingItem({ stats: { hack: 1.05, str: 1.1 } }), "a mixed item is NOT");
+    assert(!isHackingItem({ stats: { cha: 1.1 } }), "a charisma item is not");
+    assert(!isHackingItem({}), "an item with no stats must not throw or sink");
+
+    const items = [
+      { name: "rootkit", cost: 10, type: "Augmentation", stats: { hack: 1.1 } },
+      { name: "blade", cost: 100, type: "Augmentation", stats: { str: 1.3 } },
+    ];
+    assert(eligibleItems(items, PHASE_MONEY, false)[0].name === "blade",
+      "a combat gang sinks the rootkit behind the dearer blade");
+
+    // The mirrored rule is deliberately NOT implemented - a hacking gang keeps
+    // the plain cheapest-first order, not combat-last.
+    const hacking = eligibleItems(items, PHASE_MONEY, true).map((i) => i.name);
+    assert(hacking[0] === "rootkit" && hacking[1] === "blade",
+      `a hacking gang must sort by cost alone, got ${hacking}`);
+  },
+
   // Missing, corrupt and schema-invalid all collapse to null, exactly as
   // calib.js does - a partial object would reach the respect guard as NaN and
   // compare false against every bound.
@@ -410,6 +466,16 @@ export const tests = {
 
     assert(readMarker(makeNs({ files: { [GANG_MARKER]: "money\n1\nNaN\n3\n0.5\n99" } })) === null,
       "NaN is still fatal - an unreachable threshold is legal, an unparseable one is not");
+
+    // isHacking is line 7 and is NOT part of the length guard. A marker written
+    // before the field existed is six lines long and was a combat gang, which
+    // is what undefined has to read as - bumping the guard instead would make
+    // every reader skip a whole sweep on the first tick after an update.
+    assert(ok.isHacking === false, "a six-line marker predates the field and means combat");
+    const hacking = readMarker(makeNs({ files: { [GANG_MARKER]: "money\n1\n2\n3\n0.5\n99\n1" } }));
+    assert(hacking && hacking.isHacking === true, "a 1 on line 7 is a hacking gang");
+    const combat = readMarker(makeNs({ files: { [GANG_MARKER]: "money\n1\n2\n3\n0.5\n99\n0" } }));
+    assert(combat && combat.isHacking === false, "a 0 on line 7 is a combat gang");
   },
 
   // The RAM argument for the whole split. Fired unawaited these would stack to

@@ -269,15 +269,16 @@ export const tests = {
   // Exact pins rather than a ceiling: every one of these is a fixed set of API
   // calls, and a figure that moves means a call was added, not that the
   // controller grew. The numbers to hold are the SUM of the resident and the
-  // largest transient (2.80 + 12.70 = 15.50), since gang.js awaits each one.
+  // largest transient (2.80 + 14.70 = 17.50), since gang.js awaits each one.
   "each gang transient stays at its pinned cost": () => {
     const pinned = {
       "gang/gang": 2.80,      // 1.60 + run 1.00 + ps 0.20; holds no gang API at all
       "gang/tick": 11.60,     // + getGangInformation 2 + getMemberNames 1 + getMemberInformation 2
                               //   + getTaskStats 1 + setMemberTask 2 + recruitMember 2
       "gang/ascend": 8.60,    // + getMemberNames 1 + getAscensionResult 2 + ascendMember 4
-      "gang/equip": 12.70,    // + getMemberNames 1 + getMemberInformation 2 + getEquipmentCost 2
-                              //   + getEquipmentType 2 + purchaseEquipment 4 + getServerMoneyAvailable 0.10
+      "gang/equip": 14.70,    // + getMemberNames 1 + getMemberInformation 2 + getEquipmentCost 2
+                              //   + getEquipmentType 2 + getEquipmentStats 2 + purchaseEquipment 4
+                              //   + getServerMoneyAvailable 0.10
       "gang/war": 11.60,      // + getGangInformation 2 + getAllGangInformation 2
                               //   + getChanceToWinClash 4 + setTerritoryWarfare 2
       "gang/create": 2.60,    // + createGang 1

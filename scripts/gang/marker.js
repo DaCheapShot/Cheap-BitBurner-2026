@@ -23,6 +23,11 @@ export function readMarker(ns) {
     memberCount: Number(lines[3]),
     territory: Number(lines[4]),
     written: Number(lines[5]),
+    // Line 7, and deliberately NOT length-checked: a marker written before this
+    // field existed is six lines long and was a combat gang, which is exactly
+    // what undefined reads as here. Bumping the length guard instead would make
+    // every reader skip a whole sweep on the first tick after an update.
+    isHacking: lines[6]?.trim() === "1",
   };
   if (!state.phase) return null;
   for (const k of ["respect", "memberCount", "territory"]) {

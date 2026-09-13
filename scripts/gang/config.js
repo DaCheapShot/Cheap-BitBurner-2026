@@ -248,6 +248,15 @@ export const WEIGHT_KEYS = [
 /** The four stats Train Combat raises. */
 export const COMBAT_STAT_KEYS = ["str", "def", "dex", "agi"];
 export const CHA_KEY = "cha";
+/**
+ * The one stat a combat gang cannot use, as a STRING.
+ *
+ * Spelled out as a constant for the same reason STAT_KEYS is: the bare
+ * identifier is billed 0.10 GB wherever the game's parser sees it, so
+ * `stats.hack` would tax math.js and all four transients. `stats[HACK_KEY]`
+ * is a Literal and costs nothing.
+ */
+export const HACK_KEY = "hack";
 
 /**
  * BitNodeMultipliers.GangSoftcap, which appears only in the gain exponent:

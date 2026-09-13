@@ -85,6 +85,12 @@ export async function main(ns) {
       members.length,
       info.territory,
       Date.now(),
+      // Always "0" today, because the refusal above means this line is never
+      // reached for a hacking gang. Written anyway so equip.js can state its
+      // own rule instead of inheriting it from a guard in another file - the
+      // day tick.js learns hacking tasks, the sort in eligibleItems is correct
+      // without anyone having to remember it.
+      info.isHacking ? 1 : 0,
     ].join("\n"),
     "w",
   );
