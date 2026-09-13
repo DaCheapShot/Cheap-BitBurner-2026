@@ -102,14 +102,35 @@ export const TERRITORY_TARGET = 0.95;
 // -------------------------------------------------------- wanted governor ---
 
 /**
- * Wanted level multiplies EVERY gain by respect/(respect + wantedLevel), so it
- * is the one thing that can quietly halve the whole operation.
+ * The hard floor the game clamps wanted level to.
+ *
+ * Gang.ts, processGains: `if (this.wanted < 1 || ...) { this.wanted = 1; }`,
+ * and the whole block is wrapped in
+ * `if (this.wanted !== 1 || wantedLevelGainPerCycle >= 0)` - so at wanted
+ * exactly 1 with negative gain, penance is not merely wasted, it is skipped.
+ */
+export const WANTED_MIN_LEVEL = 1;
+
+/**
+ * How much of the ACHIEVABLE wanted penalty the gang must be keeping.
+ *
+ * A ratio, not an absolute penalty. The absolute form deadlocked a live gang:
+ * the penalty is respect/(respect + wanted), so a fresh gang at 5 respect and
+ * wanted already clamped to 1 reads 0.833 - under any sensible absolute floor -
+ * while having nothing whatsoever to fix. The governor posted vigilantes,
+ * vigilantes earn no respect, respect is the only term that could raise the
+ * penalty, and the gang sat there.
+ *
+ * Measuring against the penalty at WANTED_MIN_LEVEL instead makes the trigger
+ * mean what it was always supposed to mean - "how much of the attainable
+ * multiplier is wanted level costing us" - and is right at the clamp by
+ * construction rather than by a special case: the ratio is exactly 1 there.
  *
  * Deliberately no hysteresis, unlike the war thresholds. Flipping earners onto
- * Vigilante Justice drops wanted, which raises the penalty back over the floor,
- * which releases them - a limit cycle around WANTED_PENALTY_FLOOR is the
- * correct steady state here, not a fault. Flapping costs nothing in this loop;
- * flapping a territory clash costs members.
+ * Vigilante Justice drops wanted, which lifts the ratio back over the floor,
+ * which releases them - a limit cycle around it is the correct steady state
+ * here. Flapping costs nothing in this loop; flapping a territory clash costs
+ * members.
  */
 export const WANTED_PENALTY_FLOOR = 0.95;
 

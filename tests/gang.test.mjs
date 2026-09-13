@@ -196,6 +196,46 @@ export const tests = {
       assert(well.vigilantes === 0, "governor must stay out of the way above the floor");
     },
 
+  // The live failure this test exists for. A fresh gang in PHASE_RESPECT sits at
+  // a handful of respect with wanted already on the game's clamp of 1 - so the
+  // RAW penalty reads 0.833, under any sensible floor, while there is nothing
+  // whatsoever to fix. Gating on that posted vigilantes, vigilantes earn no
+  // respect, respect is the only term that could lift the penalty, and the gang
+  // never got out. Gang.ts also skips the whole wanted block at exactly 1 with
+  // negative gain, so the penance was not merely wasted, it was ignored.
+  "the governor stands down when wanted is already on the game's floor": async () => {
+    const mods = await loadScripts();
+    const { planTasks, wantedPenalty, wantedHeadroom } = mods["gang/math"];
+    const { PHASE_RESPECT, WANTED_PENALTY_FLOOR, WANTED_MIN_LEVEL } = mods["gang/config"];
+
+    const fresh = { respect: 5, wantedLevel: WANTED_MIN_LEVEL, territory: 0 };
+    assert(wantedPenalty(fresh) < WANTED_PENALTY_FLOOR,
+      "fixture must look bad by the RAW penalty, or this tests nothing");
+    assertClose(wantedHeadroom(fresh), 1, 1e-12,
+      "at the clamp there is no headroom to chase, so the ratio must be exactly 1");
+
+    const members = Array.from({ length: 4 }, (_, i) => member(`m${i}`, 400));
+    const res = planTasks(fresh, members, TASKS, PHASE_RESPECT);
+    assert(res.vigilantes === 0,
+      `posted ${res.vigilantes} vigilantes with wanted already at its floor - ` +
+        `they cannot lower it, and they stop the respect that is the only way out`);
+  },
+
+  // The other half: real excess wanted must still be acted on, at any respect.
+  "the governor still engages when wanted is genuinely above the floor": async () => {
+    const mods = await loadScripts();
+    const { planTasks, wantedHeadroom } = mods["gang/math"];
+    const { PHASE_RESPECT, WANTED_PENALTY_FLOOR } = mods["gang/config"];
+
+    const sick = { respect: 1000, wantedLevel: 900, territory: 0.5 };
+    assert(wantedHeadroom(sick) < WANTED_PENALTY_FLOOR, "fixture must have real headroom");
+
+    const members = Array.from({ length: 8 }, (_, i) => member(`m${i}`, 400));
+    const res = planTasks(sick, members, TASKS, PHASE_RESPECT);
+    assert(res.vigilantes > 0, "899 of 900 wanted levels are removable - the governor must act");
+    assert(res.netWanted <= 0, `net wanted should be non-positive, got ${res.netWanted}`);
+  },
+
   "the territory allotment takes the weakest earners, not the best ones": async () => {
     const mods = await loadScripts();
     const { planTasks } = mods["gang/math"];

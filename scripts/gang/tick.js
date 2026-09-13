@@ -1,5 +1,5 @@
 import { MAX_MEMBERS, MEMBER_PREFIX, GANG_MARKER } from "./config.js";
-import { phaseFor, planTasks } from "./math.js";
+import { phaseFor, planTasks, wantedHeadroom } from "./math.js";
 
 /**
  * The hot path: recruit, pick every member's task, hold the wanted level down.
@@ -91,6 +91,7 @@ export async function main(ns) {
     `${phase}: ${members.length} members` +
       `${recruited ? ` (+${recruited})` : ""}, ${moved} reassigned, ` +
       `${result.trainees} training, ${result.vigilantes} on penance, ` +
-      `${result.warSlots} on territory, wanted penalty ${info.wantedPenalty.toFixed(3)}`,
+      `${result.warSlots} on territory, wanted ${info.wantedLevel.toFixed(2)} ` +
+      `(penalty ${info.wantedPenalty.toFixed(3)}, ${(wantedHeadroom(info) * 100).toFixed(1)}% of achievable)`,
   );
 }

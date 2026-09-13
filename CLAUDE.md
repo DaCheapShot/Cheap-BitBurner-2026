@@ -532,6 +532,14 @@ Things that look arbitrary in there and aren't:
   gain is non-positive and no further. It runs **last** in `planTasks` because it needs the real
   total, which is not known until everyone else is placed. No hysteresis, deliberately: flipping
   drops wanted, which releases them, and a limit cycle around the floor is the right steady state.
+- **It triggers on HEADROOM, never on the raw wanted penalty.** `Gang.ts` clamps `this.wanted` to
+  **1**, and skips the whole wanted block entirely at exactly 1 with negative gain — so penance
+  there is not merely wasted, it is ignored. But the penalty is `respect / (respect + wanted)`, so
+  a fresh gang at 5 respect reads **0.833** with wanted already on that clamp and nothing to fix.
+  The first version gated on that number and deadlocked a live gang: it posted vigilantes,
+  vigilantes earn no respect, and respect is the only term that could lift the penalty. The gate is
+  now `wantedHeadroom` — the penalty over the penalty attainable at wanted 1 — which is exactly 1
+  at the clamp, so the governor stands down there by construction rather than by a special case.
 - **`phaseFor` keys TRAIN on "no member is ready"**, not "some member is training" — otherwise one
   freshly ascended member drags eleven earners back to the training yard.
 - **Territory warfare takes the WEAKEST earners** (same power, least forgone income), and

@@ -1,7 +1,7 @@
 import {
   STAT_KEYS, WEIGHT_KEYS, COMBAT_STAT_KEYS, CHA_KEY, GANG_SOFTCAP,
   TRAIN_STAT_FLOOR, TRAIN_CHA_FLOOR, MAX_MEMBERS, TERRITORY_TARGET,
-  WANTED_PENALTY_FLOOR, ASCEND_MULT_THRESHOLD, WAR_MEMBER_FRACTION,
+  WANTED_PENALTY_FLOOR, WANTED_MIN_LEVEL, ASCEND_MULT_THRESHOLD, WAR_MEMBER_FRACTION,
   WAR_WIN_THRESHOLD, WAR_DISENGAGE_THRESHOLD, EQUIP_BUDGET_FRACTION,
   BUY_GEAR_PHASES, EQUIP_AUGMENTATION,
   PHASE_TRAIN, PHASE_RESPECT, PHASE_TERRITORY, PHASE_MONEY,
@@ -33,6 +33,36 @@ export function wantedPenalty(g) {
   const w = g.wantedLevel ?? 0;
   if (r + w <= 0) return 1;
   return r / (r + w);
+}
+
+/**
+ * The best penalty this gang could have - the one at wanted level 1.
+ *
+ * The game clamps wanted there (Gang.ts processGains), so this is a ceiling no
+ * amount of penance can beat.
+ */
+export function achievableWantedPenalty(g) {
+  const r = g.respect ?? 0;
+  if (r <= 0) return 0;
+  return r / (r + WANTED_MIN_LEVEL);
+}
+
+/**
+ * The fraction of the attainable multiplier the gang is actually keeping.
+ *
+ * THIS, not the raw penalty, is what the governor may act on. The raw penalty
+ * is low whenever respect is low, which early on it always is - a fresh gang at
+ * 5 respect reads 0.833 with wanted already clamped to 1 and nothing to fix.
+ * Acting on that posts vigilantes, vigilantes earn no respect, and respect is
+ * the only term that could raise the number. The gang deadlocks, and it did.
+ *
+ * At the clamp this returns exactly 1, so the governor stands down there
+ * without needing a special case for it.
+ */
+export function wantedHeadroom(g) {
+  const best = achievableWantedPenalty(g);
+  if (best <= 0) return 1;
+  return wantedPenalty(g) / best;
 }
 
 /**
@@ -224,8 +254,15 @@ export function planTasks(g, members, tasks, phase) {
   // The governor. Flip earners to Vigilante Justice, worst offender first,
   // until the gang's net wanted gain is non-positive - i.e. wanted stops
   // climbing. Sized, not guessed: every term in netWantedGain is computable.
+  //
+  // Gated on HEADROOM, never on the raw penalty. The raw penalty is low
+  // whenever respect is low, and at the start of a gang it always is, with
+  // wanted already sitting on the game's clamp of 1 and nothing to remove.
+  // A live gang deadlocked on exactly that: penance earns no respect, respect
+  // is the only term that could lift the penalty, so the governor never let
+  // go. wantedHeadroom is 1 at the clamp, so this stands down there.
   let vigilantes = 0;
-  if (vigilante && wantedPenalty(g) < WANTED_PENALTY_FLOOR) {
+  if (vigilante && wantedHeadroom(g) < WANTED_PENALTY_FLOOR) {
     const candidates = scored
       .filter((e) => e.task && plan.get(e.m.name) === e.task.name)
       .map((e) => ({ e, w: wantedGain(g, e.m, e.task) }))
