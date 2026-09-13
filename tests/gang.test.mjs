@@ -290,10 +290,14 @@ export const tests = {
     assert(!warDecision(false, []), "no rivals holding territory -> nothing to fight");
   },
 
-  "gear waits for the late phases but augmentations never do": async () => {
+  // TRAIN is excluded and RESPECT is not, which looks inconsistent and is not.
+  // In TRAIN nobody has cleared the stat floor, so gear buys stats that earn
+  // nothing before the next ascension wipes them. In RESPECT the members are
+  // already working, so the gear pays for itself before it is lost.
+  "gear is excluded only while nobody can earn from it": async () => {
     const mods = await loadScripts();
     const { planPurchases } = mods["gang/math"];
-    const { PHASE_RESPECT, PHASE_MONEY } = mods["gang/config"];
+    const { PHASE_TRAIN, PHASE_RESPECT, PHASE_MONEY } = mods["gang/config"];
 
     const items = [
       { name: "Baseball Bat", cost: 10, type: "Weapon" },
@@ -301,13 +305,16 @@ export const tests = {
     ];
     const members = [member("a", 100), member("b", 100)];
 
-    const early = planPurchases(members, items, PHASE_RESPECT, 1000);
-    assert(early.every((b) => b.item === "BitWire"),
-      "gear bought before the ascension churn stops is wiped by the next ascend()");
-    assert(early.length === 2, "both members should get the augmentation");
+    const training = planPurchases(members, items, PHASE_TRAIN, 1000);
+    assert(training.every((b) => b.item === "BitWire"),
+      "gear bought in TRAIN earns nothing before the next ascend() wipes it");
+    assert(training.length === 2, "both members should still get the augmentation");
 
-    const late = planPurchases(members, items, PHASE_MONEY, 1000);
-    assert(late.some((b) => b.item === "Baseball Bat"), "gear is fine once ascensions stop");
+    for (const phase of [PHASE_RESPECT, PHASE_MONEY]) {
+      const buys = planPurchases(members, items, phase, 1000);
+      assert(buys.some((b) => b.item === "Baseball Bat"),
+        `gear should be bought in ${phase} - the members are earning with it`);
+    }
   },
 
   // Member-major spending let the first member empty the budget on its own
@@ -326,6 +333,34 @@ export const tests = {
     assert(buys.length === 3, `expected 3 cheap buys inside a 35 budget, got ${buys.length}`);
     assert(new Set(buys.map((b) => b.member)).size === 3, "every member should get one");
     assert(buys.every((b) => b.item === "cheap"), "cheapest first, so nobody gets the dear one");
+  },
+
+  // equip.js reports a zero-buy pass by re-deriving the shortlist, so the two
+  // must agree. Duplicating the filter in the transient would drift from the
+  // planner and hand the log a cause that is not the real one.
+  "the eligibility the log reports is the one the planner used": async () => {
+    const mods = await loadScripts();
+    const { eligibleItems, planPurchases } = mods["gang/math"];
+    const { PHASE_TRAIN, PHASE_MONEY } = mods["gang/config"];
+
+    const items = [
+      { name: "Bat", cost: 10, type: "Weapon" },
+      { name: "Van", cost: 10, type: "Vehicle" },
+      { name: "BitWire", cost: 10, type: "Augmentation" },
+      { name: "Free", cost: 0, type: "Augmentation" },
+    ];
+    const members = [member("a", 100)];
+
+    const early = eligibleItems(items, PHASE_TRAIN);
+    assert(early.length === 1 && early[0].name === "BitWire",
+      `outside BUY_GEAR_PHASES only augmentations are eligible, got ${early.map((i) => i.name)}`);
+    assert(eligibleItems(items, PHASE_MONEY).length === 3, "a zero-cost item is never eligible");
+
+    // The planner cannot buy anything the log would call ineligible.
+    const names = new Set(eligibleItems(items, PHASE_TRAIN).map((i) => i.name));
+    for (const b of planPurchases(members, items, PHASE_TRAIN, 1e9)) {
+      assert(names.has(b.item), `planner bought ${b.item}, which eligibleItems calls ineligible`);
+    }
   },
 
   "already-owned equipment is never bought twice": async () => {

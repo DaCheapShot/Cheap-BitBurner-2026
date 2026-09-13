@@ -350,11 +350,15 @@ export function equipBudget(money) {
  * Augmentations are bought in every phase and gear only in BUY_GEAR_PHASES,
  * because ascend() reapplies augmentations and discards everything else.
  */
-export function planPurchases(members, items, phase, budget) {
+export function eligibleItems(items, phase) {
   const gearOk = BUY_GEAR_PHASES.includes(phase);
-  const shortlist = items
+  return items
     .filter((i) => (i.type === EQUIP_AUGMENTATION || gearOk) && i.cost > 0)
     .sort((a, b) => a.cost - b.cost);
+}
+
+export function planPurchases(members, items, phase, budget) {
+  const shortlist = eligibleItems(items, phase);
 
   const owned = new Map(
     members.map((m) => [m.name, new Set([...(m.upgrades ?? []), ...(m.augmentations ?? [])])]),

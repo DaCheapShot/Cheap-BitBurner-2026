@@ -149,18 +149,34 @@ export const ASCEND_MULT_THRESHOLD = 1.15;
 
 // -------------------------------------------------------------- equipment ---
 
-/** Spend at most this fraction of current cash on one equipment sweep. */
-export const EQUIP_BUDGET_FRACTION = 0.10;
+/**
+ * Spend at most this fraction of current cash on ONE equipment sweep.
+ *
+ * Per sweep, and a sweep runs every EQUIP_EVERY gang updates (~30 s) - so this
+ * is far more aggressive than it reads. It is also self-limiting: the next
+ * sweep prices against whatever is left.
+ *
+ * Kept low because cloud.js is the other bidder for the same cash and is capped
+ * at 10% of it. At 0.9 the gang wins nearly every race and the server fleet,
+ * which is the batcher's whole growth path, stops growing.
+ */
+export const EQUIP_BUDGET_FRACTION = 0.25;
 
 /**
  * Gear is bought only in these phases; AUGMENTATIONS are bought in all of them.
  *
  * GangMember.ascend() clears every upgrade and then reapplies only the
  * augmentations, so a Weapon bought the tick before an ascension is money set
- * on fire, while an Augmentation is permanent. The early phases are the
- * ascension-heavy ones, so gear waits until that churn stops.
+ * on fire, while an Augmentation is permanent.
+ *
+ * TRAIN is excluded for that reason and RESPECT is not, which looks
+ * inconsistent and is not. In TRAIN nobody has cleared the stat floor, so gear
+ * buys stats that are about to be wiped and earns nothing in the meantime. In
+ * RESPECT the members are already working: gear raises their stats now, that
+ * raises respect now, and respect is what gates the roster. Losing the gear to
+ * a later ascension costs the purchase price, not the earnings it made first.
  */
-export const BUY_GEAR_PHASES = [PHASE_TERRITORY, PHASE_MONEY];
+export const BUY_GEAR_PHASES = [PHASE_RESPECT, PHASE_TERRITORY, PHASE_MONEY];
 export const EQUIP_AUGMENTATION = "Augmentation";
 
 // ------------------------------------------------------------------- war ----

@@ -1,4 +1,4 @@
-import { planPurchases, equipBudget } from "./math.js";
+import { planPurchases, equipBudget, eligibleItems } from "./math.js";
 import { readMarker } from "./marker.js";
 
 /**
@@ -40,6 +40,29 @@ export async function main(ns) {
   const budget = equipBudget(ns.getServerMoneyAvailable("home"));
   const buys = planPurchases(members, items, state.phase, budget);
 
+  // A pass that buys nothing MUST say why. The first version printed only when
+  // it bought something, so "the phase excludes gear", "the gang already owns
+  // everything", "the budget is too small" and "no marker" all looked the same
+  // from the log: a blank. That cost a live round trip to diagnose, which is
+  // the whole thing this repo's logging rules exist to stop.
+  if (buys.length === 0) {
+    const eligible = eligibleItems(items, state.phase);
+    const cheapest = eligible.length ? eligible[0].cost : 0;
+    let why;
+    if (!eligible.length) {
+      why = "no item is eligible - see BUY_GEAR_PHASES, augmentations only outside it";
+    } else if (cheapest > budget) {
+      why = `cheapest eligible is $${cheapest.toExponential(2)}, over budget`;
+    } else {
+      why = "the gang already owns every eligible item it can afford";
+    }
+    ns.print(
+      `nothing bought in ${state.phase}: ${eligible.length}/${items.length} items eligible, ` +
+        `budget $${budget.toExponential(2)} - ${why}`,
+    );
+    return;
+  }
+
   let bought = 0;
   let spent = 0;
   for (const b of buys) {
@@ -52,7 +75,12 @@ export async function main(ns) {
     spent += b.cost;
   }
 
-  if (bought) {
+  if (bought === 0) {
+    // Planned buys that all failed at the till. purchaseEquipment is the
+    // authority on the money, so this means it moved between plan and buy -
+    // normal with cloud.js buying servers, but it must not read as silence.
+    ns.print(`purchaseEquipment refused all ${buys.length} planned buys - money moved since the plan`);
+  } else {
     ns.print(`bought ${bought} of ${buys.length} planned for $${spent.toExponential(2)} (${state.phase})`);
   }
 }

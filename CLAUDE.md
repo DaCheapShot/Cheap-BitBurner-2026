@@ -551,7 +551,25 @@ Things that look arbitrary in there and aren't:
   member. `ascend.js` decrements its own running total rather than re-reading the gang.
 - **Augmentations survive ascension and gear does not** (`ascend()` reapplies only augs), so gear
   waits for `BUY_GEAR_PHASES`. Purchases are planned **item-major**, cheapest first: member-major
-  lets the first member empty the budget on its own wishlist.
+  lets the first member empty the budget on its own wishlist. `BUY_GEAR_PHASES` excludes TRAIN and
+  not RESPECT, which looks inconsistent and isn't: in TRAIN nobody has cleared the stat floor, so
+  gear buys stats that earn nothing before the next ascension wipes them, while in RESPECT the
+  members are already working and the gear pays for itself first.
+- **A pass that buys nothing must say WHY.** `equip.js` originally printed only when it bought
+  something, so "the phase excludes gear", "the gang already owns everything", "the budget is too
+  small" and "no marker yet" were all one blank line. `eligibleItems` is exported so the log
+  re-derives the shortlist through the same function the planner used, rather than a copy that can
+  drift and name a cause that isn't the real one.
+- **`EQUIP_BUDGET_FRACTION` is per SWEEP, and a sweep is every ~30 s.** It reads far tamer than it
+  is, and `cloud.js` is bidding for the same cash capped at 10% — set it high and the server fleet,
+  which is the batcher's whole growth path, stops growing.
+
+**Which config changes need a restart.** `gang.js` is the only long-lived process, so it is the
+only one holding stale constants: `TICK_EVERY`, `WAR_EVERY`, `ASCEND_EVERY`, `EQUIP_EVERY` and
+`TRANSIENT_TIMEOUT_MS` are frozen at the value it started with. **Everything else is read inside a
+transient and takes effect on that transient's next run** — `Script.ts` cascades
+`invalidateModule()` to every dependent, so writing `config.js` re-compiles `math.js` and all four
+transients, and the next `ns.run` picks up the new value with no restart.
 
 `boot.js` gates the service on `ns.gang.inGang()` (0 GB) rather than starting it blind — without a
 gang the supervisor exits at once and `ensureService` would relaunch it every tick forever, the
