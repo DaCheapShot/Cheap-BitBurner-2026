@@ -95,9 +95,9 @@ export async function main(ns) {
     `${phase}, ${members.length} members` +
       `${recruited ? ` (+${recruited})` : ""}, ${moved} reassigned | ` +
       `${result.trainees} training, ${result.vigilantes} penance, ` +
-      `${result.warSlots} territory | respect ${ns.format.number(info.respect, 0, 1000, true)} ` +
-      `(next recruit at ${ns.format.number(info["respectForNextRecruit"], 0, 1000, true)}) | ` +
-      `wanted ${info.wantedLevel.toFixed(2)}, ` +
+      `${result.warSlots} territory | respect ${ns.format.number(info.respect, 2, 1000, true)} ` +
+      `(next recruit at ${ns.format.number(info["respectForNextRecruit"], 2, 1000, true)}) | ` +
+      `wanted ${ns.format.number(info.wantedLevel, 2)}, ` +
       `${ns.format.percent(wantedHeadroom(info), 1)} of achievable`,
   );
 }

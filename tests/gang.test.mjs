@@ -587,8 +587,36 @@ export const tests = {
     const ns = fresh({});
     assert(ns.format.number(54300000, 2) === "54.30m", ns.format.number(54300000, 2));
     assert(ns.format.number(1940000000, 2) === "1.94b", ns.format.number(1940000000, 2));
-    assert(ns.format.number(412, 0, 1000, true) === "412", ns.format.number(412, 0, 1000, true));
+    assert(ns.format.number(412, 2, 1000, true) === "412", ns.format.number(412, 2, 1000, true));
     assert(ns.format.percent(0.124, 1) === "12.4%", ns.format.percent(0.124, 1));
+
+    // The live report: "respect 2m (next recruit at 2m)" for 1.6m against 2.05m.
+    // isInteger applies only BELOW suffixStart - once a suffix is in play the
+    // game uses fractionalDigits regardless, so 0 digits rounded both to "2m"
+    // and the line said the gang had exactly what it needed.
+    const have = ns.format.number(1_600_000, 2, 1000, true);
+    const need = ns.format.number(2_050_000, 2, 1000, true);
+    assert(have === "1.60m", have);
+    assert(need === "2.05m", need);
+    assert(have !== need, "two respect figures a recruit apart must not render identically");
+
+    // The game's rollover guard: a mantissa rounding to 1000.00 takes the next
+    // suffix instead. Without it this reads "1000.00k".
+    assert(ns.format.number(999_999, 2) === "1.00m", ns.format.number(999_999, 2));
+  },
+
+  // The precise shape of the live bug, banned so it cannot come back: zero
+  // fractional digits is only safe when a suffix can never appear.
+  "no suffixed figure is printed with zero fractional digits": () => {
+    const dir = path.resolve(import.meta.dirname, "..", "scripts", "gang");
+    for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".js"))) {
+      const src = fs.readFileSync(path.join(dir, f), "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/.*$/gm, "");
+      assert(!/ns\.format\.number\s*\([^)]*,\s*0\s*[,)]/.test(src),
+        `gang/${f} formats a number with 0 fractional digits. isInteger only suppresses ` +
+          `decimals BELOW suffixStart - with a suffix, 1.6m and 2.05m both print as "2m".`);
+    }
   },
 
   "no transient can return without reporting": () => {

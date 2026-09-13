@@ -74,10 +74,21 @@ export function makeNs(o = {}) {
     format: {
       number: (n, digits = 3, suffixStart = 1000, isInteger = false) => {
         const abs = Math.abs(n);
+        // isInteger applies ONLY below suffixStart. Once a suffix is in play
+        // the game uses fractionalDigits regardless - which is why passing 0
+        // here printed both 1.6m and 2.05m as "2m" in a live log.
         if (abs < suffixStart) return isInteger ? String(Math.round(n)) : n.toFixed(digits);
         const SUFFIX = ["", "k", "m", "b", "t", "q", "Q", "s", "S", "o", "n"];
-        const i = Math.min(Math.floor(Math.log10(abs) / 3), SUFFIX.length - 1);
-        return `${(n / 1000 ** i).toFixed(digits)}${SUFFIX[i]}`;
+        let i = Math.min(Math.floor(Math.log10(abs) / 3), SUFFIX.length - 1);
+        let scaled = n / 1000 ** i;
+        // The game's rollover guard, from src/ui/formatNumber.ts: a mantissa
+        // that rounds up to 1000.00 becomes 1.00 of the NEXT suffix, so
+        // 999999 at 2 digits is "1.00m" and never "1000.00k".
+        if (Math.abs(scaled).toFixed(digits).length === digits + 5 && SUFFIX[i + 1]) {
+          i += 1;
+          scaled = scaled < 0 ? -1 : 1;
+        }
+        return `${scaled.toFixed(digits)}${SUFFIX[i]}`;
       },
       ram: (n, digits = 2) => `${n.toFixed(digits)}GB`,
       percent: (n, digits = 2) => `${(n * 100).toFixed(digits)}%`,

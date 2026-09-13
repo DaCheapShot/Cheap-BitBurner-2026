@@ -678,11 +678,17 @@ time: 0 }` — so there is never a RAM argument for hand-rolling one.
 
 ```js
 `$${ns.format.number(money, 2)}`                    // $54.30m, $2.22q
-`$${ns.format.number(respect, 0, 1000, true)}`      // 412, then 412.41k  (isInteger)
+`${ns.format.number(respect, 2, 1000, true)}`       // 412, then 1.60m  (isInteger)
 ns.format.percent(fraction, 1)                      // 12.4%   - takes 0.124, NOT 12.4
 ns.format.ram(gb)                                   // honours the GB/GiB setting
 ns.format.time(ms)
 ```
+
+**`isInteger` suppresses decimals only BELOW `suffixStart`.** Once a suffix applies,
+`formatNumber` uses `fractionalDigits` regardless — so `(n, 0, 1000, true)` prints 1.6m AND 2.05m
+as `"2m"`. A live log read `respect 2m (next recruit at 2m)` while the gang was 450k short, which
+is a report that states the opposite of the truth. Pass **2**, not 0: the flag still keeps small
+counts clean (`412`, not `412.00`). A test bans a 0 there.
 
 Three reasons this is not a style preference:
 
