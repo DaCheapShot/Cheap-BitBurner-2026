@@ -560,6 +560,37 @@ export const tests = {
   // for in the first place: war.js logged only on a state CHANGE, so "why are
   // we not taking territory" had no answer in the log, which is the question
   // asked most often.
+  // "$5.43e+7" is unreadable in a log. ns.format.number is the game's OWN
+  // formatter at 0 GB - the same one the UI uses, and it honours the player's
+  // Numeric Display settings, which nothing hand-rolled can do.
+  //
+  // Note the fork shape: ns.format.number, NOT ns.formatNumber. The cost table
+  // is `const format = { number: 0, ram: 0, percent: 0, time: 0 }`.
+  "money and counts go through the game's own formatter": () => {
+    const dir = path.resolve(import.meta.dirname, "..", "scripts", "gang");
+    for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".js"))) {
+      const src = fs.readFileSync(path.join(dir, f), "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/.*$/gm, "");
+      assert(!/toExponential\s*\(/.test(src),
+        `gang/${f} uses toExponential - "$5.43e+7" is not a money format. Use ns.format.number.`);
+      assert(!/\*\s*100\s*\)\s*\.toFixed/.test(src),
+        `gang/${f} hand-rolls a percentage - use ns.format.percent, which matches the UI.`);
+      assert(!/\bns\.formatNumber\b/.test(src),
+        `gang/${f} calls ns.formatNumber, which does not exist in this fork - it is ns.format.number`);
+    }
+  },
+
+  // The mock must agree with the game or the log is only right in tests.
+  "the formatter turns the reported figures into readable money": async () => {
+    const { makeNs: fresh } = await import("./mockNs.mjs");
+    const ns = fresh({});
+    assert(ns.format.number(54300000, 2) === "54.30m", ns.format.number(54300000, 2));
+    assert(ns.format.number(1940000000, 2) === "1.94b", ns.format.number(1940000000, 2));
+    assert(ns.format.number(412, 0, 1000, true) === "412", ns.format.number(412, 0, 1000, true));
+    assert(ns.format.percent(0.124, 1) === "12.4%", ns.format.percent(0.124, 1));
+  },
+
   "no transient can return without reporting": () => {
     const dir = path.resolve(import.meta.dirname, "..", "scripts", "gang");
     for (const f of ["tick.js", "ascend.js", "equip.js", "war.js"]) {

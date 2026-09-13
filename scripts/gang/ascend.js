@@ -62,11 +62,11 @@ export async function main(ns) {
   }
 
   if (done.length) {
-    report(ns, "ascend", `${done.length} ascended (${done.join(", ")}) | respect now ${respect.toFixed(0)}`);
+    report(ns, "ascend", `${done.length} ascended (${done.join(", ")}) | respect now ${ns.format.number(respect, 0, 1000, true)}`);
   } else if (blocked) {
     report(ns, "ascend",
       `${blocked} ready at x${best.toFixed(2)} but HELD - ascending would drop respect ` +
-        `under the ${state.nextRecruitAt.toFixed(0)} needed for the next recruit`);
+        `under the ${ns.format.number(state.nextRecruitAt, 0, 1000, true)} needed for the next recruit`);
   } else {
     report(ns, "ascend", `none ready - best x${best.toFixed(2)}, need x${ASCEND_MULT_THRESHOLD.toFixed(2)}`);
   }

@@ -31,6 +31,13 @@ Game source (for behaviour the docs don't state) lives under `.../stable/src/`.
 - Purchased servers are under **`ns.cloud`** (`ns.cloud.purchaseServer`, `getServerNames`,
   `upgradeServer`, `getRamLimit`), not the vanilla top-level functions.
 - **`ns.tail()` does not exist** — use `ns.ui.openTail()` (0 GB).
+- **`ns.formatNumber()` does not exist either.** Formatting lives in an **`ns.format` namespace**:
+  `ns.format.number(n, fractionalDigits = 3, suffixStart = 1000, isInteger = false)`,
+  `ns.format.ram`, `ns.format.percent`, `ns.format.time` — the cost table entry is literally
+  `const format = { number: 0, ram: 0, percent: 0, time: 0 }`, so all four are **0 GB**. Prefer
+  them to anything hand-rolled: they are the functions the UI itself calls, so a figure in a log
+  reads the same as the one on screen, and they honour the player's Numeric Display settings,
+  which a local formatter cannot.
 
 ## Running things
 
@@ -508,6 +515,10 @@ hundred ms later — so everything the four of them did was invisible and the su
 showed a phase line and nothing else. Port 4 because 1 is the shotgun's report port, 2 the share
 gate and 3 the continuous batcher's; `gang.js` drains with `read()`, which removes the message, so
 sharing any of those would eat another system's reports. One drainer only, for the same reason.
+
+Figures in those lines go through `ns.format.number` / `.percent` / `.time` — the game's own
+formatters at 0 GB. A hand-rolled one produced `$5.43e+7` in a live log, which is not a money
+format; a test bans `toExponential`, `ns.formatNumber` and `(x * 100).toFixed` across the subtree.
 
 **Every transient reports exactly one line on every path it can take**, including the paths where
 it did nothing. That is what lets `gang.js` treat silence as a *thrown script* rather than a quiet

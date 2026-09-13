@@ -54,7 +54,7 @@ export async function main(ns) {
     ns,
     "war",
     `${engage ? "ENGAGED" : "standing down"}${changed ? " (changed)" : ""} | ` +
-      `worst win chance ${(worst * 100).toFixed(1)}% across ${chances.length} rivals | ` +
-      `holding ${(info.territory * 100).toFixed(1)}%, power ${info.power.toFixed(0)}`,
+      `worst win chance ${ns.format.percent(worst, 1)} across ${chances.length} rivals | ` +
+      `holding ${ns.format.percent(info.territory, 1)}, power ${ns.format.number(info.power, 0, 1000, true)}`,
   );
 }

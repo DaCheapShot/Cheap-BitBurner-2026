@@ -53,13 +53,13 @@ export async function main(ns) {
     if (!eligible.length) {
       why = "no item is eligible - see BUY_GEAR_PHASES, augmentations only outside it";
     } else if (cheapest > budget) {
-      why = `cheapest eligible is $${cheapest.toExponential(2)}, over budget`;
+      why = `cheapest eligible is $${ns.format.number(cheapest, 2)}, over budget`;
     } else {
       why = "the gang already owns every eligible item it can afford";
     }
     report(ns, "equip",
       `nothing bought in ${state.phase}: ${eligible.length}/${items.length} items eligible, ` +
-        `budget $${budget.toExponential(2)} - ${why}`);
+        `budget $${ns.format.number(budget, 2)} - ${why}`);
     return;
   }
 
@@ -81,6 +81,6 @@ export async function main(ns) {
     // normal with cloud.js buying servers, but it must not read as silence.
     report(ns, "equip", `refused all ${buys.length} planned buys - money moved since the plan`);
   } else {
-    report(ns, "equip", `bought ${bought} of ${buys.length} planned for $${spent.toExponential(2)} (${state.phase})`);
+    report(ns, "equip", `bought ${bought} of ${buys.length} planned for $${ns.format.number(spent, 2)} (${state.phase})`);
   }
 }

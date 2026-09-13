@@ -67,7 +67,7 @@ async function runOne(ns, file, tag, log) {
       return true;
     }
   }
-  log(`WARN: ${file} still running after ${Math.round(TRANSIENT_TIMEOUT_MS / 1000)}s - moving on`);
+  log(`WARN: ${file} still running after ${ns.format.time(TRANSIENT_TIMEOUT_MS)} - moving on`);
   return true;
 }
 
@@ -123,7 +123,7 @@ export async function main(ns) {
     const phase = ns.read(GANG_MARKER).split("\n")[0];
     if (phase && phase !== lastPhase) {
       lastPhase = phase;
-      log(`PHASE -> ${phase}  (bonus time ${Math.round(ns.gang.getBonusTime() / 1000)}s)`);
+      log(`PHASE -> ${phase}  (bonus time ${ns.format.time(ns.gang.getBonusTime())})`);
     }
   }
 }

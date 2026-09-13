@@ -63,6 +63,26 @@ export function makeNs(o = {}) {
     args: o.args ?? [],
     disableLog: () => {}, enableLog: () => {},
     ui: { openTail: () => {} },
+    // This fork's ns.format namespace - number/ram/percent/time, all 0 GB.
+    // NOT ns.formatNumber, which does not exist here.
+    //
+    // The suffix list and the /1000 scaling are the game's, from
+    // src/ui/formatNumber.ts. Deliberately NOT reproduced: the Numeric Display
+    // settings (nothing here has a Player to read them from), the "∞" spelling
+    // for non-finite values, and the switch to exponential form past 1e33.
+    // Reproduce those with the test that needs them.
+    format: {
+      number: (n, digits = 3, suffixStart = 1000, isInteger = false) => {
+        const abs = Math.abs(n);
+        if (abs < suffixStart) return isInteger ? String(Math.round(n)) : n.toFixed(digits);
+        const SUFFIX = ["", "k", "m", "b", "t", "q", "Q", "s", "S", "o", "n"];
+        const i = Math.min(Math.floor(Math.log10(abs) / 3), SUFFIX.length - 1);
+        return `${(n / 1000 ** i).toFixed(digits)}${SUFFIX[i]}`;
+      },
+      ram: (n, digits = 2) => `${n.toFixed(digits)}GB`,
+      percent: (n, digits = 2) => `${(n * 100).toFixed(digits)}%`,
+      time: (ms) => `${Math.round(ms / 1000)}s`,
+    },
     print: (s) => ns._log.push(s),
     tprint: (s) => ns._log.push("[T] " + s),
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),
