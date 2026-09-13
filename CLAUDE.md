@@ -670,5 +670,44 @@ Breaking any of these produces silent, compounding damage rather than an error:
 Comments explain *why*, especially where a simpler-looking alternative is wrong — most of them
 encode a bug that already happened. Keep that when editing; don't trim them to tidy up.
 
+### Printing numbers: use the game's formatters, never your own
+
+**Any script that prints money, RAM, a percentage or a duration uses `ns.format.*`.** All four are
+**0 GB** — the cost table entry is literally `const format = { number: 0, ram: 0, percent: 0,
+time: 0 }` — so there is never a RAM argument for hand-rolling one.
+
+```js
+`$${ns.format.number(money, 2)}`                    // $54.30m, $2.22q
+`$${ns.format.number(respect, 0, 1000, true)}`      // 412, then 412.41k  (isInteger)
+ns.format.percent(fraction, 1)                      // 12.4%   - takes 0.124, NOT 12.4
+ns.format.ram(gb)                                   // honours the GB/GiB setting
+ns.format.time(ms)
+```
+
+Three reasons this is not a style preference:
+
+- **They are the functions the UI calls**, so a figure in a script log reads the same as the one
+  on screen beside it. A local formatter disagrees with the game and you cannot tell which is right.
+- **They honour the player's Numeric Display settings.** Nothing hand-rolled can.
+- **You do not own the suffix list.** It runs `["", "k", "m", "b", "t", "q", "Q", "s", "S", "o",
+  "n"]` and a copy that stops early does not error — the mantissa just grows without bound. A live
+  report read `$2219301.35b` for what the game calls `$2.22q`.
+
+**`ns.formatNumber()` and `ns.nFormat()` do not exist in this fork** — see Fork differences. Both
+are `undefined` here, which is a `TypeError` at the call site and nowhere else.
+
+**Format at the CALL SITE, not inside a 0 GB pure module.** `config.js`, `calib.js`, `verify.js`,
+`gang/math.js` and the like have no `ns` and must keep it that way; threading one in to format a
+string is the wrong trade. Return the number, let the script that has `ns` print it — that is why
+`gang/report.js` takes a finished string.
+
+**ponytail: five hand-rolled copies survive, four of them with a known ceiling.**
+`capacity.js:70`, `cloud.js:63`, `managerCore.js:96` and `prepper.js:72` each carry
+`[[1e12, "t"], [1e9, "b"], [1e6, "m"], [1e3, "k"]]` and print an unbounded mantissa past $1e15;
+`continuous/lib/fmt.js` has the full list and is correct but still a copy. They predate this rule
+and are left alone because converting them means threading `ns` through their callers. Replace one
+with `ns.format.number` when you are already editing that file — do not add a sixth.
+`tests/ram.test.mjs` fails on any new copy.
+
 Commit messages lead with the reasoning and the measured numbers behind a change, not a file
 list.

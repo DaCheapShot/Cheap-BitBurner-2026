@@ -1,4 +1,4 @@
-import { readScript, assert, loadScripts } from "./harness.mjs";
+import { readScript, assert, loadScripts, scriptNames } from "./harness.mjs";
 
 // Verified against src/Netscript/RamCostGenerator.ts in this fork.
 const COST = {
@@ -308,6 +308,61 @@ export const tests = {
   "boot.js still costs 3.60 GB with the gang service wired in": () => {
     const ram = ramOf("boot");
     assert(Math.abs(ram - 3.60) < 0.011, `expected 3.60 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // Vanilla's formatters. Neither exists in this fork - formatting is an
+  // ns.format NAMESPACE - so either call is `undefined is not a function` at
+  // the call site and nowhere earlier. Costs nothing to ban and cannot false
+  // positive: no correct script in this repo can contain either name.
+  "nothing calls a formatter this fork does not have": () => {
+    for (const name of scriptNames()) {
+      const src = codeOnly(readScript(name));
+      for (const gone of ["formatNumber", "nFormat"]) {
+        assert(!new RegExp(`\\bns\\.${gone}\\s*\\(`).test(src),
+          `${name}.js calls ns.${gone}, which does not exist in this fork. ` +
+            `Use ns.format.number / .ram / .percent / .time - all 0 GB.`);
+      }
+    }
+  },
+
+  // The suffix list is the game's and must not be re-typed. A copy that stops
+  // early does not error; the mantissa grows without bound instead, and a live
+  // report read "$2219301.35b" for what the game calls "$2.22q".
+  //
+  // ponytail: an allowlist, because five copies predate the rule and converting
+  // them means threading ns through their callers. It exists to stop a SIXTH,
+  // which is the failure that actually keeps happening. Shrink it whenever one
+  // of these files is being edited anyway; never grow it.
+  "no new script re-types the money suffix list": () => {
+    const GRANDFATHERED = new Set([
+      "capacity", "cloud", "managerCore", "prepper", "continuous/lib/fmt",
+    ]);
+    // Either shape that has actually been written here: the divisor/suffix
+    // pair list, and the bare powers-of-1000 array.
+    const COPY = /\[\s*1e(?:9|12)\s*,\s*"[a-zA-Z]"\s*\]|"k"\s*,\s*"m"\s*,\s*"b"/;
+
+    const seen = new Set();
+    for (const entry of ["boot", "manager", "manager-formulas", "capacity", "cloud", "deploy",
+                         "root", "sharemode", "connectme", "calibrate", "prep", "prep-formulas",
+                         "continuous/manager", "continuous/manager-formulas", "continuous/servers",
+                         "continuous/capacity", "gang/gang", "gang/tick", "gang/ascend",
+                         "gang/equip", "gang/war", "gang/create"]) {
+      for (const mod of closure(entry)) seen.add(mod);
+    }
+
+    for (const mod of [...seen].sort()) {
+      if (GRANDFATHERED.has(mod)) continue;
+      // Comments stripped, strings KEPT. codeOnly() blanks string literals, so
+      // `[1e12, "t"]` would arrive here as `[1e12,    ]` and this pattern could
+      // never match - the first version of this test passed vacuously against a
+      // planted violation. Same trap closure() documents one screen up.
+      const src = readScript(mod)
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/.*$/gm, "");
+      assert(!COPY.test(src),
+        `${mod}.js re-types the money suffix list. Use ns.format.number (0 GB) - it is the ` +
+          `function the UI itself calls, and the list runs to "n", not "t".`);
+    }
   },
 
   // The class, not the instance. Every name below is charged by the game to any
