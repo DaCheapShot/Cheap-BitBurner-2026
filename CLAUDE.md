@@ -502,6 +502,21 @@ trap does not apply here.
 `getGangInformation` for three numbers, exactly as `calib.js` spares the manager the analyze
 functions. `marker.js` collapses missing, corrupt and schema-invalid to `null`, same idiom.
 
+**Transients report back on `GANG_PORT` (4), and `ns.print` is banned in them.** `ns.print` writes
+to the CALLING script's own log window, and a transient's window dies with the process a few
+hundred ms later — so everything the four of them did was invisible and the supervisor's tail
+showed a phase line and nothing else. Port 4 because 1 is the shotgun's report port, 2 the share
+gate and 3 the continuous batcher's; `gang.js` drains with `read()`, which removes the message, so
+sharing any of those would eat another system's reports. One drainer only, for the same reason.
+
+**Every transient reports exactly one line on every path it can take**, including the paths where
+it did nothing. That is what lets `gang.js` treat silence as a *thrown script* rather than a quiet
+pass — otherwise an exception and an idle tick look identical from here, and the only trace is a
+log window that has already closed. `war.js` is the case that motivated it: it logged only on a
+state change, so "why are we not taking territory" — the question actually asked — had no answer in
+the log. A test counts `report()` calls against early `return`s in each transient and fails if any
+path can exit silently.
+
 **Two identifier collisions cost real GB here**, both of them fields the API hands you:
 
 - `GangMemberInfo.hack` (also `GangTaskStats`, `GangMemberAscension`) — `m.hack` is 0.10 GB in the

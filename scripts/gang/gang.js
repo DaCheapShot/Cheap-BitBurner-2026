@@ -2,6 +2,7 @@ import {
   GANG_TICK, GANG_ASCEND, GANG_EQUIP, GANG_WAR, GANG_MARKER,
   TICK_EVERY, ASCEND_EVERY, EQUIP_EVERY, WAR_EVERY, TRANSIENT_TIMEOUT_MS,
 } from "./config.js";
+import { drainReports } from "./report.js";
 
 /**
  * The gang supervisor: a cheap resident loop that runs expensive transients.
@@ -13,10 +14,15 @@ import {
  * in four short-lived scripts and this one holds none of them: peak is ~15.5 GB
  * for a few hundred milliseconds instead of 37 GB forever.
  *
- * Each transient READS AND ACTS in the same process, so there is no data
- * handoff, no port protocol and no shared state to get out of step. The only
- * thing passed between them is GANG_MARKER, and only to spare ascend.js and
- * equip.js a 2.00 GB getGangInformation each for three numbers.
+ * Each transient READS AND ACTS in the same process, so no decision is split
+ * across a boundary. Two things do cross one: GANG_MARKER, which spares
+ * ascend.js and equip.js a 2.00 GB getGangInformation each for three numbers,
+ * and GANG_PORT, which carries one summary line per transient BACK here.
+ *
+ * The port exists because ns.print writes to the CALLING script's own log
+ * window, and a transient's window dies with the process a few hundred ms
+ * later - so everything the four of them did was invisible, and this tail
+ * showed a phase line and nothing else. Ports are 0 GB and global.
  *
  * THERE IS NO TICK TO DETECT. ns.gang.nextUpdate() (0 GB) resolves on the next
  * gang update and returns the ms of gang time processed - 2000 normally, up to
@@ -43,7 +49,7 @@ import {
  * Polls ns.ps by pid, like boot.js does, rather than ns.isRunning - ps is
  * needed anyway and isRunning would add 0.10 GB for the same answer.
  */
-async function runOne(ns, file, log) {
+async function runOne(ns, file, tag, log) {
   const pid = ns.run(file, 1);
   if (pid === 0) {
     // Not fatal, and expected early: on a 32 GB home carrying boot, cloud and a
@@ -56,10 +62,30 @@ async function runOne(ns, file, log) {
   const deadline = Date.now() + TRANSIENT_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await ns.sleep(50);
-    if (!ns.ps("home").some((p) => p.pid === pid)) return true;
+    if (!ns.ps("home").some((p) => p.pid === pid)) {
+      drain(ns, tag, log);
+      return true;
+    }
   }
   log(`WARN: ${file} still running after ${Math.round(TRANSIENT_TIMEOUT_MS / 1000)}s - moving on`);
   return true;
+}
+
+/**
+ * Print what the transient just said, and say so when it said nothing.
+ *
+ * Every transient reports exactly one line on EVERY path it can take, so
+ * silence here is not "nothing happened" - it means the script threw before it
+ * got there. Without this, an exception in a transient looks identical to a
+ * quiet pass, and the only trace is a log window that has already closed.
+ */
+function drain(ns, tag, log) {
+  const lines = drainReports(ns);
+  if (lines.length === 0) {
+    log(`WARN: ${tag} ran but reported nothing - it threw before reporting; open its log`);
+    return;
+  }
+  for (const line of lines) log(line);
 }
 
 /** @param {NS} ns */
@@ -89,15 +115,15 @@ export async function main(ns) {
     // tick first, always: it is the one that writes GANG_MARKER, which the
     // other three read. On the pass where several coincide, they get numbers
     // from this pass rather than the previous one.
-    if (updates % TICK_EVERY === 0) await runOne(ns, GANG_TICK, log);
-    if (updates % WAR_EVERY === 0) await runOne(ns, GANG_WAR, log);
-    if (updates % ASCEND_EVERY === 0) await runOne(ns, GANG_ASCEND, log);
-    if (updates % EQUIP_EVERY === 0) await runOne(ns, GANG_EQUIP, log);
+    if (updates % TICK_EVERY === 0) await runOne(ns, GANG_TICK, "tick", log);
+    if (updates % WAR_EVERY === 0) await runOne(ns, GANG_WAR, "war", log);
+    if (updates % ASCEND_EVERY === 0) await runOne(ns, GANG_ASCEND, "ascend", log);
+    if (updates % EQUIP_EVERY === 0) await runOne(ns, GANG_EQUIP, "equip", log);
 
     const phase = ns.read(GANG_MARKER).split("\n")[0];
     if (phase && phase !== lastPhase) {
       lastPhase = phase;
-      log(`phase -> ${phase}  (bonus time ${Math.round(ns.gang.getBonusTime() / 1000)}s)`);
+      log(`PHASE -> ${phase}  (bonus time ${Math.round(ns.gang.getBonusTime() / 1000)}s)`);
     }
   }
 }

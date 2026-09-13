@@ -194,6 +194,25 @@ export const WAR_DISENGAGE_THRESHOLD = 0.55;
 /** Fraction of the gang put on Territory Warfare during the TERRITORY phase. */
 export const WAR_MEMBER_FRACTION = 0.5;
 
+// ---------------------------------------------------------------- reports ---
+
+/**
+ * Where a transient tells gang.js what it did.
+ *
+ * A PORT, not the marker file and not ns.print. ns.print writes to the calling
+ * script's own log window, and a transient's window dies with the process a few
+ * hundred ms later - so everything the four of them did was invisible, and the
+ * supervisor's tail showed a phase line and nothing else.
+ *
+ * 4 because 1 is the shotgun's report port, 2 is the share gate and 3 is the
+ * continuous batcher's. Sharing any of them would be corruption, not noise:
+ * gang.js DRAINS this one with read(), which removes the message, so it would
+ * eat reports belonging to whichever batcher is running.
+ *
+ * Exactly one drainer for the same reason - gang.js, and nothing else.
+ */
+export const GANG_PORT = 4;
+
 // ----------------------------------------------------------------- tasks ----
 
 export const TASK_UNASSIGNED = "Unassigned";

@@ -1,5 +1,6 @@
 import { planPurchases, equipBudget, eligibleItems } from "./math.js";
 import { readMarker } from "./marker.js";
+import { report } from "./report.js";
 
 /**
  * Equipment: augmentations always, gear only once the ascension churn stops.
@@ -26,7 +27,7 @@ export async function main(ns) {
 
   const state = readMarker(ns);
   if (!state) {
-    ns.print("no gang marker yet - skipping equipment pass");
+    report(ns, "equip", "no gang marker yet - tick.js has not run, skipping");
     return;
   }
 
@@ -56,10 +57,9 @@ export async function main(ns) {
     } else {
       why = "the gang already owns every eligible item it can afford";
     }
-    ns.print(
+    report(ns, "equip",
       `nothing bought in ${state.phase}: ${eligible.length}/${items.length} items eligible, ` +
-        `budget $${budget.toExponential(2)} - ${why}`,
-    );
+        `budget $${budget.toExponential(2)} - ${why}`);
     return;
   }
 
@@ -79,8 +79,8 @@ export async function main(ns) {
     // Planned buys that all failed at the till. purchaseEquipment is the
     // authority on the money, so this means it moved between plan and buy -
     // normal with cloud.js buying servers, but it must not read as silence.
-    ns.print(`purchaseEquipment refused all ${buys.length} planned buys - money moved since the plan`);
+    report(ns, "equip", `refused all ${buys.length} planned buys - money moved since the plan`);
   } else {
-    ns.print(`bought ${bought} of ${buys.length} planned for $${spent.toExponential(2)} (${state.phase})`);
+    report(ns, "equip", `bought ${bought} of ${buys.length} planned for $${spent.toExponential(2)} (${state.phase})`);
   }
 }

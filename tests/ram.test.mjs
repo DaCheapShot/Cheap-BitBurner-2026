@@ -293,7 +293,7 @@ export const tests = {
   // billed identifier in them is charged four or five times over. marker.js is
   // allowed ns.read, which is 0 GB, exactly as calib.js is.
   "the gang's shared modules are free to import": () => {
-    for (const mod of ["gang/config", "gang/math", "gang/marker"]) {
+    for (const mod of ["gang/config", "gang/math", "gang/marker", "gang/report"]) {
       const ram = ramOf(mod);
       assert(Math.abs(ram - BASE) < 0.011,
         `${mod}.js costs ${(ram - BASE).toFixed(2)} GB to import; it must be 0 - it is ` +

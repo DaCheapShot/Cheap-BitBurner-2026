@@ -1,5 +1,6 @@
 import { MAX_MEMBERS, MEMBER_PREFIX, GANG_MARKER } from "./config.js";
 import { phaseFor, planTasks, wantedHeadroom } from "./math.js";
+import { report } from "./report.js";
 
 /**
  * The hot path: recruit, pick every member's task, hold the wanted level down.
@@ -25,6 +26,7 @@ export async function main(ns) {
 
   const info = ns.gang.getGangInformation();
   if (info.isHacking) {
+    report(ns, "tick", "REFUSED - this is a hacking gang, tick.js assigns combat tasks only");
     ns.tprint(
       "ERROR: gang/tick.js is written for a COMBAT gang and this one is a hacking gang. " +
         "It would filter every task out (task.isCombat) and assign nobody. Refusing rather " +
@@ -87,11 +89,15 @@ export async function main(ns) {
     "w",
   );
 
-  ns.print(
-    `${phase}: ${members.length} members` +
-      `${recruited ? ` (+${recruited})` : ""}, ${moved} reassigned, ` +
-      `${result.trainees} training, ${result.vigilantes} on penance, ` +
-      `${result.warSlots} on territory, wanted ${info.wantedLevel.toFixed(2)} ` +
-      `(penalty ${info.wantedPenalty.toFixed(3)}, ${(wantedHeadroom(info) * 100).toFixed(1)}% of achievable)`,
+  report(
+    ns,
+    "tick",
+    `${phase}, ${members.length} members` +
+      `${recruited ? ` (+${recruited})` : ""}, ${moved} reassigned | ` +
+      `${result.trainees} training, ${result.vigilantes} penance, ` +
+      `${result.warSlots} territory | respect ${info.respect.toFixed(0)} ` +
+      `(next recruit at ${info["respectForNextRecruit"].toFixed(0)}) | ` +
+      `wanted ${info.wantedLevel.toFixed(2)}, ` +
+      `${(wantedHeadroom(info) * 100).toFixed(1)}% of achievable`,
   );
 }

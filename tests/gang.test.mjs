@@ -458,6 +458,127 @@ export const tests = {
       "tick.js must run before the transients that read its marker");
   },
 
+  // Port 1 is the shotgun's report port, 2 the share gate, 3 the continuous
+  // batcher's. gang.js DRAINS its port with read(), which removes the message,
+  // so sharing any of those would eat reports belonging to something else -
+  // corruption, not noise.
+  "the gang report port collides with nothing else": async () => {
+    const mods = await loadScripts();
+    const { GANG_PORT } = mods["gang/config"];
+    const taken = {
+      REPORT_PORT: mods["config"].REPORT_PORT,
+      SHARE_PORT: mods["config"].SHARE_PORT,
+      CONT_REPORT_PORT: mods["continuous/config"].CONT_REPORT_PORT,
+    };
+    for (const [name, n] of Object.entries(taken)) {
+      assert(GANG_PORT !== n, `GANG_PORT ${GANG_PORT} is already ${name}`);
+    }
+  },
+
+  "reports are consumed, not peeked": async () => {
+    const mods = await loadScripts();
+    const { report, drainReports } = mods["gang/report"];
+    const ns = makeNs({});
+
+    assert(drainReports(ns).length === 0, "an empty port drains to nothing, not to NULL PORT DATA");
+
+    report(ns, "tick", "one");
+    report(ns, "equip", "two");
+    const first = drainReports(ns);
+    assert(first.length === 2 && first[0] === "tick: one" && first[1] === "equip: two",
+      `expected both lines tagged and in order, got ${JSON.stringify(first)}`);
+    assert(drainReports(ns).length === 0,
+      "a drained port must be empty - read() removes, and a second drainer would " +
+        "destroy the first one's reports");
+  },
+
+  // The whole point of the port: a transient's ns.print goes to ITS OWN log
+  // window, which dies with the process, so the supervisor's tail showed a
+  // phase line and nothing else.
+  "what a transient reports reaches the supervisor's log": async () => {
+    const mods = await loadScripts();
+    const { report } = mods["gang/report"];
+    const cfg = mods["gang/config"];
+
+    let updates = 0;
+    const ns = makeNs({
+      extra: {
+        // Stand in for the transient: report, then exit.
+        run: (file) => {
+          if (file === cfg.GANG_TICK) report(ns, "tick", "respect, 4 members");
+          return 1;
+        },
+        ps: () => [],
+        gang: {
+          inGang: () => true,
+          getBonusTime: () => 0,
+          nextUpdate: async () => {
+            if (++updates > cfg.TICK_EVERY) throw new Error("STOP");
+            return 2000;
+          },
+        },
+      },
+    });
+
+    try { await mods["gang/gang"].main(ns); } catch (e) {
+      assert(e.message === "STOP", `unexpected: ${e.message}`);
+    }
+    assert(ns._log.some((l) => l.includes("tick: respect, 4 members")),
+      `the transient's line should appear in the supervisor's log, got ${JSON.stringify(ns._log)}`);
+  },
+
+  // Every transient reports on EVERY path, so silence is not a quiet pass - it
+  // is an exception thrown before the report, with its log window already gone.
+  "a transient that reports nothing is called out, not ignored": async () => {
+    const mods = await loadScripts();
+    const cfg = mods["gang/config"];
+
+    let updates = 0;
+    const ns = makeNs({
+      extra: {
+        run: () => 1, // ran, exited, said nothing
+        ps: () => [],
+        gang: {
+          inGang: () => true,
+          getBonusTime: () => 0,
+          nextUpdate: async () => {
+            if (++updates > cfg.TICK_EVERY) throw new Error("STOP");
+            return 2000;
+          },
+        },
+      },
+    });
+
+    try { await mods["gang/gang"].main(ns); } catch (e) {
+      assert(e.message === "STOP", `unexpected: ${e.message}`);
+    }
+    assert(ns._log.some((l) => l.includes("reported nothing")),
+      `silence must be reported as a probable throw, got ${JSON.stringify(ns._log)}`);
+  },
+
+  // A transient that only spoke on the interesting path is why this was asked
+  // for in the first place: war.js logged only on a state CHANGE, so "why are
+  // we not taking territory" had no answer in the log, which is the question
+  // asked most often.
+  "no transient can return without reporting": () => {
+    const dir = path.resolve(import.meta.dirname, "..", "scripts", "gang");
+    for (const f of ["tick.js", "ascend.js", "equip.js", "war.js"]) {
+      const src = fs.readFileSync(path.join(dir, f), "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/.*$/gm, "");
+      assert(!/\bns\.print\s*\(/.test(src),
+        `gang/${f} calls ns.print - that writes to its OWN log window, which dies with the ` +
+          `process. Use report() so the supervisor sees it.`);
+      // Every early return must have reported first, so count reports against
+      // returns: one per bail-out plus the final one.
+      const returns = (src.match(/^\s*return;/gm) ?? []).length;
+      const reports = (src.match(/\breport\s*\(\s*ns\s*,/g) ?? []).length;
+      assert(reports > returns,
+        `gang/${f} has ${returns} early returns but only ${reports} report() calls - ` +
+          `some path exits silently, and silence is read as a thrown script`);
+    }
+  },
+
   "a pid of 0 is survivable, not fatal": async () => {
     const mods = await loadScripts();
     let updates = 0;

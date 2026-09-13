@@ -1,4 +1,5 @@
 import { warDecision } from "./math.js";
+import { report } from "./report.js";
 
 /**
  * Territory warfare: engage only when the WORST matchup is winnable.
@@ -42,13 +43,18 @@ export async function main(ns) {
   }
 
   const engage = warDecision(info.territoryWarfareEngaged, chances);
-  if (engage !== info.territoryWarfareEngaged) {
-    ns.gang.setTerritoryWarfare(engage);
-    const worst = chances.length ? Math.min(...chances) : 0;
-    ns.print(
-      `territory warfare ${engage ? "ON" : "OFF"} - worst win chance ` +
-        `${(worst * 100).toFixed(1)}% across ${chances.length} rivals, ` +
-        `holding ${(info.territory * 100).toFixed(1)}%`,
-    );
-  }
+  const changed = engage !== info.territoryWarfareEngaged;
+  if (changed) ns.gang.setTerritoryWarfare(engage);
+
+  // Reported every pass, not only on a change. "Nothing changed" is the answer
+  // to "why are we not taking territory", and it is the answer most of the
+  // time - a log that only speaks up on a transition cannot give it.
+  const worst = chances.length ? Math.min(...chances) : 0;
+  report(
+    ns,
+    "war",
+    `${engage ? "ENGAGED" : "standing down"}${changed ? " (changed)" : ""} | ` +
+      `worst win chance ${(worst * 100).toFixed(1)}% across ${chances.length} rivals | ` +
+      `holding ${(info.territory * 100).toFixed(1)}%, power ${info.power.toFixed(0)}`,
+  );
 }

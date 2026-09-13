@@ -1,5 +1,7 @@
 import { shouldAscend, ascensionFactor } from "./math.js";
 import { readMarker } from "./marker.js";
+import { report } from "./report.js";
+import { ASCEND_MULT_THRESHOLD } from "./config.js";
 
 /**
  * Ascension: the biggest single power lever in a gang, and the only one that
@@ -28,24 +30,44 @@ export async function main(ns) {
   if (!state) {
     // No tick has run yet, so there is no respect guard to check against.
     // Doing nothing is correct; guessing at the guard is not.
-    ns.print("no gang marker yet - skipping ascension pass");
+    report(ns, "ascend", "no gang marker yet - tick.js has not run, skipping");
     return;
   }
 
   let respect = state.respect;
-  let ascended = 0;
+  const done = [];
+  let best = 0;
+  let blocked = 0;
 
   for (const name of ns.gang.getMemberNames()) {
     const result = ns.gang.getAscensionResult(name);
-    if (!shouldAscend(result, { ...state, respect })) continue;
-    ns.gang.ascendMember(name);
-    ascended++;
-    // Respect is spent as we go, so the guard for the NEXT member has to see
-    // what this one cost. Re-reading the gang would be 2.00 GB for a number we
-    // already hold.
-    respect = Math.max(1, respect - (result.respect ?? 0));
-    ns.print(`ascended ${name} at x${ascensionFactor(result).toFixed(2)}, respect now ${Math.round(respect)}`);
+    if (!result) continue;
+    const factor = ascensionFactor(result);
+    if (factor > best) best = factor;
+
+    if (shouldAscend(result, { ...state, respect })) {
+      ns.gang.ascendMember(name);
+      // Respect is spent as we go, so the guard for the NEXT member has to see
+      // what this one cost. Re-reading the gang would be 2.00 GB for a number
+      // we already hold.
+      respect = Math.max(1, respect - (result.respect ?? 0));
+      done.push(`${name} x${factor.toFixed(2)}`);
+    } else if (factor >= ASCEND_MULT_THRESHOLD) {
+      // Cleared the multiplier bar and was refused anyway, which can only be
+      // the respect guard. Counted separately because "ready but held" and
+      // "not ready" are different answers to "why is nobody ascending", and a
+      // log that merges them sends you looking at the wrong threshold.
+      blocked++;
+    }
   }
 
-  if (ascended) ns.print(`${ascended} ascended this pass`);
+  if (done.length) {
+    report(ns, "ascend", `${done.length} ascended (${done.join(", ")}) | respect now ${respect.toFixed(0)}`);
+  } else if (blocked) {
+    report(ns, "ascend",
+      `${blocked} ready at x${best.toFixed(2)} but HELD - ascending would drop respect ` +
+        `under the ${state.nextRecruitAt.toFixed(0)} needed for the next recruit`);
+  } else {
+    report(ns, "ascend", `none ready - best x${best.toFixed(2)}, need x${ASCEND_MULT_THRESHOLD.toFixed(2)}`);
+  }
 }

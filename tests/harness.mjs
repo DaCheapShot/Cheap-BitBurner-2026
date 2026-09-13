@@ -28,6 +28,7 @@ const NESTED = [
   "gang/config.js",
   "gang/math.js",
   "gang/marker.js",
+  "gang/report.js",
   // The gang entry points hold ns calls, but only inside main() - nothing runs
   // at import time, so Node can load them and a test can drive gang.js's loop
   // with a mock ns.
