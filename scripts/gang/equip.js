@@ -3,13 +3,12 @@ import { readMarker } from "./marker.js";
 import { report } from "./report.js";
 
 /**
- * Equipment: augmentations always, gear only once the ascension churn stops.
+ * Equipment, in every phase.
  *
- * ascend() reapplies augmentations and discards everything else, so a Weapon
- * bought the tick before an ascension is money set on fire while an
- * Augmentation is permanent. planPurchases enforces that split by phase, and
- * spends cheapest-item-first across the whole gang rather than emptying the
- * budget on one member's wishlist.
+ * ascend() reapplies augmentations and discards everything else, but gear is
+ * still bought in TRAIN: it lifts trainees over the stat floor sooner, and that
+ * is what ends TRAIN. planPurchases spends cheapest-item-first across the whole
+ * gang rather than emptying the budget on one member's wishlist.
  *
  * getEquipmentStats (2.00 GB) is here for ONE job: telling a hack-only item
  * from a combat one. Every Rootkit and three of the augmentations raise
@@ -48,7 +47,7 @@ export async function main(ns) {
   }));
 
   const budget = equipBudget(ns.getServerMoneyAvailable("home"));
-  const buys = planPurchases(members, items, state.phase, budget, state.isHacking);
+  const buys = planPurchases(members, items, budget, state.isHacking);
 
   // A pass that buys nothing MUST say why. The first version printed only when
   // it bought something, so "the phase excludes gear", "the gang already owns
@@ -56,18 +55,18 @@ export async function main(ns) {
   // from the log: a blank. That cost a live round trip to diagnose, which is
   // the whole thing this repo's logging rules exist to stop.
   if (buys.length === 0) {
-    const eligible = eligibleItems(items, state.phase);
+    const eligible = eligibleItems(items);
     // What the PLANNER would look at, not merely what the phase allows. The
     // two differ whenever the hack tier is gated shut, and reporting the
     // cheapest ELIGIBLE item there names a $5m Rootkit as "over budget" on an
     // $8m budget - a line that contradicts itself and sends you at the wrong
     // threshold. Re-derived through considerItems so it cannot drift.
-    const pool = considerItems(members, items, state.phase, state.isHacking);
+    const pool = considerItems(members, items, state.isHacking);
     const cheapest = pool.length ? pool[0].cost : 0;
     const gated = eligible.length - pool.length;
     let why;
     if (!eligible.length) {
-      why = "no item is eligible - see BUY_GEAR_PHASES, augmentations only outside it";
+      why = "the game lists no item with a price";
     } else if (cheapest > budget) {
       why = `cheapest is $${ns.format.number(cheapest, 2)}, over budget`;
     } else {

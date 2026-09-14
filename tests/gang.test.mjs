@@ -336,14 +336,12 @@ export const tests = {
     assert(!warDecision(false, []), "no rivals holding territory -> nothing to fight");
   },
 
-  // TRAIN is excluded and RESPECT is not, which looks inconsistent and is not.
-  // In TRAIN nobody has cleared the stat floor, so gear buys stats that earn
-  // nothing before the next ascension wipes them. In RESPECT the members are
-  // already working, so the gear pays for itself before it is lost.
-  "gear is excluded only while nobody can earn from it": async () => {
-    const mods = await loadScripts();
-    const { planPurchases } = mods["gang/math"];
-    const { PHASE_TRAIN, PHASE_RESPECT, PHASE_MONEY } = mods["gang/config"];
+  // Gear used to be held back in TRAIN as money the next ascension would burn.
+  // Member stats include the equipment multipliers, so gear is what lifts a
+  // trainee over TRAIN_STAT_FLOOR sooner - and the floor is what ends TRAIN.
+  // The planner no longer takes a phase at all; this pins that gear is bought.
+  "gear is bought in every phase, TRAIN included": async () => {
+    const { planPurchases } = (await loadScripts())["gang/math"];
 
     const items = [
       { name: "Baseball Bat", cost: 10, type: "Weapon" },
@@ -351,23 +349,16 @@ export const tests = {
     ];
     const members = [member("a", 100), member("b", 100)];
 
-    const training = planPurchases(members, items, PHASE_TRAIN, 1000);
-    assert(training.every((b) => b.item === "BitWire"),
-      "gear bought in TRAIN earns nothing before the next ascend() wipes it");
-    assert(training.length === 2, "both members should still get the augmentation");
-
-    for (const phase of [PHASE_RESPECT, PHASE_MONEY]) {
-      const buys = planPurchases(members, items, phase, 1000);
-      assert(buys.some((b) => b.item === "Baseball Bat"),
-        `gear should be bought in ${phase} - the members are earning with it`);
-    }
+    const buys = planPurchases(members, items, 1000);
+    assert(buys.filter((b) => b.item === "Baseball Bat").length === 2,
+      "gear should be bought for a trainee - it shortens TRAIN");
+    assert(buys.length === 4, `everyone gets everything on a full budget, got ${buys.length}`);
   },
 
   // Member-major spending let the first member empty the budget on its own
   // wishlist while the rest owned nothing.
   "a tight budget is spread across the gang, not sunk into one member": async () => {
     const { planPurchases } = (await loadScripts())["gang/math"];
-    const { PHASE_MONEY } = (await loadScripts())["gang/config"];
 
     const items = [
       { name: "cheap", cost: 10, type: "Augmentation" },
@@ -375,7 +366,7 @@ export const tests = {
     ];
     const members = [member("a", 100), member("b", 100), member("c", 100)];
 
-    const buys = planPurchases(members, items, PHASE_MONEY, 35);
+    const buys = planPurchases(members, items, 35);
     assert(buys.length === 3, `expected 3 cheap buys inside a 35 budget, got ${buys.length}`);
     assert(new Set(buys.map((b) => b.member)).size === 3, "every member should get one");
     assert(buys.every((b) => b.item === "cheap"), "cheapest first, so nobody gets the dear one");
@@ -386,8 +377,7 @@ export const tests = {
   // planner and hand the log a cause that is not the real one.
   "the eligibility the log reports is the one the planner used": async () => {
     const mods = await loadScripts();
-    const { eligibleItems, planPurchases } = mods["gang/math"];
-    const { PHASE_TRAIN, PHASE_MONEY } = mods["gang/config"];
+    const { eligibleItems, planPurchases } = (await loadScripts())["gang/math"];
 
     const items = [
       { name: "Bat", cost: 10, type: "Weapon" },
@@ -397,28 +387,24 @@ export const tests = {
     ];
     const members = [member("a", 100)];
 
-    const early = eligibleItems(items, PHASE_TRAIN);
-    assert(early.length === 1 && early[0].name === "BitWire",
-      `outside BUY_GEAR_PHASES only augmentations are eligible, got ${early.map((i) => i.name)}`);
-    assert(eligibleItems(items, PHASE_MONEY).length === 3, "a zero-cost item is never eligible");
+    assert(eligibleItems(items).length === 3, "a zero-cost item is never eligible");
 
     // The planner cannot buy anything the log would call ineligible.
-    const names = new Set(eligibleItems(items, PHASE_TRAIN).map((i) => i.name));
-    for (const b of planPurchases(members, items, PHASE_TRAIN, 1e9)) {
+    const names = new Set(eligibleItems(items).map((i) => i.name));
+    for (const b of planPurchases(members, items, 1e9)) {
       assert(names.has(b.item), `planner bought ${b.item}, which eligibleItems calls ineligible`);
     }
   },
 
   "already-owned equipment is never bought twice": async () => {
     const { planPurchases } = (await loadScripts())["gang/math"];
-    const { PHASE_MONEY } = (await loadScripts())["gang/config"];
     const items = [{ name: "BitWire", cost: 10, type: "Augmentation" }];
     const members = [
       member("has-upgrade", 100, { upgrades: ["BitWire"] }),
       member("has-aug", 100, { augmentations: ["BitWire"] }),
       member("has-none", 100),
     ];
-    const buys = planPurchases(members, items, PHASE_MONEY, 1000);
+    const buys = planPurchases(members, items, 1000);
     assert(buys.length === 1 && buys[0].member === "has-none",
       "upgrades AND augmentations both count as owned");
   },
@@ -429,7 +415,6 @@ export const tests = {
   "the hack tier stays shut until every member owns the combat list": async () => {
     const mods = await loadScripts();
     const { planPurchases } = mods["gang/math"];
-    const { PHASE_MONEY } = mods["gang/config"];
 
     // Costs and stats are the game's, from src/Gang/data/upgrades.ts.
     const rootkit = { name: "NUKE Rootkit", cost: 5e6, type: "Rootkit", stats: { hack: 1.05 } };
@@ -441,24 +426,24 @@ export const tests = {
     // The case ordering alone could not fix. $20m buys the Katana, cannot
     // afford the armor, and must NOT spend the $8m remainder on the Rootkit:
     // the combat list is still incomplete, so the tier is shut.
-    const leak = planPurchases(one, items, PHASE_MONEY, 20e6).map((b) => b.item);
+    const leak = planPurchases(one, items, 20e6).map((b) => b.item);
     assert(leak.length === 1 && leak[0] === "Katana",
       `leftover budget must be held while combat gear is unbought, got ${leak}`);
 
     // Still not never: a budget that finishes the combat list opens the tier.
-    const rich = planPurchases(one, items, PHASE_MONEY, 1e9).map((b) => b.item);
+    const rich = planPurchases(one, items, 1e9).map((b) => b.item);
     assert(rich.length === 3, `a full budget buys everything, got ${rich}`);
     assert(rich[2] === "NUKE Rootkit", `the Rootkit goes last, got ${rich}`);
 
     // A member who already owns the combat list opens it on any budget.
     const kitted = [member("a", 100, { upgrades: ["Katana", "LiquidArmor"] })];
-    const opened = planPurchases(kitted, items, PHASE_MONEY, 6e6).map((b) => b.item);
+    const opened = planPurchases(kitted, items, 6e6).map((b) => b.item);
     assert(opened.length === 1 && opened[0] === "NUKE Rootkit",
       `an owned combat list must open the hack tier, got ${opened}`);
 
     // ONE member short is enough to keep it shut - it is every member, not any.
     const mixed = [member("a", 100, { upgrades: ["Katana", "LiquidArmor"] }), member("b", 100)];
-    const shut = planPurchases(mixed, items, PHASE_MONEY, 6e6).map((b) => b.item);
+    const shut = planPurchases(mixed, items, 6e6).map((b) => b.item);
     assert(!shut.includes("NUKE Rootkit"),
       `one unequipped member keeps the tier shut, got ${shut}`);
   },
@@ -469,7 +454,6 @@ export const tests = {
   "hack-only means only, and a hacking gang is left alone": async () => {
     const mods = await loadScripts();
     const { considerItems, isHackingItem } = mods["gang/math"];
-    const { PHASE_MONEY } = mods["gang/config"];
 
     assert(isHackingItem({ stats: { hack: 1.05 } }), "a pure hack item is one");
     assert(!isHackingItem({ stats: { hack: 1.05, str: 1.1 } }), "a mixed item is NOT");
@@ -481,13 +465,13 @@ export const tests = {
       { name: "blade", cost: 100, type: "Augmentation", stats: { str: 1.3 } },
     ];
     const members = [member("a", 100)];
-    const combat = considerItems(members, items, PHASE_MONEY, false).map((i) => i.name);
+    const combat = considerItems(members, items, false).map((i) => i.name);
     assert(combat.length === 1 && combat[0] === "blade",
       `a combat gang must not even consider the rootkit yet, got ${combat}`);
 
     // The mirrored rule is deliberately NOT implemented - a hacking gang keeps
     // the plain cheapest-first list, with nothing held back.
-    const hacking = considerItems(members, items, PHASE_MONEY, true).map((i) => i.name);
+    const hacking = considerItems(members, items, true).map((i) => i.name);
     assert(hacking[0] === "rootkit" && hacking[1] === "blade",
       `a hacking gang considers everything, cheapest first, got ${hacking}`);
   },

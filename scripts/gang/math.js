@@ -3,7 +3,6 @@ import {
   TRAIN_STAT_FLOOR, TRAIN_CHA_FLOOR, MAX_MEMBERS, TERRITORY_TARGET,
   WANTED_PENALTY_FLOOR, WANTED_MIN_LEVEL, ASCEND_MULT_THRESHOLD, WAR_MEMBER_FRACTION,
   WAR_WIN_THRESHOLD, WAR_DISENGAGE_THRESHOLD, EQUIP_BUDGET_FRACTION,
-  BUY_GEAR_PHASES, EQUIP_AUGMENTATION,
   PHASE_TRAIN, PHASE_RESPECT, PHASE_TERRITORY, PHASE_MONEY,
   TASK_UNASSIGNED, TASK_TRAIN_COMBAT, TASK_TRAIN_CHARISMA, TASK_VIGILANTE,
   TASK_WARFARE, NON_EARNING_TASKS,
@@ -364,8 +363,13 @@ export function equipBudget(money) {
  * spend the entire budget on its own wishlist while eleven others own nothing.
  * Cheapest-first then spreads the same budget over the most upgrades.
  *
- * Augmentations are bought in every phase and gear only in BUY_GEAR_PHASES,
- * because ascend() reapplies augmentations and discards everything else.
+ * Gear is bought in EVERY phase, TRAIN included, even though ascend() reapplies
+ * only augmentations and discards the rest. The earlier rule held gear back in
+ * TRAIN as money the next ascension would burn, and that had it backwards:
+ * GangMemberInfo stats already include the equipment multipliers, so gear lifts
+ * a trainee over TRAIN_STAT_FLOOR sooner, and the floor is the only thing
+ * standing between the gang and RESPECT. The purchase is lost at ascension;
+ * the phases it bought are not.
  */
 /**
  * Does this item raise ONLY hacking?
@@ -396,11 +400,8 @@ export function isHackingItem(item) {
   return (stats[CHA_KEY] ?? 1) <= 1;
 }
 
-export function eligibleItems(items, phase) {
-  const gearOk = BUY_GEAR_PHASES.includes(phase);
-  return items
-    .filter((i) => (i.type === EQUIP_AUGMENTATION || gearOk) && i.cost > 0)
-    .sort((a, b) => a.cost - b.cost);
+export function eligibleItems(items) {
+  return items.filter((i) => i.cost > 0).sort((a, b) => a.cost - b.cost);
 }
 
 /** Upgrades and augmentations both count as owned; the API lists them apart. */
@@ -436,8 +437,8 @@ function ownedSet(m) {
  * would drift and name a cause that is not the real one, which is the specific
  * failure the reporting rules in CLAUDE.md exist to stop.
  */
-export function considerItems(members, items, phase, isHacking = false, owned = null) {
-  const shortlist = eligibleItems(items, phase);
+export function considerItems(members, items, isHacking = false, owned = null) {
+  const shortlist = eligibleItems(items);
   if (isHacking) return shortlist;
 
   const usable = shortlist.filter((i) => !isHackingItem(i));
@@ -453,7 +454,7 @@ export function considerItems(members, items, phase, isHacking = false, owned = 
   return complete ? shortlist : usable;
 }
 
-export function planPurchases(members, items, phase, budget, isHacking = false) {
+export function planPurchases(members, items, budget, isHacking = false) {
   const owned = new Map(members.map((m) => [m.name, ownedSet(m)]));
 
   const buys = [];
@@ -476,7 +477,7 @@ export function planPurchases(members, items, phase, budget, isHacking = false) 
   // mutated `owned`, so the gate has exactly one implementation and the second
   // call is a no-op whenever the first did not complete the list - everything
   // already planned is in `owned` and skipped.
-  spend(considerItems(members, items, phase, isHacking, owned));
-  spend(considerItems(members, items, phase, isHacking, owned));
+  spend(considerItems(members, items, isHacking, owned));
+  spend(considerItems(members, items, isHacking, owned));
   return buys;
 }

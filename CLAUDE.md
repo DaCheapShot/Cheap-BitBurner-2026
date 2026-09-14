@@ -584,12 +584,12 @@ Things that look arbitrary in there and aren't:
 - **Ascension is refused when it would cost the next recruit.** `result.respect` is respect *lost*,
   and respect is what gates recruiting; under a full roster a recruit beats a multiplier on one
   member. `ascend.js` decrements its own running total rather than re-reading the gang.
-- **Augmentations survive ascension and gear does not** (`ascend()` reapplies only augs), so gear
-  waits for `BUY_GEAR_PHASES`. Purchases are planned **item-major**, cheapest first: member-major
-  lets the first member empty the budget on its own wishlist. `BUY_GEAR_PHASES` excludes TRAIN and
-  not RESPECT, which looks inconsistent and isn't: in TRAIN nobody has cleared the stat floor, so
-  gear buys stats that earn nothing before the next ascension wipes them, while in RESPECT the
-  members are already working and the gear pays for itself first.
+- **Gear is bought in every phase, TRAIN included, though `ascend()` reapplies only augs.** It
+  used to wait out TRAIN as money the next ascension burns, which had it backwards: member stats
+  include the equipment multipliers, so gear lifts trainees over `TRAIN_STAT_FLOOR` sooner, and
+  that floor is the only thing ending TRAIN. The purchase is lost at ascension; the phases it bought
+  are not. The planner takes no phase at all. Purchases are planned **item-major**, cheapest
+  first: member-major lets the first member empty the budget on its own wishlist.
 - **Hack-only items are a separate TIER, opened only when every member owns the combat list.**
   Every Rootkit and three augmentations (BitWire, Neuralstimulator, DataJack) carry
   `mults: { hack: x }` and nothing else, and no combat task weights hacking above zero - so
@@ -612,7 +612,7 @@ Things that look arbitrary in there and aren't:
   outright, so nothing writes `isHacking` true; the marker carries the flag anyway so the gate is
   right on the day that changes rather than silently backwards.
 - **A pass that buys nothing must say WHY.** `equip.js` originally printed only when it bought
-  something, so "the phase excludes gear", "the gang already owns everything", "the budget is too
+  something, so "the gang already owns everything", "the budget is too
   small" and "no marker yet" were all one blank line. `eligibleItems` is exported so the log
   re-derives the shortlist through the same function the planner used, rather than a copy that can
   drift and name a cause that isn't the real one.
