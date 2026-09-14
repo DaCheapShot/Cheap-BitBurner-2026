@@ -568,6 +568,15 @@ Things that look arbitrary in there and aren't:
   at the clamp, so the governor stands down there by construction rather than by a special case.
 - **`phaseFor` keys TRAIN on "no member is ready"**, not "some member is training" — otherwise one
   freshly ascended member drags eleven earners back to the training yard.
+- **Earners rank on respect ONLY in RESPECT; TERRITORY and MONEY rank on money.** TERRITORY used
+  to rank on respect, which for combat stats picks Terrorism every time (`baseRespect` 0.01 vs
+  Human Trafficking's 0.004, respect territory exponent 2 vs 1.5) - and Terrorism has **no
+  `baseMoney`**. A live gang sat at 12 members, 6 on warfare and 6 on Terrorism, earning $0, and
+  since territory only moves once the war is winnable, TERRITORY can last indefinitely. Respect
+  does not stop: Human Trafficking is the money pick and still returns about a tenth of
+  Terrorism's respect. At a full roster respect buys the equipment discount (`getDiscount`, linear
+  in `respect / 5e6`) and faction rep, **not income** - money depends on respect only through the
+  wanted penalty, which is already ~99.8% of achievable once respect dwarfs wanted.
 - **Territory warfare takes the WEAKEST earners** (same power, least forgone income), and
   `warDecision` engages on the **minimum** win chance across rivals, with hysteresis. A clash is
   drawn against one gang at a time, so five safe matchups do not make a sixth safe, and losing one

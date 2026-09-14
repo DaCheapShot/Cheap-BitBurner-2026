@@ -203,7 +203,24 @@ export function planTasks(g, members, tasks, phase) {
     (t) => t.isCombat && !NON_EARNING_TASKS.includes(t.name),
   );
   const vigilante = byName.get(TASK_VIGILANTE);
-  const score = phase === PHASE_MONEY ? moneyGain : respectGain;
+  // Respect is the scorer ONLY while it buys recruits. From a full roster on,
+  // earners are ranked on money - TERRITORY included.
+  //
+  // TERRITORY used to rank on respect, and in a combat gang that picks
+  // Terrorism every time: baseRespect 0.01 against Human Trafficking's 0.004,
+  // and a respect territory exponent of 2 against 1.5. Terrorism has NO
+  // baseMoney, so moneyGain is exactly 0. A live gang held 12 members, 6 on
+  // Territory Warfare and 6 on Terrorism, and earned $0 - for as long as the
+  // war took, and the war gates TERRITORY_TARGET, so potentially forever.
+  //
+  // Respect does not stop. The money pick for combat stats is Human
+  // Trafficking, which also carries baseRespect 0.004 and returns roughly a
+  // tenth of Terrorism's respect. What respect still buys at a full roster is
+  // the equipment discount (Gang.getDiscount, linear in respect / 5e6) and
+  // faction rep - NOT income: money scales by respect only through the wanted
+  // penalty, which is respect / (respect + wanted) and sits at 99.8% of
+  // achievable once respect dwarfs wanted.
+  const score = phase === PHASE_RESPECT ? respectGain : moneyGain;
 
   const plan = new Map();
   const ready = [];

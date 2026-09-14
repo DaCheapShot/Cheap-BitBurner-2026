@@ -251,6 +251,52 @@ export const tests = {
     assert(plan.get(`m${MAX_MEMBERS - 1}`) === TASK_WARFARE, "the weakest earner should take warfare");
   },
 
+  // A live gang sat at 12 members, 6 on Territory Warfare and 6 on Terrorism,
+  // and earned $0: TERRITORY ranked earners on respect, Terrorism wins respect
+  // for combat stats, and Terrorism has no baseMoney. Respect is the scorer
+  // only while it buys recruits.
+  "a full roster earns money while it builds power, not Terrorism's $0": async () => {
+    const mods = await loadScripts();
+    const { planTasks, moneyGain } = mods["gang/math"];
+    const { PHASE_RESPECT, PHASE_TERRITORY, PHASE_MONEY, TASK_WARFARE, MAX_MEMBERS } = mods["gang/config"];
+
+    // Verbatim from src/Gang/data/tasks.ts.
+    const TERRORISM = {
+      name: "Terrorism", isCombat: true, baseRespect: 0.01, baseWanted: 6,
+      hackWeight: 20, strWeight: 20, defWeight: 20, dexWeight: 20, chaWeight: 20,
+      difficulty: 36, territory: { money: 1, respect: 2, wanted: 2 },
+    };
+    const HUMAN = {
+      name: "Human Trafficking", isCombat: true, baseRespect: 0.004, baseWanted: 1.25, baseMoney: 360,
+      hackWeight: 30, strWeight: 5, defWeight: 5, dexWeight: 30, chaWeight: 30,
+      difficulty: 36, territory: { money: 1.5, respect: 1.5, wanted: 1.6 },
+    };
+    const tasks = [...TASKS, TERRORISM, HUMAN];
+    // The live gang at 10:05:25: respect dwarfs wanted, so the governor is idle.
+    const live = { respect: 15.81e6, wantedLevel: 24.87e3, territory: 0.143 };
+    const members = Array.from({ length: MAX_MEMBERS }, (_, i) =>
+      member(`m${i}`, 1000, { hack: 150, cha: 500 }));
+
+    // Recruiting still ranks on respect - that is what it is for.
+    const recruiting = planTasks(live, members.slice(0, 6), tasks, PHASE_RESPECT);
+    assert([...recruiting.plan.values()].every((t) => t === "Terrorism"),
+      `RESPECT must still rank on respect, got ${[...recruiting.plan.values()]}`);
+
+    for (const phase of [PHASE_TERRITORY, PHASE_MONEY]) {
+      const { plan, vigilantes } = planTasks(live, members, tasks, phase);
+      assert(vigilantes === 0, `the fixture should leave the governor idle in ${phase}`);
+      const earners = [...plan.values()].filter((t) => t !== TASK_WARFARE);
+      assert(earners.length > 0, `${phase} should keep some earners`);
+      assert(!earners.includes("Terrorism"), `${phase} put an earner on Terrorism, which pays $0`);
+      for (const [name, t] of plan) {
+        if (t === TASK_WARFARE) continue;
+        const m = members.find((x) => x.name === name);
+        assert(moneyGain(live, m, tasks.find((x) => x.name === t)) > 0,
+          `${phase}: ${name} is on ${t}, which earns no money`);
+      }
+    }
+  },
+
   "ascension is refused when it would cost the next recruit": async () => {
     const mods = await loadScripts();
     const { shouldAscend } = mods["gang/math"];
