@@ -17,7 +17,7 @@ const TRANSIENT = ["scripts/root.js", "scripts/deploy.js", "scripts/calibrate.js
  */
 async function runBoot({
   args = [], files = {}, running = [], workers = [], ticks = 3, hasFormulas = false,
-  onTprint = () => {},
+  inGang = false, onTprint = () => {},
 }) {
   const { main } = (await loadScripts())["boot"];
   let procs = running.map((f, i) => ({ filename: f, host: "home", pid: i + 1, args: [], threads: 1 }));
@@ -35,6 +35,11 @@ async function runBoot({
 
   const ns = {
     args, disableLog: () => {}, ui: { openTail: () => {} },
+    // Default OFF, which is every BitNode before gangs are available. boot
+    // gates the gang service on this rather than starting it blind: without a
+    // gang the supervisor exits at once, and ensureService would relaunch it
+    // every tick forever.
+    gang: { inGang: () => inGang },
     print: () => {}, tprint: (msg) => onTprint(String(msg)),
     read: (f) => store[f] ?? "",
     write: (f, d) => { store[f] = d; },
@@ -330,5 +335,29 @@ export const tests = {
     assert(mgr, `the continuous manager should be running, procs: ${r.procs.map((p) => p.filename)}`);
     assert(mgr.args.join(" ") === "--target phantasy --targets 5",
       `both flags should be forwarded, got: ${JSON.stringify(mgr.args)}`);
+  },
+
+  // The gang supervisor exits immediately when there is no gang, so starting it
+  // unconditionally would relaunch it on every tick forever - the same trap
+  // CLOUD_DONE_MARKER exists to close for cloud.js. ns.gang.inGang() is 0 GB,
+  // so gating on it costs boot nothing on the BitNodes that never have one.
+  "boot does not start the gang supervisor without a gang": async () => {
+    const r = await runBoot({ inGang: false, ticks: 3 });
+    assert(!r.launched.includes("scripts/gang/gang.js"),
+      `nothing should have started the gang supervisor, launched: ${r.launched}`);
+  },
+
+  "boot starts the gang supervisor once, and adopts it afterwards": async () => {
+    const r = await runBoot({ inGang: true, ticks: 4 });
+    const starts = r.launched.filter((f) => f === "scripts/gang/gang.js").length;
+    assert(starts === 1,
+      `the supervisor should be started once and then found running, got ${starts} starts`);
+    assert(r.procs.some((p) => p.filename === "scripts/gang/gang.js"), "it should still be up");
+  },
+
+  "--no-gang leaves the gang alone": async () => {
+    const r = await runBoot({ inGang: true, args: ["--no-gang"], ticks: 3 });
+    assert(!r.launched.includes("scripts/gang/gang.js"),
+      `--no-gang should suppress it, launched: ${r.launched}`);
   },
 };

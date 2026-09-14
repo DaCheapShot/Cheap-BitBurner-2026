@@ -1,4 +1,4 @@
-import { readScript, assert, loadScripts } from "./harness.mjs";
+import { readScript, assert, loadScripts, scriptNames } from "./harness.mjs";
 
 // Verified against src/Netscript/RamCostGenerator.ts in this fork.
 const COST = {
@@ -23,6 +23,25 @@ const COST = {
   getServerLimit: 0.05, getRamLimit: 0.05, getServerCost: 0.25,
   getServerUpgradeCost: 0.1, getServerNames: 1.05, upgradeServer: 0.25,
   purchaseServer: 2.25, deleteServer: 2.25,
+  // ns.gang, every entry priced off RamCostConstants.GangApiBase = 4 - the
+  // table in RamCostGenerator.ts is written as GangApiBase, /2 and /4.
+  //
+  // respectForNextRecruit is the one to watch: it is BOTH a 1.00 GB function
+  // and a field on GangGenInfo, so `info.respectForNextRecruit` costs a full
+  // API call for a number already in hand. tick.js reads it as a computed key
+  // for that reason. getMemberInformation's `hack` field is the same class of
+  // trap at 0.10 GB, which is what STAT_KEYS in gang/config.js exists to dodge.
+  createGang: 1, getMemberNames: 1, canRecruitMember: 1, getRecruitsAvailable: 1,
+  respectForNextRecruit: 1, getTaskStats: 1,
+  getGangInformation: 2, getAllGangInformation: 2, getMemberInformation: 2,
+  recruitMember: 2, setMemberTask: 2, getEquipmentCost: 2, getEquipmentType: 2,
+  getEquipmentStats: 2, getAscensionResult: 2, getInstallResult: 2,
+  setTerritoryWarfare: 2,
+  purchaseEquipment: 4, ascendMember: 4, getChanceToWinClash: 4,
+  // Free, and listed so their absence reads as verified rather than forgotten.
+  // nextUpdate is RamCostConstants.CycleTiming, which is 0.
+  inGang: 0, nextUpdate: 0, getBonusTime: 0, getTaskNames: 0,
+  getEquipmentNames: 0, renameMember: 0,
   // Names nothing here CALLS, listed because the game charges for the NAME.
   // attempt is ns.codingcontract.attempt; probe is this fork's ns.dnet.probe.
   attempt: 10, probe: 0.2, disableLog: 0,
@@ -63,7 +82,14 @@ function closure(bare, seen = new Set()) {
     .replace(/\/\/.*$/gm, "");
   // Two import spellings. Top-level scripts use "./name.js"; the continuous
   // tree imports by absolute in-game path, "scripts/continuous/lib/plan".
-  for (const m of src.matchAll(/from\s+"\.\/([\w\-/]+)\.js"/g)) closure(m[1], seen);
+  //
+  // "./name.js" resolves against the IMPORTER'S directory, not scripts/. Until
+  // the gang subtree existed nothing nested used the relative form, so the old
+  // version read gang/tick.js's `from "./math.js"` as scripts/math.js and threw
+  // ENOENT. Resolving it properly is also what lets a nested module import a
+  // sibling at all.
+  const dir = bare.includes("/") ? bare.slice(0, bare.lastIndexOf("/") + 1) : "";
+  for (const m of src.matchAll(/from\s+"\.\/([\w\-/]+)\.js"/g)) closure(dir + m[1], seen);
   for (const m of src.matchAll(/from\s+"scripts\/([\w\-/]+)"/g)) {
     closure(m[1].replace(/\.js$/, ""), seen);
   }
@@ -234,6 +260,112 @@ export const tests = {
     }
   },
 
+  // The whole reason the gang subsystem is split into a scheduler and four
+  // transients. ns.gang is priced off GangApiBase = 4, and the surface this
+  // needs comes to ~37 GB held together - which would not start on a fresh
+  // BitNode's 32 GB home beside boot (3.60), cloud (5.75) and a continuous
+  // manager (9.40+).
+  //
+  // Exact pins rather than a ceiling: every one of these is a fixed set of API
+  // calls, and a figure that moves means a call was added, not that the
+  // controller grew. The numbers to hold are the SUM of the resident and the
+  // largest transient (2.80 + 14.70 = 17.50), since gang.js awaits each one.
+  "each gang transient stays at its pinned cost": () => {
+    const pinned = {
+      "gang/gang": 2.80,      // 1.60 + run 1.00 + ps 0.20; holds no gang API at all
+      "gang/tick": 11.60,     // + getGangInformation 2 + getMemberNames 1 + getMemberInformation 2
+                              //   + getTaskStats 1 + setMemberTask 2 + recruitMember 2
+      "gang/ascend": 8.60,    // + getMemberNames 1 + getAscensionResult 2 + ascendMember 4
+      "gang/equip": 14.70,    // + getMemberNames 1 + getMemberInformation 2 + getEquipmentCost 2
+                              //   + getEquipmentType 2 + getEquipmentStats 2 + purchaseEquipment 4
+                              //   + getServerMoneyAvailable 0.10
+      "gang/war": 11.60,      // + getGangInformation 2 + getAllGangInformation 2
+                              //   + getChanceToWinClash 4 + setTerritoryWarfare 2
+      "gang/create": 2.60,    // + createGang 1
+    };
+    for (const [entry, want] of Object.entries(pinned)) {
+      const ram = ramOf(entry);
+      assert(Math.abs(ram - want) < 0.011,
+        `${entry}.js: expected ${want.toFixed(2)} GB, got ${ram.toFixed(2)}`);
+    }
+  },
+
+  // config.js, math.js and marker.js are imported by every transient, so one
+  // billed identifier in them is charged four or five times over. marker.js is
+  // allowed ns.read, which is 0 GB, exactly as calib.js is.
+  "the gang's shared modules are free to import": () => {
+    for (const mod of ["gang/config", "gang/math", "gang/marker", "gang/report"]) {
+      const ram = ramOf(mod);
+      assert(Math.abs(ram - BASE) < 0.011,
+        `${mod}.js costs ${(ram - BASE).toFixed(2)} GB to import; it must be 0 - it is ` +
+          `imported by every gang transient`);
+    }
+  },
+
+  // The check is ns.gang.inGang(), which is 0 GB, and findFunc resolves a bare
+  // `gang` to nothing (it matches a key only when the value is a function or a
+  // number, and the namespace is an object). So supervising a gang must cost
+  // boot exactly nothing.
+  "boot.js still costs 3.60 GB with the gang service wired in": () => {
+    const ram = ramOf("boot");
+    assert(Math.abs(ram - 3.60) < 0.011, `expected 3.60 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // Vanilla's formatters. Neither exists in this fork - formatting is an
+  // ns.format NAMESPACE - so either call is `undefined is not a function` at
+  // the call site and nowhere earlier. Costs nothing to ban and cannot false
+  // positive: no correct script in this repo can contain either name.
+  "nothing calls a formatter this fork does not have": () => {
+    for (const name of scriptNames()) {
+      const src = codeOnly(readScript(name));
+      for (const gone of ["formatNumber", "nFormat"]) {
+        assert(!new RegExp(`\\bns\\.${gone}\\s*\\(`).test(src),
+          `${name}.js calls ns.${gone}, which does not exist in this fork. ` +
+            `Use ns.format.number / .ram / .percent / .time - all 0 GB.`);
+      }
+    }
+  },
+
+  // The suffix list is the game's and must not be re-typed. A copy that stops
+  // early does not error; the mantissa grows without bound instead, and a live
+  // report read "$2219301.35b" for what the game calls "$2.22q".
+  //
+  // ponytail: an allowlist, because five copies predate the rule and converting
+  // them means threading ns through their callers. It exists to stop a SIXTH,
+  // which is the failure that actually keeps happening. Shrink it whenever one
+  // of these files is being edited anyway; never grow it.
+  "no new script re-types the money suffix list": () => {
+    const GRANDFATHERED = new Set([
+      "capacity", "cloud", "managerCore", "prepper", "continuous/lib/fmt",
+    ]);
+    // Either shape that has actually been written here: the divisor/suffix
+    // pair list, and the bare powers-of-1000 array.
+    const COPY = /\[\s*1e(?:9|12)\s*,\s*"[a-zA-Z]"\s*\]|"k"\s*,\s*"m"\s*,\s*"b"/;
+
+    const seen = new Set();
+    for (const entry of ["boot", "manager", "manager-formulas", "capacity", "cloud", "deploy",
+                         "root", "sharemode", "connectme", "calibrate", "prep", "prep-formulas",
+                         "continuous/manager", "continuous/manager-formulas", "continuous/servers",
+                         "continuous/capacity", "gang/gang", "gang/tick", "gang/ascend",
+                         "gang/equip", "gang/war", "gang/create"]) {
+      for (const mod of closure(entry)) seen.add(mod);
+    }
+
+    for (const mod of [...seen].sort()) {
+      if (GRANDFATHERED.has(mod)) continue;
+      // Comments stripped, strings KEPT. codeOnly() blanks string literals, so
+      // `[1e12, "t"]` would arrive here as `[1e12,    ]` and this pattern could
+      // never match - the first version of this test passed vacuously against a
+      // planted violation. Same trap closure() documents one screen up.
+      const src = readScript(mod)
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/.*$/gm, "");
+      assert(!COPY.test(src),
+        `${mod}.js re-types the money suffix list. Use ns.format.number (0 GB) - it is the ` +
+          `function the UI itself calls, and the list runs to "n", not "t".`);
+    }
+  },
+
   // The class, not the instance. Every name below is charged by the game to any
   // script that so much as declares a variable with it - RamCalculations.ts adds
   // the bare identifier, "For builtins like hack" - and none of them is called
@@ -250,7 +382,9 @@ export const tests = {
     for (const e of ["boot", "manager", "manager-formulas", "capacity", "cloud", "deploy",
                      "root", "sharemode", "connectme", "calibrate", "prep", "prep-formulas",
                      "continuous/manager", "continuous/manager-formulas", "continuous/servers",
-                     "continuous/capacity"]) {
+                     "continuous/capacity",
+                     "gang/gang", "gang/tick", "gang/ascend", "gang/equip", "gang/war",
+                     "gang/create"]) {
       for (const mod of closure(e)) entries.add(mod);
     }
 

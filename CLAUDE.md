@@ -31,6 +31,13 @@ Game source (for behaviour the docs don't state) lives under `.../stable/src/`.
 - Purchased servers are under **`ns.cloud`** (`ns.cloud.purchaseServer`, `getServerNames`,
   `upgradeServer`, `getRamLimit`), not the vanilla top-level functions.
 - **`ns.tail()` does not exist** — use `ns.ui.openTail()` (0 GB).
+- **`ns.formatNumber()` does not exist either.** Formatting lives in an **`ns.format` namespace**:
+  `ns.format.number(n, fractionalDigits = 3, suffixStart = 1000, isInteger = false)`,
+  `ns.format.ram`, `ns.format.percent`, `ns.format.time` — the cost table entry is literally
+  `const format = { number: 0, ram: 0, percent: 0, time: 0 }`, so all four are **0 GB**. Prefer
+  them to anything hand-rolled: they are the functions the UI itself calls, so a figure in a log
+  reads the same as the one on screen, and they honour the player's Numeric Display settings,
+  which a local formatter cannot.
 
 ## Running things
 
@@ -68,6 +75,8 @@ run scripts/sharemode.js                # share status: power, pool, what each f
 run scripts/sharemode.js on             # trade SHARE_FRACTION of the pool for faction rep
 run scripts/sharemode.js off            # every share thread exits within 10s
 run scripts/sharemode.js 0.5            # retune live, no restart
+run scripts/gang/create.js "Slum Snakes"  # found the gang, once, by hand
+run scripts/gang/gang.js                # the gang supervisor (boot starts it too)
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -241,6 +250,15 @@ editor's RAM panel when one moves.
 | `sharemode.js` | the share toggle | 4.20 |
 | `continuous/manager.js` | entry: continuous core + its mathAnalyze | 13.35 |
 | `continuous/manager-formulas.js` | entry: continuous core + its mathFormulas | 9.40 |
+| `gang/config.js` | gang tunables, paths, STAT_KEYS | 0 |
+| `gang/math.js` | the game's gain formulas + every gang decision | 0 |
+| `gang/marker.js` | reads `/data/gang.txt` | 0 |
+| `gang/gang.js` | entry: resident scheduler, holds no gang API at all | 2.80 |
+| `gang/create.js` | entry: found the gang, hand-run once | 2.60 |
+| `gang/ascend.js` | transient: ascension decisions | 8.60 |
+| `gang/war.js` | transient: clash engage/disengage | 11.60 |
+| `gang/tick.js` | transient: recruit, tasks, wanted governor | 11.60 |
+| `gang/equip.js` | transient: equipment buying | 14.70 |
 
 The continuous entries are the two that have to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds them under 16 GB for that reason. The
@@ -466,6 +484,155 @@ Its log mirrors to `/data/continuous.log.txt`. That file is written to the GAME'
 filesync only pushes the other way, so getting it onto disk means `download /data/continuous.log.txt`
 from the terminal.
 
+### The gang subsystem (`scripts/gang/`)
+
+Self-contained like `continuous/`: it never imports from `scripts/`, and `scripts/` reads exactly
+one 0 GB path constant out of it (`boot.js` imports `GANG_SERVICE`). It shares no RAM pool, no
+port and no marker with the batcher, so the two cannot interfere.
+
+**There is no tick to detect.** `ns.gang.nextUpdate()` is **0 GB** and resolves on the next gang
+update, returning the ms of gang time processed. The gang tick is **2 s** (`minCyclesToProcess =
+2000 / MilliPerCycle`), up to 5 s per update while bonus time drains (`maxCyclesToProcess`), and
+territory/power update separately every `CyclesPerTerritoryAndPowerUpdate = 100` cycles. Watching
+stats change to infer a timer measures the same thing worse and drifts.
+
+**A scheduler plus four transients, because the gang API is priced off `GangApiBase = 4`.** The
+surface this needs is ~37 GB held together, which would not start on a fresh BitNode's 32 GB home
+beside `boot.js`, `cloud.js` and a continuous manager. So `gang.js` holds **no gang call at all**
+(1.60 + `run` + `ps` = 2.80) and `ns.run`s the expensive ones. Each transient **reads and acts in
+one process**, so there is no port protocol, no data handoff and nothing to get out of step.
+`runOne` **awaits** each — that is the whole argument; fired unawaited they stack to ~46 GB.
+They run on home only and are never `scp`'d, so the "a worker's imports must be deployed with it"
+trap does not apply here.
+
+`/data/gang.txt` exists only so `ascend.js` and `equip.js` can skip a 2.00 GB
+`getGangInformation` for three numbers, exactly as `calib.js` spares the manager the analyze
+functions. `marker.js` collapses missing, corrupt and schema-invalid to `null`, same idiom.
+
+**Transients report back on `GANG_PORT` (4), and `ns.print` is banned in them.** `ns.print` writes
+to the CALLING script's own log window, and a transient's window dies with the process a few
+hundred ms later — so everything the four of them did was invisible and the supervisor's tail
+showed a phase line and nothing else. Port 4 because 1 is the shotgun's report port, 2 the share
+gate and 3 the continuous batcher's; `gang.js` drains with `read()`, which removes the message, so
+sharing any of those would eat another system's reports. One drainer only, for the same reason.
+
+Figures in those lines go through `ns.format.number` / `.percent` / `.time` — the game's own
+formatters at 0 GB. A hand-rolled one produced `$5.43e+7` in a live log, which is not a money
+format; a test bans `toExponential`, `ns.formatNumber` and `(x * 100).toFixed` across the subtree.
+
+**Every transient reports exactly one line on every path it can take**, including the paths where
+it did nothing. That is what lets `gang.js` treat silence as a *thrown script* rather than a quiet
+pass — otherwise an exception and an idle tick look identical from here, and the only trace is a
+log window that has already closed. `war.js` is the case that motivated it: it logged only on a
+state change, so "why are we not taking territory" — the question actually asked — had no answer in
+the log. A test counts `report()` calls against early `return`s in each transient and fails if any
+path can exit silently.
+
+**Two identifier collisions cost real GB here**, both of them fields the API hands you:
+
+- `GangMemberInfo.hack` (also `GangTaskStats`, `GangMemberAscension`) — `m.hack` is 0.10 GB in the
+  file that writes it *and* in every importer. `STAT_KEYS` + `m[k]` is why `gang/math.js` is 0 GB.
+- `GangGenInfo.respectForNextRecruit` is also a **1.00 GB `ns.gang` function**. `tick.js` reads it
+  as `info["respectForNextRecruit"]`; a computed key is a Literal and costs nothing.
+
+Two tests in `tests/gang.test.mjs` pin both, because neither has a symptom short of the game
+refusing to start the script.
+
+**Every decision lives in `gang/math.js`**, which is a line-for-line port of
+`src/Gang/formulas/formulas.ts` plus the planning on top. Reproduced rather than called through
+`ns.formulas.gang` because that needs Formulas.exe and takes `GangMember` objects the API never
+hands out — only `GangMemberInfo`. `tests/gang.test.mjs` transcribes the same formulas a second
+time, flat, rather than reusing the module's helpers.
+
+Things that look arbitrary in there and aren't:
+
+- **A task below its difficulty pays exactly zero**, not a little — every formula subtracts a
+  multiple of `difficulty` from the weighted stat sum and returns 0 if that goes non-positive.
+  That is the entire reason `TRAIN_STAT_FLOOR` exists; "assign the best task" without it parks the
+  opening roster on nothing.
+- **`GANG_SOFTCAP` cancels out of ranking.** It appears only in the gain exponent and `pow` is
+  monotonic, so task order is the same for any positive exponent. Worth knowing before paying
+  4.00 GB and a Source-File for `ns.getBitNodeMultipliers`.
+- **The wanted governor is sized, not guessed.** Vigilante Justice has `baseWanted: -0.001`, so its
+  contribution is a computable negative; the governor flips the worst offenders until *net* wanted
+  gain is non-positive and no further. It runs **last** in `planTasks` because it needs the real
+  total, which is not known until everyone else is placed. No hysteresis, deliberately: flipping
+  drops wanted, which releases them, and a limit cycle around the floor is the right steady state.
+- **It triggers on HEADROOM, never on the raw wanted penalty.** `Gang.ts` clamps `this.wanted` to
+  **1**, and skips the whole wanted block entirely at exactly 1 with negative gain — so penance
+  there is not merely wasted, it is ignored. But the penalty is `respect / (respect + wanted)`, so
+  a fresh gang at 5 respect reads **0.833** with wanted already on that clamp and nothing to fix.
+  The first version gated on that number and deadlocked a live gang: it posted vigilantes,
+  vigilantes earn no respect, and respect is the only term that could lift the penalty. The gate is
+  now `wantedHeadroom` — the penalty over the penalty attainable at wanted 1 — which is exactly 1
+  at the clamp, so the governor stands down there by construction rather than by a special case.
+- **`phaseFor` keys TRAIN on "no member is ready"**, not "some member is training" — otherwise one
+  freshly ascended member drags eleven earners back to the training yard.
+- **Earners rank on respect ONLY in RESPECT; TERRITORY and MONEY rank on money.** TERRITORY used
+  to rank on respect, which for combat stats picks Terrorism every time (`baseRespect` 0.01 vs
+  Human Trafficking's 0.004, respect territory exponent 2 vs 1.5) - and Terrorism has **no
+  `baseMoney`**. A live gang sat at 12 members, 6 on warfare and 6 on Terrorism, earning $0, and
+  since territory only moves once the war is winnable, TERRITORY can last indefinitely. Respect
+  does not stop: Human Trafficking is the money pick and still returns about a tenth of
+  Terrorism's respect. At a full roster respect buys the equipment discount (`getDiscount`, linear
+  in `respect / 5e6`) and faction rep, **not income** - money depends on respect only through the
+  wanted penalty, which is already ~99.8% of achievable once respect dwarfs wanted.
+- **Territory warfare takes the WEAKEST earners** (same power, least forgone income), and
+  `warDecision` engages on the **minimum** win chance across rivals, with hysteresis. A clash is
+  drawn against one gang at a time, so five safe matchups do not make a sixth safe, and losing one
+  kills a member.
+- **Ascension is refused when it would cost the next recruit.** `result.respect` is respect *lost*,
+  and respect is what gates recruiting; under a full roster a recruit beats a multiplier on one
+  member. `ascend.js` decrements its own running total rather than re-reading the gang.
+- **Augmentations survive ascension and gear does not** (`ascend()` reapplies only augs), so gear
+  waits for `BUY_GEAR_PHASES`. Purchases are planned **item-major**, cheapest first: member-major
+  lets the first member empty the budget on its own wishlist. `BUY_GEAR_PHASES` excludes TRAIN and
+  not RESPECT, which looks inconsistent and isn't: in TRAIN nobody has cleared the stat floor, so
+  gear buys stats that earn nothing before the next ascension wipes them, while in RESPECT the
+  members are already working and the gear pays for itself first.
+- **Hack-only items are a separate TIER, opened only when every member owns the combat list.**
+  Every Rootkit and three augmentations (BitWire, Neuralstimulator, DataJack) carry
+  `mults: { hack: x }` and nothing else, and no combat task weights hacking above zero - so
+  cheapest-first handed a $5m NUKE Rootkit priority over a $12m Katana. `isHackingItem` decides
+  that from `getEquipmentStats`, not from a list of names, because the upgrade roster is exactly
+  the kind of thing a fork edits and a stale list would go on mis-sorting with no symptom. It is
+  the only thing that 2.00 GB buys; gear is still not scored against gear.
+
+  **Ordering alone was not enough, and the gap is easy to miss.** The planner skips an item it
+  cannot afford and moves to the next, so with hack items merely sorted last a $20m budget bought
+  a $12m Katana, skipped a $25m Liquid Body Armor and spent the $8m remainder on the Rootkit
+  anyway. `considerItems` is the gate, and it is the only implementation of it - `planPurchases`
+  calls it twice against the same mutating `owned` map so a sweep big enough to finish the combat
+  list opens the tier in that sweep rather than ~30 s later, and `equip.js` re-derives the log's
+  shortlist through it so a zero-buy line cannot name a cause the planner did not use. The price
+  is idle cash in the window `cloud.js` is bidding for it; the budget is re-priced every sweep, so
+  the money is offered elsewhere rather than lost.
+
+  The mirrored rule for a hacking gang is deliberately NOT implemented - `tick.js` refuses those
+  outright, so nothing writes `isHacking` true; the marker carries the flag anyway so the gate is
+  right on the day that changes rather than silently backwards.
+- **A pass that buys nothing must say WHY.** `equip.js` originally printed only when it bought
+  something, so "the phase excludes gear", "the gang already owns everything", "the budget is too
+  small" and "no marker yet" were all one blank line. `eligibleItems` is exported so the log
+  re-derives the shortlist through the same function the planner used, rather than a copy that can
+  drift and name a cause that isn't the real one.
+- **`EQUIP_BUDGET_FRACTION` is per SWEEP, and a sweep is every ~30 s.** It reads far tamer than it
+  is, and `cloud.js` is bidding for the same cash capped at 10% — set it high and the server fleet,
+  which is the batcher's whole growth path, stops growing.
+
+**Which config changes need a restart.** `gang.js` is the only long-lived process, so it is the
+only one holding stale constants: `TICK_EVERY`, `WAR_EVERY`, `ASCEND_EVERY`, `EQUIP_EVERY` and
+`TRANSIENT_TIMEOUT_MS` are frozen at the value it started with. **Everything else is read inside a
+transient and takes effect on that transient's next run** — `Script.ts` cascades
+`invalidateModule()` to every dependent, so writing `config.js` re-compiles `math.js` and all four
+transients, and the next `ns.run` picks up the new value with no restart.
+
+`boot.js` gates the service on `ns.gang.inGang()` (0 GB) rather than starting it blind — without a
+gang the supervisor exits at once and `ensureService` would relaunch it every tick forever, the
+same trap `CLOUD_DONE_MARKER` closes for cloud. `--no-gang` opts out. A bare `gang` identifier
+costs nothing: `findFunc` matches a key only when its value is a function or a number, so it
+descends into the namespace and finds no leaf of that name.
+
 ### Invariants that look arbitrary but aren't
 
 Breaking any of these produces silent, compounding damage rather than an error:
@@ -532,6 +699,51 @@ Breaking any of these produces silent, compounding damage rather than an error:
 
 Comments explain *why*, especially where a simpler-looking alternative is wrong — most of them
 encode a bug that already happened. Keep that when editing; don't trim them to tidy up.
+
+### Printing numbers: use the game's formatters, never your own
+
+**Any script that prints money, RAM, a percentage or a duration uses `ns.format.*`.** All four are
+**0 GB** — the cost table entry is literally `const format = { number: 0, ram: 0, percent: 0,
+time: 0 }` — so there is never a RAM argument for hand-rolling one.
+
+```js
+`$${ns.format.number(money, 2)}`                    // $54.30m, $2.22q
+`${ns.format.number(respect, 2, 1000, true)}`       // 412, then 1.60m  (isInteger)
+ns.format.percent(fraction, 1)                      // 12.4%   - takes 0.124, NOT 12.4
+ns.format.ram(gb)                                   // honours the GB/GiB setting
+ns.format.time(ms)
+```
+
+**`isInteger` suppresses decimals only BELOW `suffixStart`.** Once a suffix applies,
+`formatNumber` uses `fractionalDigits` regardless — so `(n, 0, 1000, true)` prints 1.6m AND 2.05m
+as `"2m"`. A live log read `respect 2m (next recruit at 2m)` while the gang was 450k short, which
+is a report that states the opposite of the truth. Pass **2**, not 0: the flag still keeps small
+counts clean (`412`, not `412.00`). A test bans a 0 there.
+
+Three reasons this is not a style preference:
+
+- **They are the functions the UI calls**, so a figure in a script log reads the same as the one
+  on screen beside it. A local formatter disagrees with the game and you cannot tell which is right.
+- **They honour the player's Numeric Display settings.** Nothing hand-rolled can.
+- **You do not own the suffix list.** It runs `["", "k", "m", "b", "t", "q", "Q", "s", "S", "o",
+  "n"]` and a copy that stops early does not error — the mantissa just grows without bound. A live
+  report read `$2219301.35b` for what the game calls `$2.22q`.
+
+**`ns.formatNumber()` and `ns.nFormat()` do not exist in this fork** — see Fork differences. Both
+are `undefined` here, which is a `TypeError` at the call site and nowhere else.
+
+**Format at the CALL SITE, not inside a 0 GB pure module.** `config.js`, `calib.js`, `verify.js`,
+`gang/math.js` and the like have no `ns` and must keep it that way; threading one in to format a
+string is the wrong trade. Return the number, let the script that has `ns` print it — that is why
+`gang/report.js` takes a finished string.
+
+**ponytail: five hand-rolled copies survive, four of them with a known ceiling.**
+`capacity.js:70`, `cloud.js:63`, `managerCore.js:96` and `prepper.js:72` each carry
+`[[1e12, "t"], [1e9, "b"], [1e6, "m"], [1e3, "k"]]` and print an unbounded mantissa past $1e15;
+`continuous/lib/fmt.js` has the full list and is correct but still a copy. They predate this rule
+and are left alone because converting them means threading `ns` through their callers. Replace one
+with `ns.format.number` when you are already editing that file — do not add a sixth.
+`tests/ram.test.mjs` fails on any new copy.
 
 Commit messages lead with the reasoning and the measured numbers behind a change, not a file
 list.
