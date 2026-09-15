@@ -434,9 +434,21 @@ a ninth of the income the slice was carved out for. It was self-sustaining too -
 landings per step, so a cadence too slow for the batch starves the evidence that would correct it
 (141s per step, ~13 minutes to climb back). So rescan calls `setSlice`, and `stream.pace` re-derives
 the cadence at every dispatch from the batch it just planned, where the fraction, the hacking level
-and the drift budget are all already in hand for free. `pace` uses `heldAllAtOnce` on purpose,
-matching `chooseSteal`: it over-states JIT holding by ~20%, and a stream disagreeing with the
-calculator that admitted it about the same batch would be worse than the conservatism.
+and the drift budget are all already in hand for free.
+
+**Both `pace` and `chooseSteal` price RAM as the dispatch GATE charges it** (`heldFromDispatch`),
+not as the game holds it. The gate refuses against `freeRam - queuedRam`, so a batch is charged
+whole from dispatch until it lands, `W * (1 + anchorSwing) + MIN_LEAD_MS` - and the swing reaches
+its 0.25 cap at high steal. Pricing one weaken window (`heldAllAtOnce`, on the theory that it
+over-stated JIT) under-stated that by up to 25%: a live swap sized phantasy at 44% for 89.8 TB
+of an 85% budget, the pipeline hit no room at depth 112, and the steal fell to 0.5%.
+
+Two things turned that into a collapse, and both are fixed separately because any real squeeze
+reaches them. **No-room evidence is ignored for one pipeline turnover after a step**
+(`noRoomFrom`): the pool is still full of old-size batches, so each refusal re-fired the back-off
+on "1/1 dispatches found no room", nine steps in seconds. **The security ceiling is sized for the
+largest batch in flight** (`floorSec`, mirroring `floorSteal`): a step to 3.4% cut it to 7.62 while
+44% grows landed at 8.48, and the stream stopped itself for re-prep.
 
 **The grow margin is derived from measured drift**, not flat. Drift is hack effectiveness rising
 between dispatch and landing; the controller measures it two ways (from reports, and from the

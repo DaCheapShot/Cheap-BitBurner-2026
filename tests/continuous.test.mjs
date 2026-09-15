@@ -1571,6 +1571,26 @@ export const tests = {
     assert(drained.off && drained.moneyOff, "a real drain must still be caught");
   },
 
+  "stepping the fraction down does not make security look drifted": async () => {
+    const { mods } = await loadContinuous();
+    const { baselineDrift } = mods["lib/plan"];
+
+    // Measured on a live run: phantasy stepped 44% -> 3.4%, which cut the ceiling
+    // to 7 + 0.207 * 3 = 7.62 while grows sized at 44% went on landing at 8.48,
+    // and the stream stopped itself for re-prep on its own transient.
+    const now = { actualSteal: 0.034, hackSec: 0.05, growSec: 0.157 };
+    const midBatch = { maxMoney: 48e6, money: 48e6, minSec: 7, sec: 8.48 };
+
+    assert(baselineDrift(midBatch, now).secOff, "the fixture must reproduce the false alarm");
+
+    const withInFlight = baselineDrift(midBatch, now, undefined, { floorSec: 2.7 });
+    assert(!withInFlight.off, `still flagged: ceiling ${withInFlight.secCeiling}`);
+
+    // Not a blanket excuse: a real ratchet is still caught.
+    const dirty = baselineDrift({ ...midBatch, sec: 20 }, now, undefined, { floorSec: 2.7 });
+    assert(dirty.secOff, "a real security ratchet must still be caught");
+  },
+
   "a target that really has drifted is caught": async () => {
     const { mods } = await loadContinuous();
     const { baselineDrift } = mods["lib/plan"];
@@ -1719,6 +1739,37 @@ export const tests = {
     // charge it twice and the gate would refuse batches that fit.
     fire();
     assertClose(s.queuedRam, 0, 1e-6, "RAM still owed after every op launched");
+  },
+
+  "a no-room step down waits for the old batches to land before stepping again": async () => {
+    const { s, pool, mods } = await makeStream({ steal: 0.4 });
+    const { CADENCE_MS, MAX_ANCHOR_SWING, MIN_LEAD_MS } = mods["config"];
+    const weaken = 20000; // the fixture's
+
+    const t0 = Date.now();
+    assert(s.dispatch(t0).dispatched, "sanity: the first batch must place");
+    // Every later batch is refused, as it was once phantasy's pipeline filled.
+    Object.defineProperty(pool, "freeRam", { get: () => 0 });
+
+    // A live run cut 44% -> 0.5% in nine steps, one per retire tick, each on
+    // "1/1 dispatches found no room" - evidence produced by the batches still in
+    // the air at the OLD size, which no cut can free before they land.
+    const settle = weaken * (1 + MAX_ANCHOR_SWING) + MIN_LEAD_MS;
+    let t = t0;
+    const stepsBy = (until) => {
+      const before = s.stats.stealChanges;
+      for (; t < until; t += CADENCE_MS) { s.dispatch(t); s.retire(t); }
+      return s.stats.stealChanges - before;
+    };
+
+    const first = stepsBy(t0 + settle - CADENCE_MS);
+    assert(first === 1, `stepped ${first} times before the old batches could land`);
+    assert(s.steal < 0.4, "sanity: the first refusal still backs off");
+
+    // Once the pool holds only batches at the new fraction, refusals are
+    // evidence about it again.
+    const later = stepsBy(t0 + 2 * settle + weaken);
+    assert(later >= 1, "no-room evidence must count again once the pipeline turned over");
   },
 
   "a refused batch waits a cadence before trying again": async () => {
@@ -2533,6 +2584,40 @@ export const tests = {
     assert(got.income >= incomeAt(ceiling), "the ceiling earns more than the chosen plan");
   },
 
+  "the steal calculator prices RAM the way the dispatch gate charges it": async () => {
+    const { ns, math, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 1, hackDifficulty: 1,
+             hackPercentPerThread: 0.003, growBase: 1.0018,
+             weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+    const { chooseSteal, batchRamSeconds, heldAllAtOnce, heldFromDispatch, anchorSwingFor } =
+      mods["lib/plan"];
+
+    const snap = math.snapshot(ns, "t");
+    const times = math.opTimes(snap);
+    const budget = 20000;
+    const got = chooseSteal(math, snap, ram, budget);
+    const th = got.threads;
+
+    // The gate refuses against freeRam - queuedRam, so a batch is charged whole
+    // from dispatch to landing, and the anchor sits W * (1 + anchorSwing) out.
+    // A live run priced phantasy at one window for depth 107 = 89.8TB, the gate
+    // held ~1.25x that, and the controller then walked 44% down to 0.5%.
+    const { anchorSwing } = anchorSwingFor(th, snap.minSec);
+    assert(anchorSwing > 0.1, `the fixture must carry a real swing, got ${anchorSwing}`);
+
+    const charged = batchRamSeconds(th, ram, heldFromDispatch(times, anchorSwing), th.weaken2) / got.cadence;
+    assert(charged <= budget * (1 + 1e-6), `the gate is charged ${charged} against a ${budget} slice`);
+
+    // Not vacuous: the one-window model reads this same pace as well under the
+    // slice, which is the gap it used to spend.
+    const oneWindow = batchRamSeconds(th, ram, heldAllAtOnce(times), th.weaken2) / got.cadence;
+    assert(oneWindow < budget * 0.9, `one-window pricing is not the smaller figure: ${oneWindow}`);
+  },
+
   "the cost function is monotonic, which is what makes the search valid": async () => {
     const { ns, math, ram, mods } = await makeMath("analyze", {
       hosts: { home: 262144 },
@@ -3286,11 +3371,13 @@ export const tests = {
     // the controller ramps toward that in x1.5 steps.
     const occupancy = async (steal) => {
       const { s, ns, math, ram, mods } = await makeStream({ steal, slice });
-      const { batchRamSeconds, heldAllAtOnce } = mods["lib/plan"];
+      const { batchRamSeconds, heldFromDispatch, anchorSwingFor } = mods["lib/plan"];
       assert(s.dispatch().dispatched, `steal ${steal} failed to dispatch`);
-      const times = math.opTimes(math.snapshot(ns, "t"));
+      const snap = math.snapshot(ns, "t");
+      const times = math.opTimes(snap);
       const th = s.stats.lastThreads;
-      const held = heldAllAtOnce(times);
+      // The occupancy the dispatch GATE sees, which is what the slice must hold.
+      const held = heldFromDispatch(times, anchorSwingFor(th, snap.minSec).anchorSwing);
       return {
         cadence: s.cadence,
         gb: batchRamSeconds(th, ram, held, th.weaken2) / s.cadence,
@@ -3775,7 +3862,10 @@ export const tests = {
 
     const run = async (prepped) => {
       const { ns, math, pool, ram, mods } = await makeMath("analyze", {
-        hosts: { home: 262144 },
+        // Doubled when admission started pricing dispatch-to-landing: the fixed
+        // MIN_LEAD_MS is 13% of this fixture's 1.5s weaken, which pushed the
+        // "small" target's commitment past the 10% the fourth slot needs.
+        hosts: { home: 524288 },
         servers: { ...candidates, live: prepped },
       });
       const preps = new Map();
