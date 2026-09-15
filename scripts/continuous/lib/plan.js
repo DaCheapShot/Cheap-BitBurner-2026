@@ -8,6 +8,7 @@ import {
   GROW_DRIFT_TOLERANCE,
   GROW_MARGIN_CAP,
   MONEY_FLOOR_SHARE,
+  MAX_ANCHOR_SWING,
   MAX_STEAL_FRACTION,
   MIN_LEAD_MS,
   MIN_STEAL_FRACTION,
@@ -498,6 +499,40 @@ export function heldAllAtOnce(times, spacer = SPACER_MS) {
 }
 
 /**
+ * How far a batch's op times may stretch before its ops launch, as a fraction of
+ * its weaken window - raw, and capped for the anchor.
+ *
+ * `swing` is the due-ness allowance and may reach 1. `anchorSwing` is what
+ * pushes the batch's landing further out and is held to MAX_ANCHOR_SWING - see
+ * that constant for the run that froze two streams solid. Shared by the stream,
+ * which schedules with it, and by the calculator, which has to price the same
+ * landing the stream will actually schedule.
+ */
+export function anchorSwingFor(th, minSec) {
+  const swing = minSec > 0 ? Math.min(1, (th.hackSec + th.growSec) / minSec) : 0;
+  return { swing, anchorSwing: Math.min(MAX_ANCHOR_SWING, swing) };
+}
+
+/**
+ * How long each op of a batch holds RAM AS THE DISPATCH GATE COUNTS IT: from
+ * dispatch until that op lands.
+ *
+ * Not the game's view, which under JIT is each op's own duration, and not
+ * heldAllAtOnce either. The gate refuses a batch against `freeRam - queuedRam`,
+ * and queuedRam charges every op the instant it is planned - so a batch is
+ * charged in full from dispatch to landing, and the anchor sits
+ * `W * (1 + anchorSwing) + minLead` out. At high steal the swing reaches its
+ * 0.25 cap, so pricing a slice at one window committed 25% more than the slice.
+ * A live run sized phantasy at 44% for depth 107 = 89.8TB of an 85% budget, the
+ * gate held it to ~1.25x that, dispatches found no room at depth 112, and the
+ * back-off walked the fraction to 0.5% in seconds.
+ */
+export function heldFromDispatch(times, anchorSwing, spacer = SPACER_MS, minLead = MIN_LEAD_MS) {
+  const span = times.weaken * (1 + anchorSwing) + minLead;
+  return { H: span - spacer, W1: span, G: span + spacer, W2: span + 2 * spacer };
+}
+
+/**
  * GB-milliseconds one batch occupies, given how long each op holds its RAM.
  *
  * @param {object} threads {hack, weaken1, grow} in EFFECTIVE threads
@@ -621,13 +656,16 @@ export function chooseSteal(math, snap, ram, budgetGb, opts = {}) {
 
   const times = math.opTimes(snap);
   if (!(times.weaken > 0)) return null;
-  const heldTimes = held ?? heldAllAtOnce(times);
-
   const budget = budgetGb > 0 ? budgetGb : Infinity;
 
   const priceAt = (hack) => {
     const threads = planThreadsForHack(math, snap, hack, perThread, { growMargin, drift });
     if (!threads) return null;
+    // Per probe, because the anchor swing depends on the batch's own security
+    // cost - and priced the way the dispatch gate charges, not one window, or
+    // the slice this returns is one the stream cannot fill. See heldFromDispatch.
+    const heldTimes = held ??
+      heldFromDispatch(times, anchorSwingFor(threads, snap.minSec).anchorSwing);
     // What the pool must hold at ONE INSTANT. Every op of a batch is live just
     // before its anchor - W1 and W2 span the whole window, grow 0.8 of it - so
     // the peak really is the whole batch, and it does not shrink when the
@@ -728,7 +766,7 @@ export function moneyPerGbSec(take, chance, gb, weakenMs) {
  * high. A genuine drift compounds and clears these within a few cadences.
  */
 export function baselineDrift(snap, th, slack = BASELINE_SLACK_BATCHES, opts = {}) {
-  const { moneyBatches = MONEY_FLOOR_BATCHES, floorSteal = null } = opts;
+  const { moneyBatches = MONEY_FLOOR_BATCHES, floorSteal = null, floorSec = null } = opts;
 
   // The floor must be sized for the LARGEST fraction still in the air, not the
   // one the next batch will use. A live run stepped 84.9% -> 50.9% under RAM
@@ -760,7 +798,11 @@ export function baselineDrift(snap, th, slack = BASELINE_SLACK_BATCHES, opts = {
     Math.pow(1 - steal, moneyBatches),
     (1 - steal) * MONEY_FLOOR_SHARE,
   );
-  const secCeiling = snap.minSec + (th.hackSec + th.growSec) * slack;
+  // The same largest-in-flight rule as the money floor, and for the same reason.
+  // Without it a step down tightened only this half: a live run cut phantasy
+  // 44% -> 3.4%, the ceiling fell to 7.62 while grows sized at 44% kept landing
+  // at 8.48, and the stream stopped itself for a transient it had scheduled.
+  const secCeiling = snap.minSec + Math.max(th.hackSec + th.growSec, floorSec ?? 0) * slack;
 
   const moneyOff = snap.money < moneyFloor;
   const secOff = snap.sec > secCeiling;

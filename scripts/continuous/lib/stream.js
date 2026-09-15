@@ -1,11 +1,12 @@
 import { fmtMoney } from "scripts/continuous/lib/fmt";
 import {
+  anchorSwingFor,
   baselineDrift,
   batchRam,
   batchRamSeconds,
   batchVerdict,
   delayFor,
-  heldAllAtOnce,
+  heldFromDispatch,
   landingOffsets,
   nextAnchor,
   maxStealForDrift,
@@ -294,6 +295,13 @@ export function createStream(ns, math, opts) {
   const ceiling = () => Math.min(base, maxStealForDrift(driftBudget()));
   let holdUntil = 0;
   let lastWeaken = 0;
+  // No-room evidence is not counted before this. After a step, the pool is still
+  // full of batches sized at the OLD fraction until the last of them lands, so a
+  // refusal in that window says nothing about the new one - and counting it cut
+  // phantasy 44% -> 0.5% in nine steps, one per retire tick, each on "1/1
+  // dispatches found no room". Separate from holdUntil, which resets every
+  // window whether or not the fraction moved.
+  let noRoomFrom = 0;
   // `steal` is stamped on the window so credit() can tell whether a retiring
   // batch is evidence about the CURRENT fraction or about the one before it.
   const freshSample = () => ({
@@ -322,12 +330,12 @@ export function createStream(ns, math, opts) {
     lastBatchRam: 0,
   };
 
-  const skip = (why) => {
+  const skip = (why, now = Date.now()) => {
     stats.skips[why] = (stats.skips[why] ?? 0) + 1;
     // The pool refusing a batch is evidence about SIZE, not about the target -
     // and at high steal a batch is over ten times its size at 10%, so a
     // contended pool is fixed by taking a smaller bite, not by queueing.
-    if (why.startsWith("no room")) sample.noRoom++;
+    if (why.startsWith("no room") && now >= noRoomFrom) sample.noRoom++;
     return { dispatched: false, why };
   };
 
@@ -351,7 +359,7 @@ export function createStream(ns, math, opts) {
     // Counted here rather than at the top: being at max depth or wound down is
     // not an attempt to place a batch, and folding those in would dilute the
     // no-room ratio with ticks that never asked the pool for anything.
-    sample.attempts++;
+    if (now >= noRoomFrom) sample.attempts++;
 
     const snap = math.snapshot(ns, host);
 
@@ -379,7 +387,7 @@ export function createStream(ns, math, opts) {
       // tick - 40 snapshots a second - and reported "150/149 dispatches found no
       // room" against a ratio that is supposed to count one attempt per slot.
       dueAt = now + cadence;
-      return skip("no room for batch");
+      return skip("no room for batch", now);
     }
 
     // Never stream a target that has drifted off its baseline: every thread
@@ -395,11 +403,18 @@ export function createStream(ns, math, opts) {
     // taken - see baselineDrift. Recomputed rather than tracked incrementally
     // because batches retire out of order and a stale maximum would keep the
     // floor loose long after the batch that justified it had landed.
+    // Security gets the same treatment: its transient is set by the biggest
+    // hack-plus-grow still landing, not by the batch about to be planned.
     let inFlightSteal = 0;
+    let inFlightSec = 0;
     for (const b of inFlight.values()) {
       if (b.steal > inFlightSteal) inFlightSteal = b.steal;
+      if (b.sec > inFlightSec) inFlightSec = b.sec;
     }
-    const drift = baselineDrift(snap, th, slack, { floorSteal: inFlightSteal });
+    const drift = baselineDrift(snap, th, slack, {
+      floorSteal: inFlightSteal,
+      floorSec: inFlightSec,
+    });
 
     // The money half of the check is a SNAPSHOT, and at the top of the range a
     // snapshot cannot tell a healthy stream from a drained one. At 94.8% steal
@@ -456,7 +471,10 @@ export function createStream(ns, math, opts) {
     // Re-derived per dispatch rather than on steal changes alone: `th` and
     // `times` are already in hand here, so it costs no ns call, and the batch
     // also moves with hacking level and the drift budget, which no setter sees.
-    pace(th, times);
+    // Before pace, which prices the batch over the same landing the anchor below
+    // schedules. See anchorSwingFor for why there are two figures.
+    const { swing, anchorSwing } = anchorSwingFor(th, snap.minSec);
+    pace(th, times, anchorSwing);
 
     // Free: planThreads already measured it, and this is the only place that
     // knows both the value and the window it has to be compared across.
@@ -483,10 +501,8 @@ export function createStream(ns, math, opts) {
     // window, and the ratio reaches 1 precisely when a target has drained,
     // since grow is then sized to climb back from nothing and growSec explodes
     // with it. A live run froze two streams solid that way.
-    const swing = snap.minSec > 0
-      ? Math.min(1, (th.hackSec + th.growSec) / snap.minSec)
-      : 0;
-    const anchorSwing = Math.min(MAX_ANCHOR_SWING, swing);
+    //
+    // Both are computed above, by anchorSwingFor, because pace needs them first.
 
     const at = nextAnchor(anchor, now, times.weaken, cadence, minLead + times.weaken * anchorSwing);
     const offs = landingOffsets(spacer);
@@ -524,6 +540,9 @@ export function createStream(ns, math, opts) {
       anchor: at,
       deadline: at + offs.W2 + grace,
       take: th.take,
+      // Security this batch adds before its weakens cancel it. Read by the
+      // baseline check of every later dispatch while this one is in the air.
+      sec: th.hackSec + th.growSec,
       // Both grow as ops launch: placement counts are not knowable now, which
       // is exactly why `expected` cannot be set up front the way it used to be.
       expected: 0,
@@ -931,6 +950,7 @@ export function createStream(ns, math, opts) {
     // evidence keeps accumulating instead of being reset every retirement.
     if (!decision.changed && now < holdUntil) return;
 
+    const before = steal;
     if (decision.changed) {
       log(
         `  ${host}: steal ${(steal * 100).toFixed(1)}% -> ` +
@@ -945,6 +965,9 @@ export function createStream(ns, math, opts) {
     // otherwise pin the target low for the rest of the run.
     driftSeen = Math.max(sample.worstOver, driftSeen * DRIFT_DECAY);
     if (steal > ceiling()) steal = ceiling();
+    // Until the last batch at the old size lands: dispatch to landing is
+    // `W * (1 + anchorSwing) + minLead`, and the swing is capped at this.
+    if (steal !== before) noRoomFrom = now + lastWeaken * (1 + MAX_ANCHOR_SWING) + minLead;
 
     // The window resets whether or not the fraction moved: a decision to hold
     // was still made on this evidence, and re-using it would count the same
@@ -1046,20 +1069,22 @@ export function createStream(ns, math, opts) {
    * at CADENCE_MS, which is set by jitter against the spacer and has nothing to
    * do with RAM.
    *
-   * heldAllAtOnce deliberately, even though this dispatcher is just-in-time and
-   * the real holding is ~20% less. Two reasons: it is the model chooseSteal
-   * prices with, so a stream and the calculator that admitted it never disagree
-   * about the same batch; and over-stating occupancy is the safe direction for a
-   * number that decides how much of the pool to commit. Moving BOTH to the real
-   * per-op durations is a separate change - see the note on heldAllAtOnce.
+   * heldFromDispatch, not the game's per-op durations and not one weaken window,
+   * because the constraint this cadence has to respect is the dispatch GATE, and
+   * the gate charges every queued op from dispatch to landing. This used to be
+   * heldAllAtOnce on the theory that it over-stated JIT holding by ~20%; against
+   * the gate it UNDER-stated by up to MAX_ANCHOR_SWING, and a pipeline paced to
+   * fill its slice filled ~1.25x of it. It is also what chooseSteal prices with,
+   * so the stream and the calculator that admitted it still agree.
    *
    * Anchors are monotonic, so a cadence that narrows takes effect on the next
    * dispatch and one that widens takes effect immediately - nextAnchor keeps
    * every batch already in the air where it was scheduled either way.
    */
-  function pace(th, times) {
+  function pace(th, times, anchorSwing) {
     if (!(slice > 0)) return;
-    const ramSeconds = batchRamSeconds(th, ram, heldAllAtOnce(times, spacer), th.weaken2);
+    const held = heldFromDispatch(times, anchorSwing, spacer, minLead);
+    const ramSeconds = batchRamSeconds(th, ram, held, th.weaken2);
     if (!(ramSeconds > 0)) return;
     cadence = Math.max(CADENCE_MS, ramSeconds / slice);
   }
