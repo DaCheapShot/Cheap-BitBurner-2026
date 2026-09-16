@@ -76,6 +76,7 @@ run scripts/sharemode.js off            # every share thread exits within 10s
 run scripts/sharemode.js 0.5            # retune live, no restart
 run scripts/gang/create.js "Slum Snakes"  # found the gang, once, by hand
 run scripts/gang/gang.js                # the gang supervisor (boot starts it too)
+run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
 node tests/run.mjs                      # run the test suite
 ```
 

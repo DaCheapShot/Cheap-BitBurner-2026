@@ -450,6 +450,13 @@ export const tests = {
   //
   // If this ever reads higher, something in rpc.js has been named after a
   // billed function and every importer is paying for it.
+  // The report exists to catch THIS file's model being wrong, so it has to stay
+  // runnable on the smallest home that could need it.
+  "ramreport.js costs 1.90 GB": () => {
+    const ram = ramOf("ramreport");
+    assert(Math.abs(ram - 1.90) < 0.011, `expected 1.90 GB, got ${ram.toFixed(2)}`);
+  },
+
   "rpc.js costs 2.60 GB and imports nothing": () => {
     const ram = ramOf("rpc");
     assert(Math.abs(ram - 2.60) < 0.011, `expected 2.60 GB, got ${ram.toFixed(2)}`);
