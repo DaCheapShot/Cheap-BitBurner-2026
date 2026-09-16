@@ -150,12 +150,25 @@ export const tests = {
   // times.hack, ram.grow, threads.weaken1. The game charges those like calls.
   // Left alone: they are the clearest names available for what they hold, and
   // 0.40 GB does not buy renaming eight files' worth of them.
-  "manager.js (analyze) stays at 6.95 GB": () => {
+  // 6.95 before rpc.js. The +1.00 is ns.run, and it is the ENTRY FEE for the
+  // mechanism, not a regression: it bought the deletion of calib.js,
+  // calibrate.js, /data/calib.json, boot's refresh phase and the staleness
+  // guard. The 3.00 GB of *Analyze functions that cache existed to keep out of
+  // mathAnalyze.js is still out - now in an rpc body, charged to a transient
+  // that lives for a millisecond at startup.
+  //
+  // Moving the REST of mathAnalyze's calls the same way reclaims 2.55 and takes
+  // this below where it started; the shotgun recomputes once per volley, so
+  // there is no timing risk in doing it.
+  "manager.js (analyze) costs 7.95 GB": () => {
     const ram = ramOf("manager");
-    assert(Math.abs(ram - 6.95) < 0.011, `expected 6.95 GB, got ${ram.toFixed(2)}`);
+    assert(Math.abs(ram - 7.95) < 0.011, `expected 7.95 GB, got ${ram.toFixed(2)}`);
   },
 
-  "manager-formulas.js costs 6.90 GB": () => {
+  // Unchanged: mathFormulas holds no *Analyze function to move, so it does not
+  // import rpc.js and pays no entry fee. Its prepare() went async only to keep
+  // the two backends' contract identical.
+  "manager-formulas.js is unmoved by rpc.js at 6.90 GB": () => {
     const ram = ramOf("manager-formulas");
     assert(Math.abs(ram - 6.90) < 0.011, `expected 6.90 GB, got ${ram.toFixed(2)}`);
   },
@@ -344,7 +357,7 @@ export const tests = {
 
     const seen = new Set();
     for (const entry of ["boot", "manager", "manager-formulas", "capacity", "cloud", "deploy",
-                         "root", "sharemode", "connectme", "calibrate", "prep", "prep-formulas",
+                         "root", "sharemode", "connectme", "prep", "prep-formulas",
                          "continuous/manager", "continuous/manager-formulas", "continuous/servers",
                          "continuous/capacity", "gang/gang", "gang/tick", "gang/ascend",
                          "gang/equip", "gang/war", "gang/create"]) {
@@ -380,7 +393,7 @@ export const tests = {
     const BANNED = { window: 25, document: 25, attempt: 10, share: 2.4, run: 1, probe: 0.2 };
     const entries = new Set();
     for (const e of ["boot", "manager", "manager-formulas", "capacity", "cloud", "deploy",
-                     "root", "sharemode", "connectme", "calibrate", "prep", "prep-formulas",
+                     "root", "sharemode", "connectme", "prep", "prep-formulas",
                      "continuous/manager", "continuous/manager-formulas", "continuous/servers",
                      "continuous/capacity",
                      "gang/gang", "gang/tick", "gang/ascend", "gang/equip", "gang/war",

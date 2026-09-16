@@ -1,5 +1,5 @@
 import { MONEY_TOLERANCE, SEC_TOLERANCE } from "./config.js";
-import { loadCalibration, growBaseFor } from "./calib.js";
+import { rpc } from "./rpc.js";
 
 /**
  * Math interface backed by the *Analyze API plus the calibration cache.
@@ -10,22 +10,48 @@ import { loadCalibration, growBaseFor } from "./calib.js";
  *
  * RAM charged to whoever imports this:
  *   4x getServer* 0.40 + hackAnalyze 1.00 + growthAnalyze 1.00
- *   + getHackTime/getGrowTime/getWeakenTime 0.15
- *   = 2.55 GB   (calib.js and config.js are 0 GB)
+ *   + getHackTime/getGrowTime/getWeakenTime 0.15 + rpc.js 1.00
+ *   = 3.55 GB   (config.js is 0 GB)
+ *
+ * The three per-thread security constants USED to live in /data/calib.json,
+ * written by a calibrate.js transient, purely so this module would not import
+ * weakenAnalyze, hackAnalyzeSecurity and growthAnalyzeSecurity at 1.00 GB each.
+ * They are read once, at startup, which makes them the cheapest possible rpc
+ * call - so the cache, its writer, its staleness guard and boot's refresh phase
+ * are all gone, at a cost of the 1.00 GB ns.run that rpc.js carries.
  */
 
 export const NAME = "analyze";
 
-let calib = null;
+let consts = null;
 
-/** Load the calibration cache. Called once at startup by the entry script. */
-export function prepare(ns) {
-  calib = loadCalibration(ns);
-  if (!calib) {
-    return {
-      ok: false,
-      error: "/data/calib.json missing or invalid. Run scripts/calibrate.js first.",
-    };
+/**
+ * Measure the three per-thread security constants. Called once at startup.
+ *
+ * All three are linear in threads and independent of the target's state, which
+ * is what made caching them safe - and is equally what makes one rpc call at
+ * startup enough. NO HOST ARGUMENT on either *AnalyzeSecurity: with one they
+ * cap their result by the threads needed to reach max money, so on a PREPPED
+ * target growthAnalyzeSecurity returns ~0 and weaken-2 gets sized at 1 thread
+ * instead of the ~51 actually needed.
+ */
+export async function prepare(ns) {
+  try {
+    consts = await rpc(ns, `
+      return {
+        weakenPerThread: ns.weakenAnalyze(1),
+        hackSecPerThread: ns.hackAnalyzeSecurity(1),
+        growSecPerThread: ns.growthAnalyzeSecurity(1),
+      };
+    `);
+  } catch (e) {
+    return { ok: false, error: `could not measure the security constants: ${e.message ?? e}` };
+  }
+  // A transient that returned a shape this does not recognise must stop the
+  // manager here, not propagate an undefined into thread math as NaN - which is
+  // the check the calibration cache's own loader existed to make.
+  if (!(consts?.weakenPerThread > 0) || !(consts?.hackSecPerThread > 0) || !(consts?.growSecPerThread > 0)) {
+    return { ok: false, error: `security constants came back unusable: ${JSON.stringify(consts)}` };
   }
   return { ok: true };
 }
@@ -58,12 +84,10 @@ export function hackFractionPerThread(snap) {
   return snap.ns.hackAnalyze(snap.host);
 }
 
-// Cached per-thread constants. All three are linear in threads and independent
-// of the target's current state, which is what makes them safe to cache; see
-// scripts/calibrate.js for how they are measured.
-export function securityPerHackThread() { return calib.hackSecPerThread; }
-export function securityPerGrowThread() { return calib.growSecPerThread; }
-export function securityPerWeakenThread() { return calib.weakenPerThread; }
+// Measured once by prepare(), above.
+export function securityPerHackThread() { return consts.hackSecPerThread; }
+export function securityPerGrowThread() { return consts.growSecPerThread; }
+export function securityPerWeakenThread() { return consts.weakenPerThread; }
 
 /**
  * Grow threads to take money from fromMoney to toMoney.
@@ -73,20 +97,18 @@ export function securityPerWeakenThread() { return calib.weakenPerThread; }
  * it is accepted only so this signature matches mathFormulas, which can. When
  * the two disagree, formulas is right.
  *
- * Prefers the cached growth base when the host is still at the security it was
- * measured at, because that costs nothing; falls back to a live growthAnalyze
- * otherwise. Both are already charged to this module, so the preference is
- * about accuracy, not RAM.
+ * Always a live growthAnalyze. There used to be a cached growth base to prefer,
+ * but it carried no information this call does not: calibrate.js computed it as
+ * 2 ** (1 / growthAnalyze(host, 2)) at minimum security, so the two agree
+ * exactly in the only state the cache was ever used in, and the live call is
+ * strictly better when the host has drifted. growthAnalyze is charged to this
+ * module either way.
  */
 export function growThreadsToRestore(snap, fromMoney, toMoney, atSecurity) {
   const from = Math.max(fromMoney, 1);
   const to = Math.min(toMoney, snap.maxMoney);
   if (to <= from) return 0;
   const mult = to / from;
-
-  const base = growBaseFor(calib, snap.host, atSecurity);
-  if (base) return Math.log(mult) / Math.log(base);
-
   return snap.ns.growthAnalyze(snap.host, mult);
 }
 

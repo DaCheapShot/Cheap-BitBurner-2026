@@ -21,7 +21,8 @@ export const tests = {
     const closure = importClosure("manager-formulas");
     assert(!closure.has("mathAnalyze"),
       `manager-formulas.js reaches mathAnalyze - it would be charged 2.00 GB for hackAnalyze and growthAnalyze it never uses. Closure: ${[...closure]}`);
-    assert(!closure.has("calib"), "manager-formulas.js should not need the calibration cache");
+    assert(!closure.has("rpc"),
+      "manager-formulas.js has no *Analyze function to move off, so it must not pay rpc.js's 1.00 GB");
   },
 
   "managerCore and prepper are math-free": () => {

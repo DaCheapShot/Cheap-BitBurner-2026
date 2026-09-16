@@ -45,7 +45,7 @@ Everything runs from the in-game terminal. `boot.js` is the entry point and supe
 
 ```
 run scripts/boot.js                     # root -> deploy -> cloud -> continuous batcher
-run scripts/boot.js --shotgun           # the volley batcher instead (adds calibrate)
+run scripts/boot.js --shotgun           # the volley batcher instead
 run scripts/boot.js --target omega-net  # pin the manager's target instead of auto-picking
 run scripts/boot.js --targets 5         # continuous only; the shotgun ignores it
 run scripts/boot.js --once --no-cloud
@@ -55,16 +55,15 @@ run scripts/boot.js --no-formulas       # force the analyze build
 **Boot chooses between TWO batchers**, and the choice is a flag, not a marker - retype it if
 you restart boot. `scripts/continuous/` is the default and the better earner. `--shotgun` runs
 `scripts/manager.js`. Within either, boot re-picks the formulas or analyze build every tick,
-because Formulas.exe can be bought or lost at any time. Calibration is a shotgun-only step:
-`scripts/continuous/lib/mathAnalyze.js` deliberately keeps no cache and never reads
-`/data/calib.json`, so running `calibrate.js` for it is a 6.20 GB transient buying nothing.
+because Formulas.exe can be bought or lost at any time. There is no calibration step any
+more: the three per-thread security constants are measured by one `rpc.js` call at manager
+startup - see `rpc.js` below.
 
 Individual pieces, useful when diagnosing:
 
 ```
 run scripts/root.js                     # open ports + NUKE everything reachable
 run scripts/deploy.js                   # scp workers home -> every rooted host
-run scripts/calibrate.js                # write /data/calib.json (needs target at min security)
 run scripts/capacity.js --steal 0.05    # RAM/target/batch-size analysis, launches nothing
 run scripts/manager.js --dry-run        # plan a volley and print it
 run scripts/manager.js --once --verbose # one volley, measured vs planned outcome
@@ -190,17 +189,21 @@ object keys (`{ hack: 1.70 }`), because acorn-walk's `Property` visitor only wal
 key. `tests/ram.test.mjs` models all of this and has a guard test naming the expensive
 collisions; it is the only thing standing between this repo and a 25 GB variable.
 
-- `config.js` and `calib.js` are genuinely free to import: `config.js` has no `ns` call and
-  mentions `hack`/`grow`/`weaken` only as object keys, `calib.js` uses only `ns.read` at 0 GB.
+- `config.js` is genuinely free to import: it has no `ns` call and mentions
+  `hack`/`grow`/`weaken` only as object keys.
   Keep it that way — one billed `ns` call in `config.js` taxes every script in the repo.
 - `verify.js` has no `ns` call either but still costs **0.25 GB** to import, because it reads
   `.hack` and `.grow` off result objects. Nothing to fix; know it before budgeting.
 - `ram.js` deliberately touches only four cheap functions and **no analyze functions**.
-- Constants that are linear in threads are measured once by `calibrate.js`, cached to
-  `/data/calib.json`, and read back through `calib.js` at 0 GB. This replaces `weakenAnalyze`,
-  `hackAnalyzeSecurity` and `growthAnalyzeSecurity` (1 GB each).
-- `growthAnalyze` stays live: it reads security at call time, so it cannot be cached. For the
-  same reason `calib.js` refuses to answer growth questions for a drifted host.
+- Constants that are linear in threads are measured once, at startup, by a single `rpc.js` call
+  in `mathAnalyze.prepare()`. This keeps `weakenAnalyze`, `hackAnalyzeSecurity` and
+  `growthAnalyzeSecurity` (1 GB each) out of the manager for the 1.00 GB `ns.run` costs.
+  `calibrate.js`, `calib.js` and `/data/calib.json` did the same job with a cached file and a
+  6.20 GB recurring transient, and are gone.
+- `growthAnalyze` stays live: it reads security at call time, so it cannot be cached. The cached
+  growth base that used to shortcut it carried no extra information - `calibrate.js` computed it
+  as `2 ** (1 / growthAnalyze(host, 2))` at minimum security, so the two agreed exactly in the
+  only state the cache was used in.
 - `hackAnalyze` stays live: it moves with hacking level, and reacting to that is the point.
 
 Worker scripts pay their cost **per thread**, so `hack.js` / `grow.js` / `weaken.js` contain
@@ -275,12 +278,11 @@ editor's RAM panel when one moves.
 | module | role | cost |
 |---|---|---|
 | `config.js` | every tunable, shared so nothing drifts | 0 |
-| `calib.js` | reads `/data/calib.json` | 0 |
 | `verify.js` | landing analysis — the definition of "landed correctly" | 0.25 |
 | `ram.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
 | `rpc.js` | run a body in a throwaway script, get its value back | 1.00 |
 | `prepper.js` | prep as a module (manager runs it in-process) | 2.40 |
-| `mathAnalyze.js` | math interface via *Analyze + calibration cache | 2.55 |
+| `mathAnalyze.js` | math interface via *Analyze; constants via `rpc.js` | 3.55 |
 | `mathFormulas.js` | math interface via `ns.formulas` | 2.50 |
 | `managerCore.js` | the volley loop + share top-up, math-free | 2.80 |
 | `manager.js` | entry: core + mathAnalyze (always works) | 6.95 |
@@ -308,8 +310,7 @@ editor's RAM panel when one moves.
 The continuous entries are the two that have to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds them under 16 GB for that reason. The
 analyze build carries 3.00 GB of *Analyze functions the shotgun caches away through
-`calibrate.js`, and 2.00 GB for the `ns.getServer` in `continuous/lib/cores.js`; porting the
-calibration pair into that folder is the next 5 GB if one is ever needed.
+an `rpc.js` call at startup, and 2.00 GB for the `ns.getServer` in `continuous/lib/cores.js`.
 
 `connectme.js` (3.85) prints the terminal `connect` chain to a host. It trims the
 chain wherever `src/Terminal/commands/connect.ts` permits a direct jump - that is,
@@ -324,7 +325,7 @@ so unreachable rows are dropped rather than reported as an error.
 
 `capacity.js` (8.15) is the surviving diagnostic. It ranks targets by real throughput, which
 the manager does not do — `pickTarget` chooses the richest *hackable* server, not the most
-profitable one. `prep.js` / `prep-formulas.js` and `calibrate.js` are manual entry points to
+profitable one. `prep.js` / `prep-formulas.js` are manual entry points to
 logic the supervisor otherwise drives. `scan.js` predates the batcher.
 
 ### Prep, and why it fans out
@@ -563,8 +564,7 @@ They run on home only and are never `scp`'d, so the "a worker's imports must be 
 trap does not apply here.
 
 `/data/gang.txt` exists only so `ascend.js` and `equip.js` can skip a 2.00 GB
-`getGangInformation` for three numbers, exactly as `calib.js` spares the manager the analyze
-functions. `marker.js` collapses missing, corrupt and schema-invalid to `null`, same idiom.
+`getGangInformation` for three numbers. `marker.js` collapses missing, corrupt and schema-invalid to `null`, same idiom.
 
 **Transients report back on `GANG_PORT` (4), and `ns.print` is banned in them.** `ns.print` writes
 to the CALLING script's own log window, and a transient's window dies with the process a few
@@ -789,7 +789,7 @@ Three reasons this is not a style preference:
 **`ns.formatNumber()` and `ns.nFormat()` do not exist in this fork** — see Fork differences. Both
 are `undefined` here, which is a `TypeError` at the call site and nowhere else.
 
-**Format at the CALL SITE, not inside a 0 GB pure module.** `config.js`, `calib.js`, `verify.js`,
+**Format at the CALL SITE, not inside a 0 GB pure module.** `config.js`, `verify.js`,
 `gang/math.js` and the like have no `ns` and must keep it that way; threading one in to format a
 string is the wrong trade. Return the number, let the script that has `ns` print it — that is why
 `gang/report.js` takes a finished string.

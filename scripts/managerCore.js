@@ -905,7 +905,7 @@ export async function runVolley(ns, math) {
   ns.disableLog("ALL");
   ns.ui.openTail();
 
-  const ready = math.prepare(ns);
+  const ready = await math.prepare(ns);
   if (!ready.ok) {
     ns.tprint(`ERROR: ${ready.error}`);
     return;

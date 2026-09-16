@@ -46,10 +46,6 @@ function volleyNs({ formulas = false, share = null } = {}) {
       },
     },
     files: {
-      "/data/calib.json": JSON.stringify({
-        weakenPerThread: 0.05, hackSecPerThread: 0.002, growSecPerThread: 0.004,
-        written: Date.now(), hosts: {},
-      }),
       "/scripts/hack.js": "x",
       "/scripts/share.js": "ns.share()",
       ...(share === null ? {} : { "/data/share.txt": String(share) }),
@@ -109,7 +105,7 @@ export const tests = {
   "a full manager cycle runs to completion on the analyze build": async () => {
     const { managerCore, mathAnalyze } = await loadScripts();
     const ns = volleyNs();
-    assert(mathAnalyze.prepare(ns).ok, "prepare failed");
+    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
 
     // Any ReferenceError, TDZ error or bad call site inside run() surfaces here
     // and nowhere else in this suite.
@@ -123,7 +119,7 @@ export const tests = {
   "the same cycle runs on the formulas build": async () => {
     const { managerCore, mathFormulas } = await loadScripts();
     const ns = volleyNs({ formulas: true });
-    assert(mathFormulas.prepare(ns).ok, "prepare failed");
+    assert((await mathFormulas.prepare(ns)).ok, "prepare failed");
 
     await managerCore.runVolley(ns, mathFormulas);
     assert(/landed \d+ ok/.test(logOf(ns)), "the formulas build produced no landing summary");
@@ -134,7 +130,7 @@ export const tests = {
   "--verbose reports every diagnostic line": async () => {
     const { managerCore, mathAnalyze } = await loadScripts();
     const ns = volleyNs();
-    assert(mathAnalyze.prepare(ns).ok, "prepare failed");
+    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
 
     await managerCore.runVolley(ns, mathAnalyze);
 
@@ -163,12 +159,12 @@ export const tests = {
     const poolIn = (log) => Number(/volley \d+ batches[\s\S]*?of ([\d.]+)TB/.exec(log)?.[1] ?? -1);
 
     const off = volleyNs();
-    assert(mathAnalyze.prepare(off).ok, "prepare failed");
+    assert((await mathAnalyze.prepare(off)).ok, "prepare failed");
     await managerCore.runVolley(off, mathAnalyze);
     const offLog = logOf(off);
 
     const on = volleyNs({ share: 0.25 });
-    assert(mathAnalyze.prepare(on).ok, "prepare failed");
+    assert((await mathAnalyze.prepare(on)).ok, "prepare failed");
     await managerCore.runVolley(on, mathAnalyze);
     const onLog = logOf(on);
 
@@ -189,7 +185,7 @@ ${onLog}`);
   "a cycle leaks no RAM": async () => {
     const { managerCore, mathAnalyze } = await loadScripts();
     const ns = volleyNs();
-    assert(mathAnalyze.prepare(ns).ok, "prepare failed");
+    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
 
     await managerCore.runVolley(ns, mathAnalyze);
     // Workers hand their RAM back on landing, so anything still held is a

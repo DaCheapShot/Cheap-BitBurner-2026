@@ -706,7 +706,7 @@ export async function prepCli(ns, math) {
   const cIdx = args.indexOf("--max-cycles");
   const maxCycles = cIdx >= 0 ? Number(args[cIdx + 1]) : DEFAULT_MAX_CYCLES;
 
-  const ready = math.prepare(ns);
+  const ready = await math.prepare(ns);
   if (!ready.ok) {
     ns.tprint(`ERROR: ${ready.error}`);
     return;

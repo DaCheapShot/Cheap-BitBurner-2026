@@ -24,7 +24,7 @@ export const NAME = "formulas";
  * not import time - so without this check the failure would surface mid-cycle
  * as a raw exception instead of at startup with a usable message.
  */
-export function prepare(ns) {
+export async function prepare(ns) {
   try {
     ns.formulas.hacking.weakenEffect(1);
     return { ok: true };

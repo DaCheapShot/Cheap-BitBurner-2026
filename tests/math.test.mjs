@@ -16,13 +16,6 @@ function baseNs(over = {}) {
         ...over,
       },
     },
-    files: {
-      "/data/calib.json": JSON.stringify({
-        weakenPerThread: 0.05, hackSecPerThread: 0.002, growSecPerThread: 0.004,
-        written: Date.now(),
-        hosts: { [HOST]: { growBase: 1.0018, minSec: 5, measuredAtSec: 5 } },
-      }),
-    },
   });
 }
 
@@ -30,7 +23,7 @@ export const tests = {
   "mathAnalyze satisfies the interface": async () => {
     const { mathAnalyze } = await loadScripts();
     const ns = baseNs();
-    const ready = mathAnalyze.prepare(ns);
+    const ready = await mathAnalyze.prepare(ns);
     assert(ready.ok, `prepare failed: ${ready.error}`);
 
     const snap = mathAnalyze.snapshot(ns, HOST);
@@ -51,19 +44,30 @@ export const tests = {
     assert(times.weaken === 2000 && times.grow === 1600 && times.hack === 500, "op times wrong");
   },
 
-  "mathAnalyze.prepare fails without a calibration cache": async () => {
+  "mathAnalyze.prepare refuses when the constants cannot be measured": async () => {
     const { mathAnalyze } = await loadScripts();
-    const ns = makeNs({ servers: { [HOST]: { moneyMax: 1 } }, files: {} });
-    const ready = mathAnalyze.prepare(ns);
-    assert(!ready.ok, "should refuse without /data/calib.json");
-    assert(/calibrate/i.test(ready.error), `error should name calibrate.js, got: ${ready.error}`);
+    // ns.run returning 0 is what a full home looks like, and it is silent.
+    const ns = makeNs({ servers: { [HOST]: { moneyMax: 1 } }, extra: { run: () => 0 } });
+    const ready = await mathAnalyze.prepare(ns);
+    assert(!ready.ok, "should refuse when the rpc could not run");
+    assert(/security constants/i.test(ready.error), `error should name what failed, got: ${ready.error}`);
+  },
+
+  "mathAnalyze.prepare refuses a partial answer rather than propagating NaN": async () => {
+    const { mathAnalyze } = await loadScripts();
+    const ns = baseNs();
+    // weakenAnalyze answering 0 is the shape a drifted or stubbed API gives.
+    ns.weakenAnalyze = () => 0;
+    const ready = await mathAnalyze.prepare(ns);
+    assert(!ready.ok, "a zero constant must stop the manager at startup");
+    assert(/unusable/i.test(ready.error), `error should say so, got: ${ready.error}`);
   },
 
   "mathFormulas satisfies the same interface": async () => {
     const { mathFormulas } = await loadScripts();
     const { withFormulas } = await import("./mockNs.mjs");
     const ns = withFormulas(baseNs());
-    const ready = mathFormulas.prepare(ns);
+    const ready = await mathFormulas.prepare(ns);
     assert(ready.ok, `prepare failed: ${ready.error}`);
 
     const snap = mathFormulas.snapshot(ns, HOST);
@@ -81,7 +85,7 @@ export const tests = {
     const { mathFormulas } = await loadScripts();
     const { withFormulas } = await import("./mockNs.mjs");
     const ns = withFormulas(baseNs(), { owned: false });
-    const ready = mathFormulas.prepare(ns);
+    const ready = await mathFormulas.prepare(ns);
     assert(!ready.ok, "should refuse without Formulas.exe");
     assert(/manager\.js/.test(ready.error), `error should point at manager.js, got: ${ready.error}`);
   },
@@ -93,14 +97,14 @@ export const tests = {
     const { withFormulas } = await import("./mockNs.mjs");
 
     const nsF = withFormulas(baseNs({ moneyAvailable: 50e6 }));
-    mathFormulas.prepare(nsF);
+    await mathFormulas.prepare(nsF);
     const snapF = mathFormulas.snapshot(nsF, HOST);
     const atMin = mathFormulas.growThreadsToRestore(snapF, 50e6, 62.5e6, 5);
     const atHigh = mathFormulas.growThreadsToRestore(snapF, 50e6, 62.5e6, 25);
     assert(atHigh > atMin, `growth is worse at high security: ${atHigh} should exceed ${atMin}`);
 
     const nsA = baseNs({ moneyAvailable: 50e6 });
-    mathAnalyze.prepare(nsA);
+    await mathAnalyze.prepare(nsA);
     const snapA = mathAnalyze.snapshot(nsA, HOST);
     const aMin = mathAnalyze.growThreadsToRestore(snapA, 50e6, 62.5e6, 5);
     const aHigh = mathAnalyze.growThreadsToRestore(snapA, 50e6, 62.5e6, 25);

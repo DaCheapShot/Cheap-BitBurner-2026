@@ -85,10 +85,6 @@ function stealNs() {
       },
     },
     files: {
-      "/data/calib.json": JSON.stringify({
-        weakenPerThread: 0.05, hackSecPerThread: 0.002, growSecPerThread: 0.004,
-        written: Date.now(), hosts: {},
-      }),
       "/scripts/hack.js": "x",
     },
   });
@@ -136,7 +132,7 @@ export const tests = {
   "the auto picker never exceeds MAX_STEAL_FRACTION": async () => {
     const { managerCore, mathAnalyze, config, ram: ramMod } = await loadScripts();
     const ns = stealNs();
-    assert(mathAnalyze.prepare(ns).ok, "prepare failed");
+    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
 
     const snap = mathAnalyze.snapshot(ns, "fat");
     const pool = ramMod.ServerPool.build(ns, { homeReserve: 0 });
