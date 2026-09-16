@@ -329,7 +329,7 @@ editor's RAM panel when one moves.
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
 | `deploy.js` | scp workers home → every rooted host | 2.50 |
 | `share.js` | one `ns.share()` loop | 4.00 **per thread** |
-| `sharemode.js` | the share toggle | 4.20 |
+| `sharemode.js` | the share toggle | 4.20 (game: 2.45 - `ramOf` counts every name in an imported module; the game counts only the names imported) |
 | `continuous/manager.js` | entry: continuous core + `lib/math.js`, both backends | 11.55 |
 | `gang/config.js` | gang tunables, paths, STAT_KEYS | 0 |
 | `gang/math.js` | the game's gain formulas + every gang decision | 0 |
