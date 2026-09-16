@@ -76,6 +76,7 @@ run scripts/sharemode.js off            # every share thread exits within 10s
 run scripts/sharemode.js 0.5            # retune live, no restart
 run scripts/gang/create.js "Slum Snakes"  # found the gang, once, by hand
 run scripts/gang/gang.js                # the gang supervisor (boot starts it too)
+run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -94,9 +95,10 @@ user's decision. That is why boot has to clear the others first: a survivor does
 incoming manager degrade, it makes it exit, and boot would restart it into the same wall once a
 minute forever.
 
-A swap between the two systems must also clear **both** worker sets. They use different files
-(`scripts/hack.js` against `scripts/continuous/hack.js`), so a kill list covering only the
-incoming system's leaves the outgoing one's batches running network-wide.
+A swap between the two systems must also clear the outgoing system's workers. Both batchers exec
+the **same** `scripts/{hack,grow,weaken}.js` and tell reports apart by the port in argv, so one
+kill list covers either. They were separate files once, and a list covering only the incoming
+system's left the outgoing one's batches running network-wide.
 
 `capacity.js` is safe to run beside the manager: it allocates and releases only within its own
 process and never touches the port.
@@ -353,7 +355,7 @@ so unreachable rows are dropped rather than reported as an error.
 `capacity.js` (8.15) is the surviving diagnostic. It ranks targets by real throughput, which
 the manager does not do — `pickTarget` chooses the richest *hackable* server, not the most
 profitable one. `prep.js` is a manual entry point to
-logic the supervisor otherwise drives. `scan.js` predates the batcher.
+logic the supervisor otherwise drives.
 
 ### Prep, and why it fans out
 
@@ -475,11 +477,34 @@ each op is `exec`ed just in time for its own landing, so an op holds RAM for its
 rather than for the whole weaken window. Measured at $947m/s average on a live save with `bad 0`
 and 10–11 ms of jitter against a 100 ms spacer.
 
-**Self-contained by rule.** It does not import from `scripts/`, and `scripts/` does not import
-from it except for one 0 GB constant list (`boot.js` reads `continuous/config.js` for the worker
-paths it has to be able to kill). It carries its own workers, its own deploy, its own math
+**Self-contained in LOGIC, shared in CONTRACTS.** The rule this replaced banned imports across
+the trees outright; what it was protecting is RAM, and `tests/ram.test.mjs` guards that directly.
+What crosses now, and nothing else:
+
+- `continuous/config.js` re-exports the contracts from `scripts/config.js` — the share protocol,
+  the worker paths, `HOME_RESERVE_GB`, `PORT_CAPACITY`. Values a second party reads without
+  knowing which batcher is up. **Tuning stays local**, including values that match today
+  (`GROW_MARGIN`, `SPACER_MS`, the tolerances): coupling those would retune both batchers at once.
+- **One set of batch workers.** The two trees' copies were identical code, and each system
+  passes its own report port as an argument.
+- `managerCore.js` imports `shareCensus` / `planShare` / `topUpShare` from
+  `continuous/lib/share.js`. The copies had become identical; `serviceShare` stays per batcher.
+- `scripts/rpc.js` may be imported from here.
+
+It keeps its own deploy (a bought server never fires `deploy.js`'s trigger), its own math
 backends and its own report port (3, not 1 — a killed shotgun leaves reports in flight for a
 whole window, and on a shared port they would be credited to batch ids that never existed here).
+
+Both test loaders mirror the whole of `scripts/` through `mirrorScripts` in `tests/harness.mjs`,
+which rewrites both import spellings (`"./x.js"` and `"scripts/x"`). A cross-tree import will not
+load in a test otherwise.
+
+**A re-export must spell its source `"scripts/<path>.js"`.** The module loader resolves
+`export … from` like an import, but `RamCalculations.ts` does not: its `ExportNamedDeclaration`
+branch looks the raw specifier up in the server's script map, whose keys carry the extension and
+no leading slash. `from "scripts/config"` ran fine and failed the RAM check with `Import Error
+"scripts/config" does not exist on server: home`, so the continuous manager would not start. A
+test in `tests/ram.test.mjs` checks every re-export's spelling.
 
 **Just-in-time dispatch is legal because op duration is fixed at CALL time**, not at landing —
 `NetscriptHelpers.tsx` resolves it when the op starts. So placing `G` a hundred seconds after
@@ -558,8 +583,8 @@ Repairs are serviced before never-streamed targets — a stopped stream is a tar
 admitted that earns nothing until it is back on baseline.
 
 **Share works here too**, through `lib/share.js` — the same marker, the same port 2, the same
-`sharemode.js`. It is a port of `managerCore`'s, not a rewrite, and every rule in it is one the
-shotgun learned expensively: proportional placement, both passes planned before anything execs,
+`sharemode.js` — and the same code: the shotgun imports its census, planner and top-up from
+here. Every rule in it is one the shotgun learned expensively: proportional placement, both passes planned before anything execs,
 `noFile` and `refused` kept apart, and nothing routed through `pool.allocate` (a reservation is
 released at cycle end and a share worker is not, so the same bytes would be subtracted twice).
 It is called once per rescan and **before the RAM budget is computed** — a budget taken first
@@ -740,7 +765,7 @@ Breaking any of these produces silent, compounding damage rather than an error:
   RAM the replacement needs and still working a target nobody owns. `killOrphanWorkers` runs
   only when no manager of ANY of the four survives; doing it on every manager kill would
   destroy the volley of the survivor `killDuplicates` just kept. Switching BATCHERS is a manager
-  swap too, and the kill list has to cover both systems' workers - they are different files. Nothing is lost by killing them:
+  swap too; both systems run the same worker files, so one kill list covers it. Nothing is lost by killing them:
   `ns.hack` credits money on landing, so a killed grow forfeits only the restore, which prep
   does anyway.
 - **A full pool is transient, not a failure.** Prep waits it out (`POOL_WAIT_CYCLES`) rather

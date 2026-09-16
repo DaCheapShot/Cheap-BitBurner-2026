@@ -1,9 +1,6 @@
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
          FORMULAS_PROGRAM, FORMULAS_MARKER, WORKER_LIST,
          DEPLOY_LIST, DEPLOY_MANIFEST } from "./config.js";
-// The continuous batcher's worker paths, for killOrphanWorkers. That file holds
-// no ns calls and imports nothing, so this is 0 GB - see the RAM note below.
-import { WORKER_LIST as CONT_WORKER_LIST } from "./continuous/config.js";
 // The gang supervisor's path. Same kind of import as the line above - that file
 // is constants only, no ns call anywhere in it, so this is 0 GB.
 import { GANG_SERVICE } from "./gang/config.js";
@@ -60,10 +57,9 @@ import { GANG_SERVICE } from "./gang/config.js";
  * RAM: 1.60 base + run 1.00 + ps 0.20 + kill 0.50 + fileExists 0.10
  *      + scan 0.20 (killOrphanWorkers must reach the whole network) = 3.60 GB
  * (the deploy manifest check is ns.read/ns.write, 0 GB, and DEPLOY_LIST is a
- * plain array of strings from config.js. continuous/config.js is the same kind
- * of file - constants only, no ns call anywhere in it - so importing the
- * continuous worker paths adds nothing to this total, and neither does
- * gang/config.js. ns.gang.inGang() is 0 GB, and the `gang` namespace itself
+ * plain array of strings from config.js. gang/config.js is the same kind of
+ * file - constants only, no ns call anywhere in it - so importing it adds
+ * nothing to this total. ns.gang.inGang() is 0 GB, and the `gang` namespace itself
  * resolves to nothing: findFunc in RamCalculations.ts matches a key only when
  * its value is a function or a number, so a bare `gang` descends into the
  * namespace, finds no leaf of that name, and adds 0.)
@@ -71,6 +67,7 @@ import { GANG_SERVICE } from "./gang/config.js";
  * constant - a plain string, so it adds nothing.)
  */
 
+const BOOT = "/scripts/boot.js";
 const ROOT = "/scripts/root.js";
 const DEPLOY = "/scripts/deploy.js";
 const CLOUD = "/scripts/cloud.js";
@@ -177,12 +174,11 @@ function reachableHosts(ns) {
  * is left alone. ps reports paths without a leading slash while WORKER_LIST
  * carries one, hence normPath on both sides.
  *
- * BOTH SYSTEMS' WORKERS, always, whichever one is being started. The two use
- * different worker files - scripts/hack.js against scripts/continuous/hack.js -
- * so a set covering only the incoming system's would leave the outgoing one's
- * batches running network-wide, which is the exact damage described above and
- * the reason a swap kills anything at all. Killing a set that happens to be
- * empty costs one ps per host, which this walk is already paying.
+ * BOTH SYSTEMS' WORKERS, always, whichever one is being started - and that is
+ * one list, because both batchers exec the same scripts/{hack,grow,weaken}.js
+ * and tell their reports apart by the port number in argv. When they had
+ * separate files, a set covering only the incoming system's left the outgoing
+ * one's batches running network-wide.
  *
  * SHARE WORKERS ARE DELIBERATELY SPARED. They are not in WORKER_LIST, and that
  * is not an oversight: none of the reasoning above applies to them. They are
@@ -193,7 +189,7 @@ function reachableHosts(ns) {
  * nothing. Turning share off is the marker's job - see scripts/sharemode.js.
  */
 function killOrphanWorkers(ns, log) {
-  const workers = new Set([...WORKER_LIST, ...CONT_WORKER_LIST].map(normPath));
+  const workers = new Set(WORKER_LIST.map(normPath));
   let killed = 0;
   let threads = 0;
 
@@ -332,6 +328,16 @@ export async function main(ns) {
     `boot: ${mode}, tick ${Math.round(tickMs / 1000)}s, manager target ` +
       `${target ?? "auto"}${noCloud ? ", cloud off" : ""}${noManager ? ", manager off" : ""}`,
   );
+  // ONE BOOT. Two supervisors with different flags each read the other's
+  // manager as a rival and kill it, every tick, forever - a live run swapped
+  // shotgun and continuous once a minute and killed 262 worker threads each
+  // time. The NEWEST wins, not the oldest as killDuplicates keeps for services:
+  // the boot just typed is the one carrying the flags the user wants now. The
+  // older boot's manager is then an ordinary swap for the loop below.
+  for (const p of instancesOf(ns, BOOT)) {
+    if (p.pid !== ns.pid && ns.kill(p.pid)) log(`stopped an older boot (pid ${p.pid}) - this one supersedes it`);
+  }
+
   let lastRootStamp = ns.read(ROOT_MARKER);
   let firstPass = true;
   // Say "fleet is maxed" once, not every tick - the whole point of this change
@@ -340,13 +346,16 @@ export async function main(ns) {
 
   do {
     // -- 0. did the manager die? -------------------------------------------
-    // Of the CHOSEN system's pair. A manager of the other system running is not
-    // this one surviving - it is a rival that ensureOneManager is about to kill,
-    // so counting it here would report a live manager on exactly the tick it
-    // exited.
+    // Any of the CHOSEN system's files. A manager of the other system running is
+    // not this one surviving - it is a rival that ensureOneManager is about to
+    // kill, so counting it here would report a live manager on exactly the tick
+    // it exited.
+    //
+    // A list, not .analyze/.formulas: MANAGERS became arrays when the shotgun's
+    // pair merged, this kept reading the old fields, both came back undefined,
+    // and it logged an exit every tick while the manager ran fine.
     const pair = MANAGERS[mode];
-    const managerDied = !firstPass && !noManager
-      && !isUp(ns, pair.analyze) && !isUp(ns, pair.formulas);
+    const managerDied = !firstPass && !noManager && !pair.some((f) => isUp(ns, f));
     if (managerDied) log("manager is not running - it exited since the last tick");
 
     // Re-checked every tick, not once at startup: Formulas.exe is lost on every

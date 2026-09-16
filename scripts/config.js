@@ -435,6 +435,11 @@ export const TARGET_SWITCH_MARGIN = 1.25;
 /**
  * Worker script paths, keyed by op KIND (not by batch slot).
  *
+ * BOTH batchers exec these - scripts/continuous/config.js re-exports them. The
+ * two systems' code for them was identical, and each passes its own report port
+ * as an argument, so one set of files serves both and boot's orphan kill needs
+ * one list.
+ *
  * Per-thread RAM (verified against the fork's docs): 1.60 base plus
  * hack 0.10 / grow 0.15 / weaken 0.15. Port writes and ns.args are free.
  * => hack 1.70, grow 1.75, weaken 1.75.

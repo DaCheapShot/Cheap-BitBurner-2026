@@ -11,11 +11,13 @@ import { SHARE_WORKER, WORKER_LIST } from "scripts/continuous/config";
  * ---------------------------------------------------------------------------
  * Why this exists at all
  *
- * scripts/deploy.js broadcasts only DEPLOY_LIST from scripts/config.js, and
- * this system may not edit that file. So it copies its own workers, or exec
- * returns a bare 0 on every host but home - the same value exec returns when
- * the script is absent, which is why that failure cost the shotgun two live
- * runs to diagnose.
+ * The workers are the shotgun's own files, and scripts/deploy.js broadcasts
+ * them - but only when boot runs it, which is when root.js roots something
+ * NEW. A server cloud.js buys arrives rooted, so it never fires that trigger,
+ * and a manager started by hand may run with no boot at all. So this copies
+ * them itself, or exec returns a bare 0 on every host but home - the same value
+ * exec returns when the script is absent, which is why that failure cost the
+ * shotgun two live runs to diagnose.
  *
  * ---------------------------------------------------------------------------
  * Why it always copies instead of checking first
@@ -45,13 +47,11 @@ import { SHARE_WORKER, WORKER_LIST } from "scripts/continuous/config";
 /**
  * Everything a host needs before this manager can exec on it.
  *
- * scripts/share.js rides along, and it is not this system's file. It belongs to
- * scripts/deploy.js, which broadcasts on a trigger this system cannot fire:
- * deploy runs when root.js roots something NEW, and buying a server roots
- * nothing - purchased servers arrive rooted. So a host bought by cloud.js while
- * the batcher runs is admitted by ServerPool.sync, gets the three batch
- * workers, and would be permanently unable to take its share quota. lib/share.js
- * would report it under `noFile` for ever, honestly and uselessly.
+ * scripts/share.js rides along for the same reason as the batch workers: a host
+ * bought by cloud.js while the batcher runs is admitted by ServerPool.sync and
+ * never reached by scripts/deploy.js, so without it the host would be
+ * permanently unable to take its share quota. lib/share.js would report it
+ * under `noFile` for ever, honestly and uselessly.
  *
  * A path string, not an import: importing share.js would cost 2.40 GB for
  * ns.share, which this file never calls.
@@ -107,7 +107,7 @@ export function describeDeploy(result, totalHosts) {
       `${head}\n` +
       `  EVERY host failed, so the problem is almost certainly the SOURCE, not the hosts: ` +
       `the workers are missing from home. Check the filesync extension pushed ` +
-      `scripts/continuous/ - it fails silently, and pushAllOnConnection only backfills ` +
+      `scripts/hack.js, grow.js and weaken.js - it fails silently, and pushAllOnConnection only backfills ` +
       `on connect.`
     );
   }

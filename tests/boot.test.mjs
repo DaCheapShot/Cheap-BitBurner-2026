@@ -17,7 +17,7 @@ const TRANSIENT = ["scripts/root.js", "scripts/deploy.js"];
  */
 async function runBoot({
   args = [], files = {}, running = [], workers = [], ticks = 3, hasFormulas = false,
-  inGang = false, onTprint = () => {},
+  inGang = false, onTprint = () => {}, onTick = (_tick, procs) => procs,
 }) {
   const { main } = (await loadScripts())["boot"];
   let procs = running.map((f, i) => ({ filename: f, host: "home", pid: i + 1, args: [], threads: 1 }));
@@ -30,17 +30,21 @@ async function runBoot({
   let tick = 0;
   const launched = [];
   const killed = [];
+  const logs = [];
   const store = { ...files };
   if (hasFormulas) store["home:Formulas.exe"] = "x";
 
   const ns = {
     args, disableLog: () => {}, ui: { openTail: () => {} },
+    // Boot's own pid, above anything in `running`: the boot under test is the
+    // one just typed, so every boot.js already listed there is older.
+    pid: 9000,
     // Default OFF, which is every BitNode before gangs are available. boot
     // gates the gang service on this rather than starting it blind: without a
     // gang the supervisor exits at once, and ensureService would relaunch it
     // every tick forever.
     gang: { inGang: () => inGang },
-    print: () => {}, tprint: (msg) => onTprint(String(msg)),
+    print: (msg) => logs.push(String(msg)), tprint: (msg) => onTprint(String(msg)),
     read: (f) => store[f] ?? "",
     write: (f, d) => { store[f] = d; },
     fileExists: (f, host = "home") => Boolean(store[`${host}:${f}`]),
@@ -56,13 +60,13 @@ async function runBoot({
     sleep: async (ms) => {
       for (const p of procs) if (TRANSIENT.includes(p.filename)) p.life--;
       procs = procs.filter((p) => !TRANSIENT.includes(p.filename) || (p.life ?? 99) > 0);
-      if (ms >= 1000) { tick++; if (tick >= ticks) throw new Error("STOP"); }
+      if (ms >= 1000) { tick++; if (tick >= ticks) throw new Error("STOP"); procs = onTick(tick, procs); }
       await new Promise((r) => setTimeout(r, 1));
     },
   };
 
   try { await main(ns); } catch (e) { if (e.message !== "STOP") throw e; }
-  return { launched, killed, procs, store };
+  return { launched, killed, procs, store, logs };
 }
 
 /** A killed manager's batches, still running out on the network. */
@@ -70,13 +74,6 @@ const ORPHANS = [
   { filename: "scripts/hack.js", host: "p0", threads: 400 },
   { filename: "scripts/grow.js", host: "p0", threads: 900 },
   { filename: "scripts/weaken.js", host: "p1", threads: 200 },
-];
-
-/** The same, for the continuous batcher - different files, same damage. */
-const CONT_ORPHANS = [
-  { filename: "scripts/continuous/hack.js", host: "p0", threads: 400 },
-  { filename: "scripts/continuous/grow.js", host: "p0", threads: 900 },
-  { filename: "scripts/continuous/weaken.js", host: "p1", threads: 200 },
 ];
 
 /**
@@ -88,6 +85,36 @@ const CONT_ORPHANS = [
 const SHOTGUN = ["--shotgun"];
 
 export const tests = {
+  // Two boots with different flags each read the OTHER's manager as a rival and
+  // kill it, every tick, forever - a live run swapped shotgun and continuous
+  // once a minute, killing 262 threads of workers each time. The newest boot is
+  // the one just typed, so it wins; the old one's managers are then handled by
+  // the normal swap.
+  "a new boot stops any older boot": async () => {
+    const r = await runBoot({ running: ["scripts/boot.js"], ticks: 1 });
+    assert(r.killed.includes("scripts/boot.js"), `the older boot should be stopped, killed: ${r.killed}`);
+    assert(!r.procs.some((p) => p.filename === "scripts/boot.js"), "an older boot survived");
+  },
+
+  // MANAGERS became a list per system and this check kept reading .analyze and
+  // .formulas off it - both undefined - so it logged "manager is not running"
+  // every tick while the manager ran fine, and cried wolf on the one line whose
+  // job is to notice a real exit.
+  "a running manager is not reported as exited": async () => {
+    const r = await runBoot({ ticks: 3 });
+    assert(!r.logs.some((l) => l.includes("is not running")),
+      `a live manager was reported dead: ${r.logs.filter((l) => l.includes("not running"))}`);
+  },
+
+  "a manager that did exit is reported": async () => {
+    // The manager dies on its own after the first tick.
+    const r = await runBoot({
+      ticks: 3,
+      onTick: (t, procs) => (t === 1 ? procs.filter((p) => !p.filename.includes("manager")) : procs),
+    });
+    assert(r.logs.some((l) => l.includes("is not running")), `the exit was not reported: ${r.logs}`);
+  },
+
   // Adding a worker file roots nothing, so ROOT_MARKER never moves, so deploy
   // never runs and the file sits on home while every host runs without it. The
   // only symptom is exec returning a bare 0 far away - share.js ran on one host
@@ -292,11 +319,11 @@ export const tests = {
   "switching to the shotgun clears the continuous workers": async () => {
     const r = await runBoot({
       args: SHOTGUN, hasFormulas: false,
-      running: ["scripts/continuous/manager.js"], workers: CONT_ORPHANS,
+      running: ["scripts/continuous/manager.js"], workers: ORPHANS,
     });
     assert(r.killed.includes("scripts/continuous/manager.js"),
       `the continuous manager should be stopped, killed: ${r.killed}`);
-    for (const w of CONT_ORPHANS) {
+    for (const w of ORPHANS) {
       assert(r.killed.includes(w.filename),
         `${w.filename} should have been killed, killed: ${r.killed}`);
     }
@@ -312,7 +339,7 @@ export const tests = {
     const r = await runBoot({
       args: SHOTGUN, hasFormulas: false,
       running: ["scripts/continuous/manager.js"],
-      workers: [...CONT_ORPHANS, { filename: "scripts/share.js", host: "p1", threads: 2921 }],
+      workers: [...ORPHANS, { filename: "scripts/share.js", host: "p1", threads: 2921 }],
     });
     assert(!r.killed.includes("scripts/share.js"),
       `share workers must survive a cross-system swap, killed: ${r.killed}`);

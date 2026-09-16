@@ -17,13 +17,13 @@ import {
  *   ns.getPortHandle 0
  *
  * ---------------------------------------------------------------------------
- * Why this is a port and not a rewrite
+ * ONE COPY, BOTH BATCHERS
  *
- * scripts/managerCore.js has done this for the shotgun for a long time, and
- * every rule below is one it learned the expensive way. This tree may not
- * import from scripts/, so the logic is copied - but the reasoning is copied
- * with it, because a "cleaner" version of any one of these is a bug that
- * already happened:
+ * scripts/managerCore.js imports shareCensus, planShare and topUpShare from
+ * here. They began as a port of the shotgun's, which learned every rule below
+ * the expensive way; the two copies had become identical, so the shotgun's was
+ * deleted. serviceShare stays per batcher - its logging and cadence differ.
+ * A "cleaner" version of any one of these rules is a bug that already happened:
  *
  *   - placement is PROPORTIONAL, not biggest-host-first
  *   - both passes are PLANNED before anything execs
