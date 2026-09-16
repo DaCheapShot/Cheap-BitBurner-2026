@@ -14,6 +14,20 @@
  */
 export const PORT_CAPACITY = 50;
 
+import { pathToFileURL } from "node:url";
+import { mirrorScripts } from "./harness.mjs";
+
+/**
+ * A body may import the repo's pure modules ("scripts/gang/math.js"), and a
+ * data: URL has no base to resolve that against. Pointed at one mirrored copy
+ * of scripts/, made on first use, so the body runs against the real module.
+ */
+let mirrorUrl = null;
+export function resolveBodyImports(src) {
+  mirrorUrl ??= pathToFileURL(mirrorScripts("bbrpc-")).href;
+  return src.replace(/from\s+"\/?scripts\/([\w\-/]+?)(?:\.js)?"/g, (_m, t) => `from "${mirrorUrl}/${t}.mjs"`);
+}
+
 export function makeNs(o = {}) {
   const hosts = o.hosts ?? { home: 1024 };
   const used = Object.fromEntries(Object.keys(hosts).map((h) => [h, 0]));
@@ -177,7 +191,7 @@ export function makeNs(o = {}) {
       const src = files[file];
       if (src !== undefined && filename.startsWith("tmp/rpc-")) {
         void (async () => {
-          const mod = await import("data:text/javascript," + encodeURIComponent(src));
+          const mod = await import("data:text/javascript," + encodeURIComponent(resolveBodyImports(src)));
           await mod.main({ ...ns, args });
         })();
       }

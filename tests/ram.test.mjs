@@ -28,7 +28,7 @@ const COST = {
   //
   // respectForNextRecruit is the one to watch: it is BOTH a 1.00 GB function
   // and a field on GangGenInfo, so `info.respectForNextRecruit` costs a full
-  // API call for a number already in hand. tick.js reads it as a computed key
+  // API call for a number already in hand. gang.js's tick body reads it as a computed key
   // for that reason. getMemberInformation's `hack` field is the same class of
   // trap at 0.10 GB, which is what STAT_KEYS in gang/config.js exists to dodge.
   createGang: 1, getMemberNames: 1, canRecruitMember: 1, getRecruitsAvailable: 1,
@@ -303,45 +303,29 @@ export const tests = {
     assert(Math.abs(ram - 11.55) < 0.011, `expected 11.55 GB, got ${ram.toFixed(2)}`);
   },
 
-  // The whole reason the gang subsystem is split into a scheduler and four
-  // transients. ns.gang is priced off GangApiBase = 4, and the surface this
-  // needs comes to ~37 GB held together - which would not start on a fresh
-  // BitNode's 32 GB home beside boot (3.60), cloud (5.75) and a continuous
-  // manager (9.40+).
+  // ns.gang is priced off GangApiBase = 4, and the surface the gang needs comes
+  // to ~37 GB held together - which would not start on a fresh BitNode's 32 GB
+  // home beside boot, cloud and the continuous manager. So gang.js holds no
+  // gang call at all: every one lives in an rpc body, billed to a transient for
+  // as long as it runs. It was four transient FILES and a 2.80 GB scheduler;
+  // ps went with the files, because rpc() waits on a reply rather than a pid.
   //
-  // Exact pins rather than a ceiling: every one of these is a fixed set of API
-  // calls, and a figure that moves means a call was added, not that the
-  // controller grew. The numbers to hold are the SUM of the resident and the
-  // largest transient (2.80 + 14.70 = 17.50), since gang.js awaits each one.
-  "each gang transient stays at its pinned cost": () => {
-    const pinned = {
-      "gang/gang": 2.80,      // 1.60 + run 1.00 + ps 0.20; holds no gang API at all
-      "gang/tick": 11.60,     // + getGangInformation 2 + getMemberNames 1 + getMemberInformation 2
-                              //   + getTaskStats 1 + setMemberTask 2 + recruitMember 2
-      "gang/ascend": 8.60,    // + getMemberNames 1 + getAscensionResult 2 + ascendMember 4
-      "gang/equip": 14.70,    // + getMemberNames 1 + getMemberInformation 2 + getEquipmentCost 2
-                              //   + getEquipmentType 2 + getEquipmentStats 2 + purchaseEquipment 4
-                              //   + getServerMoneyAvailable 0.10
-      "gang/war": 11.60,      // + getGangInformation 2 + getAllGangInformation 2
-                              //   + getChanceToWinClash 4 + setTerritoryWarfare 2
-      "gang/create": 2.60,    // + createGang 1
-    };
-    for (const [entry, want] of Object.entries(pinned)) {
-      const ram = ramOf(entry);
-      assert(Math.abs(ram - want) < 0.011,
-        `${entry}.js: expected ${want.toFixed(2)} GB, got ${ram.toFixed(2)}`);
-    }
+  // The bodies are string literals to this model and cannot be priced here -
+  // tests/rpc.test.mjs parses them, and ramreport.js is how their transients'
+  // real cost comes back from the game.
+  "gang.js holds no gang API: 2.60 GB": () => {
+    const ram = ramOf("gang/gang");
+    assert(Math.abs(ram - 2.60) < 0.011, `expected 2.60 GB (1.60 + run 1.00), got ${ram.toFixed(2)}`);
   },
 
-  // config.js, math.js and marker.js are imported by every transient, so one
-  // billed identifier in them is charged four or five times over. marker.js is
-  // allowed ns.read, which is 0 GB, exactly as calib.js is.
+  // config.js and math.js are imported by every rpc body, so one billed
+  // identifier in them is charged to every gang transient.
   "the gang's shared modules are free to import": () => {
-    for (const mod of ["gang/config", "gang/math", "gang/marker", "gang/report"]) {
+    for (const mod of ["gang/config", "gang/math"]) {
       const ram = ramOf(mod);
       assert(Math.abs(ram - BASE) < 0.011,
-        `${mod}.js costs ${(ram - BASE).toFixed(2)} GB to import; it must be 0 - it is ` +
-          `imported by every gang transient`);
+        `${mod}.js costs ${(ram - BASE).toFixed(2)} GB to import; it must be 0 - every gang ` +
+          `rpc body imports it`);
     }
   },
 
@@ -392,8 +376,7 @@ export const tests = {
     for (const entry of ["boot", "manager", "capacity", "cloud", "deploy",
                          "root", "sharemode", "connectme", "prep",
                          "continuous/manager", "continuous/servers",
-                         "gang/gang", "gang/tick", "gang/ascend",
-                         "gang/equip", "gang/war", "gang/create"]) {
+                         "gang/gang"]) {
       for (const mod of closure(entry)) seen.add(mod);
     }
 
@@ -428,8 +411,7 @@ export const tests = {
     for (const e of ["boot", "manager", "capacity", "cloud", "deploy",
                      "root", "sharemode", "connectme", "prep",
                      "continuous/manager", "continuous/servers",
-                     "gang/gang", "gang/tick", "gang/ascend", "gang/equip", "gang/war",
-                     "gang/create"]) {
+                     "gang/gang"]) {
       for (const mod of closure(e)) entries.add(mod);
     }
 

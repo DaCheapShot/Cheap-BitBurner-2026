@@ -18,9 +18,9 @@
  * self-containment rule exists to stop RAM contamination, which a shared
  * 1.00 GB module does not cause: it costs exactly what two copies would.
  *
- * NOT for cheap or short-lived scripts. cloud.js, root.js, deploy.js and the
- * four gang/ transients already hold their RAM for under a second - routing
- * them through here saves nothing and adds 1.00 GB each. Never for the workers
+ * NOT for cheap or short-lived scripts. cloud.js, root.js and deploy.js already
+ * hold their RAM for under a second - routing them through here saves nothing
+ * and adds 1.00 GB each. Never for the workers
  * (hack/grow/weaken/share): they are charged per thread and they ARE the call.
  *
  * Usage:
@@ -78,7 +78,7 @@ function digest(text) {
  * The body's own throw is caught HERE, inside the transient, and returned as a
  * value. A transient that dies takes its log window with it a few hundred ms
  * later, so an uncaught error would reach the caller as a timeout naming
- * nothing - the same trap gang/report.js exists to close.
+ * nothing. gang.js leans on this: its bodies' throws are its only error log.
  */
 export function source(body) {
   const hoisted = body.match(IMPORT_LINE) ?? [];

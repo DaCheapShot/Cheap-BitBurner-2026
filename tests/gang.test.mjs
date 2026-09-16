@@ -68,6 +68,66 @@ function member(name, v, over = {}) {
 
 const GANG = { respect: 1000, wantedLevel: 1000, territory: 0.5 };
 
+/**
+ * Run gang.js's main for `updates` gang updates against a fake gang API.
+ *
+ * The mock's ns.run really executes each generated rpc transient, so the bodies
+ * run for real and import the real gang/math.js. `calls` records every mutating
+ * API call, plus any read named in `throwIn`, which throws instead.
+ */
+async function driveGang(mods, {
+  updates = 30, roster = 4, respectForNextRecruit = 5000, isHacking = false,
+  inGang = true, args = [], throwIn = null, ascension = null,
+} = {}) {
+  const calls = [];
+  const members = Array.from({ length: roster }, (_, i) => member(`goon-${i}`, 300));
+  let joined = inGang;
+  let n = 0;
+  const api = (name, fn) => (...a) => {
+    if (name === throwIn) throw new Error(`${name} exploded`);
+    return fn(...a);
+  };
+  const gang = {
+    inGang: () => joined,
+    getBonusTime: () => 0,
+    nextUpdate: async () => {
+      if (++n > updates) throw new Error("STOP");
+      return 2000;
+    },
+    createGang: (f) => { calls.push(`createGang:${f}`); joined = true; return true; },
+    getGangInformation: api("getGangInformation", () => ({
+      faction: "Slum Snakes", isHacking, respect: 1e6, wantedLevel: 1, territory: 0.2, power: 10,
+      territoryWarfareEngaged: false, respectForNextRecruit,
+    })),
+    getAllGangInformation: api("getAllGangInformation", () => ({
+      "Slum Snakes": { territory: 0.2 }, Tetrads: { territory: 0.3 },
+    })),
+    getChanceToWinClash: () => 0.9,
+    setTerritoryWarfare: () => { calls.push("setTerritoryWarfare"); },
+    getMemberNames: () => members.map((m) => m.name),
+    recruitMember: () => false,
+    getMemberInformation: (name) => members.find((m) => m.name === name),
+    getTaskNames: () => TASKS.map((t) => t.name),
+    getTaskStats: (name) => TASKS.find((t) => t.name === name),
+    setMemberTask: () => { calls.push("setMemberTask"); return true; },
+    getAscensionResult: () => ascension,
+    ascendMember: () => { calls.push("ascendMember"); return true; },
+    getEquipmentNames: () => ["Katana"],
+    getEquipmentCost: () => 12e6,
+    getEquipmentType: () => "Weapon",
+    getEquipmentStats: () => ({ str: 1.1 }),
+    purchaseEquipment: () => { calls.push("purchaseEquipment"); return true; },
+  };
+  const ns = makeNs({ extra: { gang, args } });
+  try {
+    await mods["gang/gang"].main(ns);
+    assert(false, "the loop should only end by the STOP sentinel");
+  } catch (e) {
+    if (e.message !== "STOP") throw e;
+  }
+  return { ns, calls };
+}
+
 export const tests = {
   // Transcribed flat from the game source. statWeight for TRAFFICK at 300 in
   // every stat is (15+20+20+20+0+25)/100 * 300 = 300, less 4 * 32 = 172.
@@ -372,7 +432,7 @@ export const tests = {
     assert(buys.every((b) => b.item === "cheap"), "cheapest first, so nobody gets the dear one");
   },
 
-  // equip.js reports a zero-buy pass by re-deriving the shortlist, so the two
+  // The equip body reports a zero-buy pass by re-deriving the shortlist, so the two
   // must agree. Duplicating the filter in the transient would drift from the
   // planner and hand the log a cause that is not the real one.
   "the eligibility the log reports is the one the planner used": async () => {
@@ -476,214 +536,79 @@ export const tests = {
       `a hacking gang considers everything, cheapest first, got ${hacking}`);
   },
 
-  // Missing, corrupt and schema-invalid all collapse to null, exactly as
-  // calib.js does - a partial object would reach the respect guard as NaN and
-  // compare false against every bound.
-  "the marker reader refuses anything it cannot fully parse": async () => {
-    const { readMarker } = (await loadScripts())["gang/marker"];
-    const { GANG_MARKER } = (await loadScripts())["gang/config"];
-
-    assert(readMarker(makeNs({})) === null, "no file -> null");
-    assert(readMarker(makeNs({ files: { [GANG_MARKER]: "money\n1\n2" } })) === null,
-      "too few lines -> null");
-    assert(readMarker(makeNs({ files: { [GANG_MARKER]: "money\nx\n2\n3\n0.5\n99" } })) === null,
-      "a non-numeric field -> null, not NaN");
-    assert(readMarker(makeNs({ files: { [GANG_MARKER]: "\n1\n2\n3\n0.5\n99" } })) === null,
-      "no phase -> null");
-
-    const ok = readMarker(makeNs({ files: { [GANG_MARKER]: "money\n1\n2\n3\n0.5\n99" } }));
-    assert(ok && ok.phase === "money" && ok.nextRecruitAt === 2 && ok.memberCount === 3,
-      "a well-formed marker should parse");
-
-    // The full-roster marker. Gang.respectForNextRecruit() returns Infinity at
-    // MaximumGangMembers, so this is what tick.js writes for the whole rest of
-    // the run - and a finiteness check on the field killed ascend.js and
-    // equip.js from the moment the 12th member joined, with a log line that
-    // blamed tick.js for never having run.
-    const full = readMarker(
-      makeNs({ files: { [GANG_MARKER]: "territory\n1600000\nInfinity\n12\n0.143\n99" } }),
-    );
-    assert(full !== null, "a full roster writes Infinity and the marker must still parse");
-    assert(full.nextRecruitAt === Infinity, "Infinity must survive as Infinity, not become NaN or 0");
-    assert(full.memberCount === 12 && full.phase === "territory", "the rest of a full-roster marker parses");
-
-    assert(readMarker(makeNs({ files: { [GANG_MARKER]: "money\n1\nNaN\n3\n0.5\n99" } })) === null,
-      "NaN is still fatal - an unreachable threshold is legal, an unparseable one is not");
-
-    // isHacking is line 7 and is NOT part of the length guard. A marker written
-    // before the field existed is six lines long and was a combat gang, which
-    // is what undefined has to read as - bumping the guard instead would make
-    // every reader skip a whole sweep on the first tick after an update.
-    assert(ok.isHacking === false, "a six-line marker predates the field and means combat");
-    const hacking = readMarker(makeNs({ files: { [GANG_MARKER]: "money\n1\n2\n3\n0.5\n99\n1" } }));
-    assert(hacking && hacking.isHacking === true, "a 1 on line 7 is a hacking gang");
-    const combat = readMarker(makeNs({ files: { [GANG_MARKER]: "money\n1\n2\n3\n0.5\n99\n0" } }));
-    assert(combat && combat.isHacking === false, "a 0 on line 7 is a combat gang");
-  },
-
-  // The RAM argument for the whole split. Fired unawaited these would stack to
-  // ~46 GB and the cheap ones would fail to start behind the expensive one.
-  "the supervisor runs one transient at a time, on the configured cadence": async () => {
+  // The supervisor, driven for real: every body runs through rpc() against a
+  // fake gang API, importing the real gang/math.js. Awaited one at a time is the
+  // RAM argument - rpc() would throw on overlap anyway.
+  "the supervisor runs every body on its cadence, tick first": async () => {
     const mods = await loadScripts();
     const cfg = mods["gang/config"];
+    const { ns } = await driveGang(mods, { updates: 30 });
 
-    const launched = [];
-    const alive = new Set();
-    let updates = 0;
-    let nextPid = 1;
+    const count = (tag) => ns._log.filter((l) => l.includes(`  ${tag}: `)).length;
+    assert(count("tick") === Math.floor(30 / cfg.TICK_EVERY), `tick ran ${count("tick")} times: ${ns._log}`);
+    assert(count("war") === Math.floor(30 / cfg.WAR_EVERY), "war cadence");
+    assert(count("ascend") === Math.floor(30 / cfg.ASCEND_EVERY), "ascend cadence");
+    assert(count("equip") === Math.floor(30 / cfg.EQUIP_EVERY), "equip cadence");
 
-    const ns = makeNs({
-      extra: {
-        run: (file) => {
-          assert(alive.size === 0,
-            `${file} started while another transient was still running - the peak would be ` +
-              `the SUM of them, which is what the split exists to avoid`);
-          launched.push(file);
-          const pid = nextPid++;
-          alive.add(pid);
-          return pid;
-        },
-        // Reports the process once, then lets it exit - so runOne has to
-        // actually poll and wait rather than finding an empty table.
-        ps: () => {
-          const live = [...alive].map((pid) => ({ pid, filename: "x", host: "home" }));
-          alive.clear();
-          return live;
-        },
-        gang: {
-          inGang: () => true,
-          getBonusTime: () => 0,
-          nextUpdate: async () => {
-            if (++updates > 30) throw new Error("STOP");
-            return 2000;
-          },
-        },
-      },
+    // tick produces the state ascend and equip decide from, so on a pass where
+    // they coincide it must go first - and none of them may find it missing.
+    const firstAscend = ns._log.findIndex((l) => l.includes("  ascend: "));
+    assert(ns._log.slice(0, firstAscend).some((l) => l.includes("  tick: ")),
+      "tick must run before the bodies that read its state");
+    assert(!ns._log.some((l) => l.includes("no tick yet")), `a body ran without state: ${ns._log}`);
+    assert(!ns._log.some((l) => l.includes("WARN")), `a body failed: ${ns._log.filter((l) => l.includes("WARN"))}`);
+    assert(ns._log.some((l) => l.includes("PHASE -> ")), "the phase line should be logged");
+  },
+
+  // What the port and the report-on-every-path rule existed for. rpc() catches
+  // a body's throw INSIDE the transient and hands it back, so an exception is a
+  // named WARN - never silence - and the loop carries on.
+  "a body that throws is logged by name and does not stop the supervisor": async () => {
+    const mods = await loadScripts();
+    const { ns } = await driveGang(mods, { updates: 20, throwIn: "getAllGangInformation" });
+    assert(ns._log.some((l) => l.includes("WARN: war failed") && l.includes("getAllGangInformation exploded")),
+      `the throw should be named, got ${ns._log}`);
+    const lastTick = ns._log.map((l) => l.includes("  tick: ")).lastIndexOf(true);
+    const firstWarn = ns._log.findIndex((l) => l.includes("WARN: war failed"));
+    assert(lastTick > firstWarn, "tick should keep running after war failed");
+  },
+
+  // Gang.respectForNextRecruit() is Infinity at a full roster, and JSON has no
+  // Infinity - it would arrive as null. A full roster killed ascend and equip
+  // once already (commit 7951306), when the same number went through a file.
+  "a full roster crosses the rpc boundary and still ascends": async () => {
+    const mods = await loadScripts();
+    const { MAX_MEMBERS, ASCEND_MULT_THRESHOLD } = mods["gang/config"];
+    const big = ASCEND_MULT_THRESHOLD + 0.5;
+    const { ns, calls } = await driveGang(mods, {
+      updates: 15, roster: MAX_MEMBERS, respectForNextRecruit: Infinity,
+      ascension: { respect: 10, hack: 1, str: big, def: big, dex: big, agi: big, cha: 1 },
     });
-
-    try {
-      await mods["gang/gang"].main(ns);
-      assert(false, "the loop should only end by the STOP sentinel");
-    } catch (e) {
-      assert(e.message === "STOP", `unexpected failure: ${e.message}`);
-    }
-
-    const count = (f) => launched.filter((x) => x === f).length;
-    assert(count(cfg.GANG_TICK) === Math.floor(30 / cfg.TICK_EVERY),
-      `tick ran ${count(cfg.GANG_TICK)} times in 30 updates`);
-    assert(count(cfg.GANG_WAR) === Math.floor(30 / cfg.WAR_EVERY), "war cadence");
-    assert(count(cfg.GANG_ASCEND) === Math.floor(30 / cfg.ASCEND_EVERY), "ascend cadence");
-    assert(count(cfg.GANG_EQUIP) === Math.floor(30 / cfg.EQUIP_EVERY), "equip cadence");
-
-    // tick writes the marker the other three read, so on a pass where several
-    // coincide it must go first or they work from last pass's numbers.
-    const firstOfPass15 = launched.indexOf(cfg.GANG_ASCEND);
-    assert(launched.lastIndexOf(cfg.GANG_TICK, firstOfPass15) < firstOfPass15,
-      "tick.js must run before the transients that read its marker");
+    assert(ns._log.some((l) => l.includes("roster full")), `tick should say the roster is full: ${ns._log}`);
+    assert(calls.filter((c) => c === "ascendMember").length === MAX_MEMBERS,
+      `every member should ascend, calls: ${calls.filter((c) => c === "ascendMember").length}`);
   },
 
-  // Port 1 is the shotgun's report port, 2 the share gate, 3 the continuous
-  // batcher's. gang.js DRAINS its port with read(), which removes the message,
-  // so sharing any of those would eat reports belonging to something else -
-  // corruption, not noise.
-  "the gang report port collides with nothing else": async () => {
+  // tick assigns combat tasks only; on a hacking gang it would filter every task
+  // out and assign nobody. Refusing is the honest answer.
+  "a hacking gang is refused, not mis-assigned": async () => {
     const mods = await loadScripts();
-    const { GANG_PORT } = mods["gang/config"];
-    const taken = {
-      REPORT_PORT: mods["config"].REPORT_PORT,
-      SHARE_PORT: mods["config"].SHARE_PORT,
-      CONT_REPORT_PORT: mods["continuous/config"].CONT_REPORT_PORT,
-    };
-    for (const [name, n] of Object.entries(taken)) {
-      assert(GANG_PORT !== n, `GANG_PORT ${GANG_PORT} is already ${name}`);
-    }
+    const { ns, calls } = await driveGang(mods, { updates: 5, isHacking: true });
+    assert(ns._log.some((l) => l.includes("REFUSED")), `should refuse: ${ns._log}`);
+    assert(!calls.includes("setMemberTask"), "no task may be set on a hacking gang");
   },
 
-  "reports are consumed, not peeked": async () => {
+  // Irreversible for the BitNode, so only ever by hand - and it replaces the
+  // separate create.js.
+  "--create founds the gang and then supervises it": async () => {
     const mods = await loadScripts();
-    const { report, drainReports } = mods["gang/report"];
-    const ns = makeNs({});
-
-    assert(drainReports(ns).length === 0, "an empty port drains to nothing, not to NULL PORT DATA");
-
-    report(ns, "tick", "one");
-    report(ns, "equip", "two");
-    const first = drainReports(ns);
-    assert(first.length === 2 && first[0] === "tick: one" && first[1] === "equip: two",
-      `expected both lines tagged and in order, got ${JSON.stringify(first)}`);
-    assert(drainReports(ns).length === 0,
-      "a drained port must be empty - read() removes, and a second drainer would " +
-        "destroy the first one's reports");
-  },
-
-  // The whole point of the port: a transient's ns.print goes to ITS OWN log
-  // window, which dies with the process, so the supervisor's tail showed a
-  // phase line and nothing else.
-  "what a transient reports reaches the supervisor's log": async () => {
-    const mods = await loadScripts();
-    const { report } = mods["gang/report"];
-    const cfg = mods["gang/config"];
-
-    let updates = 0;
-    const ns = makeNs({
-      extra: {
-        // Stand in for the transient: report, then exit.
-        run: (file) => {
-          if (file === cfg.GANG_TICK) report(ns, "tick", "respect, 4 members");
-          return 1;
-        },
-        ps: () => [],
-        gang: {
-          inGang: () => true,
-          getBonusTime: () => 0,
-          nextUpdate: async () => {
-            if (++updates > cfg.TICK_EVERY) throw new Error("STOP");
-            return 2000;
-          },
-        },
-      },
+    const { ns, calls } = await driveGang(mods, {
+      updates: 5, inGang: false, args: ["--create", "Slum Snakes"],
     });
-
-    try { await mods["gang/gang"].main(ns); } catch (e) {
-      assert(e.message === "STOP", `unexpected: ${e.message}`);
-    }
-    assert(ns._log.some((l) => l.includes("tick: respect, 4 members")),
-      `the transient's line should appear in the supervisor's log, got ${JSON.stringify(ns._log)}`);
+    assert(calls.includes("createGang:Slum Snakes"), `createGang should get the faction: ${calls}`);
+    assert(ns._log.some((l) => l.includes("  tick: ")), "the supervisor should run once the gang exists");
   },
 
-  // Every transient reports on EVERY path, so silence is not a quiet pass - it
-  // is an exception thrown before the report, with its log window already gone.
-  "a transient that reports nothing is called out, not ignored": async () => {
-    const mods = await loadScripts();
-    const cfg = mods["gang/config"];
-
-    let updates = 0;
-    const ns = makeNs({
-      extra: {
-        run: () => 1, // ran, exited, said nothing
-        ps: () => [],
-        gang: {
-          inGang: () => true,
-          getBonusTime: () => 0,
-          nextUpdate: async () => {
-            if (++updates > cfg.TICK_EVERY) throw new Error("STOP");
-            return 2000;
-          },
-        },
-      },
-    });
-
-    try { await mods["gang/gang"].main(ns); } catch (e) {
-      assert(e.message === "STOP", `unexpected: ${e.message}`);
-    }
-    assert(ns._log.some((l) => l.includes("reported nothing")),
-      `silence must be reported as a probable throw, got ${JSON.stringify(ns._log)}`);
-  },
-
-  // A transient that only spoke on the interesting path is why this was asked
-  // for in the first place: war.js logged only on a state CHANGE, so "why are
-  // we not taking territory" had no answer in the log, which is the question
-  // asked most often.
   // "$5.43e+7" is unreadable in a log. ns.format.number is the game's OWN
   // formatter at 0 GB - the same one the UI uses, and it honours the player's
   // Numeric Display settings, which nothing hand-rolled can do.
@@ -743,32 +668,12 @@ export const tests = {
     }
   },
 
-  "no transient can return without reporting": () => {
-    const dir = path.resolve(import.meta.dirname, "..", "scripts", "gang");
-    for (const f of ["tick.js", "ascend.js", "equip.js", "war.js"]) {
-      const src = fs.readFileSync(path.join(dir, f), "utf8")
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/\/\/.*$/gm, "");
-      assert(!/\bns\.print\s*\(/.test(src),
-        `gang/${f} calls ns.print - that writes to its OWN log window, which dies with the ` +
-          `process. Use report() so the supervisor sees it.`);
-      // Every early return must have reported first, so count reports against
-      // returns: one per bail-out plus the final one.
-      const returns = (src.match(/^\s*return;/gm) ?? []).length;
-      const reports = (src.match(/\breport\s*\(\s*ns\s*,/g) ?? []).length;
-      assert(reports > returns,
-        `gang/${f} has ${returns} early returns but only ${reports} report() calls - ` +
-          `some path exits silently, and silence is read as a thrown script`);
-    }
-  },
-
   "a pid of 0 is survivable, not fatal": async () => {
     const mods = await loadScripts();
     let updates = 0;
     const ns = makeNs({
       extra: {
         run: () => 0, // home is full - normal early in a BitNode
-        ps: () => [],
         gang: {
           inGang: () => true,
           getBonusTime: () => 0,
@@ -789,15 +694,14 @@ export const tests = {
     }
   },
 
-  // Parsing, not behaviour. Nothing else in this repo parses tick.js, ascend.js,
-  // equip.js, war.js or create.js - and `node --check` cannot: with no
-  // package.json, Node reads a bare .js as CommonJS and rejects `export`. So
-  // importing every one of them IS the syntax gate, and this test is what keeps
-  // a new file from quietly escaping it.
+  // Parsing, not behaviour. `node --check` cannot: with no package.json, Node
+  // reads a bare .js as CommonJS and rejects `export`. So importing every file
+  // IS the syntax gate, and this test keeps a new file from escaping it. The rpc
+  // bodies inside gang.js are parsed by tests/rpc.test.mjs.
   "every gang script parses and exports a main": async () => {
     const dir = path.resolve(import.meta.dirname, "..", "scripts", "gang");
     const mods = await loadScripts();
-    const ENTRIES = ["gang.js", "tick.js", "ascend.js", "equip.js", "war.js", "create.js"];
+    const ENTRIES = ["gang.js"];
     for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".js"))) {
       const mod = mods[`gang/${f.replace(/\.js$/, "")}`];
       assert(mod, `scripts/gang/${f} is not in harness.mjs's NESTED list, so nothing parses it`);

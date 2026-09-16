@@ -74,7 +74,7 @@ run scripts/sharemode.js                # share status: power, pool, what each f
 run scripts/sharemode.js on             # trade SHARE_FRACTION of the pool for faction rep
 run scripts/sharemode.js off            # every share thread exits within 10s
 run scripts/sharemode.js 0.5            # retune live, no restart
-run scripts/gang/create.js "Slum Snakes"  # found the gang, once, by hand
+run scripts/gang/gang.js --create "Slum Snakes"  # found the gang, once, by hand
 run scripts/gang/gang.js                # the gang supervisor (boot starts it too)
 run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
 node tests/run.mjs                      # run the test suite
@@ -261,13 +261,13 @@ Four things about it are load-bearing:
 - **Every quiet failure is made loud.** `ns.run` returns a bare 0 for BOTH "no free RAM on home"
   and "does not compile", so the throw names the file and both causes. The body's own throw is
   caught inside the transient and returned as a value, because a transient that dies takes its log
-  window with it a few hundred ms later — the same trap `gang/report.js` exists to close. A
+  window with it a few hundred ms later. A
   timed-out call clears its port first, so a late reply is never read as the next call's answer.
   A second call while one is in flight throws: the game's own concurrency check does NOT catch
   that, `nextWrite()` not being a blocking netscript call.
 
-**It only helps RESIDENT scripts.** `cloud.js`, `root.js`, `deploy.js` and the four `gang/`
-transients already hold their RAM for under a second, so routing them through here saves nothing
+**It only helps RESIDENT scripts.** `cloud.js`, `root.js` and `deploy.js` already hold their
+RAM for under a second, so routing them through here saves nothing
 and adds 1.00 GB each. Never for the workers — they are charged per thread and they ARE the call.
 
 **It is invisible to `ramOf()`**, which blanks string literals. `tests/rpc.test.mjs` extracts every
@@ -333,13 +333,11 @@ editor's RAM panel when one moves.
 | `continuous/manager.js` | entry: continuous core + `lib/math.js`, both backends | 11.55 |
 | `gang/config.js` | gang tunables, paths, STAT_KEYS | 0 |
 | `gang/math.js` | the game's gain formulas + every gang decision | 0 |
-| `gang/marker.js` | reads `/data/gang.txt` | 0 |
-| `gang/gang.js` | entry: resident scheduler, holds no gang API at all | 2.80 |
-| `gang/create.js` | entry: found the gang, hand-run once | 2.60 |
-| `gang/ascend.js` | transient: ascension decisions | 8.60 |
-| `gang/war.js` | transient: clash engage/disengage | 11.60 |
-| `gang/tick.js` | transient: recruit, tasks, wanted governor | 11.60 |
-| `gang/equip.js` | transient: equipment buying | 14.70 |
+| `gang/gang.js` | entry: resident supervisor; every gang call is an rpc body | 2.60 |
+| ↳ tick body | transient: recruit, tasks, wanted governor | 11.60 |
+| ↳ war body | transient: clash engage/disengage | 11.60 |
+| ↳ ascend body | transient: ascension decisions | 8.60 |
+| ↳ equip body | transient: equipment buying | 14.70 |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
@@ -601,9 +599,9 @@ from the terminal.
 
 ### The gang subsystem (`scripts/gang/`)
 
-Self-contained like `continuous/`: it never imports from `scripts/`, and `scripts/` reads exactly
-one 0 GB path constant out of it (`boot.js` imports `GANG_SERVICE`). It shares no RAM pool, no
-port and no marker with the batcher, so the two cannot interfere.
+Self-contained like `continuous/`: it imports only `scripts/rpc.js` from outside, and `scripts/`
+reads exactly one 0 GB path constant out of it (`boot.js` imports `GANG_SERVICE`). It shares no RAM pool, no
+port and no file with the batcher, so the two cannot interfere.
 
 **There is no tick to detect.** `ns.gang.nextUpdate()` is **0 GB** and resolves on the next gang
 update, returning the ms of gang time processed. The gang tick is **2 s** (`minCyclesToProcess =
@@ -611,42 +609,46 @@ update, returning the ms of gang time processed. The gang tick is **2 s** (`minC
 territory/power update separately every `CyclesPerTerritoryAndPowerUpdate = 100` cycles. Watching
 stats change to infer a timer measures the same thing worse and drifts.
 
-**A scheduler plus four transients, because the gang API is priced off `GangApiBase = 4`.** The
+**A supervisor plus rpc bodies, because the gang API is priced off `GangApiBase = 4`.** The
 surface this needs is ~37 GB held together, which would not start on a fresh BitNode's 32 GB home
 beside `boot.js`, `cloud.js` and a continuous manager. So `gang.js` holds **no gang call at all**
-(1.60 + `run` + `ps` = 2.80) and `ns.run`s the expensive ones. Each transient **reads and acts in
-one process**, so there is no port protocol, no data handoff and nothing to get out of step.
-`runOne` **awaits** each — that is the whole argument; fired unawaited they stack to ~46 GB.
-They run on home only and are never `scp`'d, so the "a worker's imports must be deployed with it"
-trap does not apply here.
+(1.60 + `run` = 2.60): every one lives in one of four template-literal bodies (tick, war, ascend,
+equip) run through `rpc()`, each billed to its own transient for as long as it runs. Each body
+**reads and acts in one process**, so no decision is split across a boundary, and every decision is
+a call into `gang/math.js`. The bodies are awaited one at a time — that is the whole RAM argument;
+together they would stack to ~46 GB — and `rpc()` throws on overlap anyway.
 
-`/data/gang.txt` exists only so `ascend.js` and `equip.js` can skip a 2.00 GB
-`getGangInformation` for three numbers. `marker.js` collapses missing, corrupt and schema-invalid to `null`, same idiom.
+**Body imports are spelled `"/scripts/gang/math.js"`, with the leading slash.** The game resolves
+it root-absolute like the bare form, but the test harness's import rewriter and `ram.test`'s
+import-follower both match only `"scripts/..."` — and both scan template literals as text. The bare
+spelling had the harness rewrite the import lines inside the body strings to paths relative to
+`gang.js`, which then failed to resolve from the transient. The slash also keeps a body's imports
+from being billed to `gang.js` in the RAM model, which is correct: they are the transient's.
 
-**Transients report back on `GANG_PORT` (4), and `ns.print` is banned in them.** `ns.print` writes
-to the CALLING script's own log window, and a transient's window dies with the process a few
-hundred ms later — so everything the four of them did was invisible and the supervisor's tail
-showed a phase line and nothing else. Port 4 because 1 is the shotgun's report port, 2 the share
-gate and 3 the continuous batcher's; `gang.js` drains with `read()`, which removes the message, so
-sharing any of those would eat another system's reports. One drainer only, for the same reason.
+**This replaced four transient files, a report port, a marker file and a test that every path in
+every transient reported before returning.** All of that existed because a transient's `ns.print`
+dies with its log window and a thrown transient was indistinguishable from an idle one. `rpc()`
+closes both: a body's return value comes back directly, and its throw is caught inside the
+transient and re-thrown in `gang.js` naming the error, which logs it as a `WARN` and carries on.
+State that used to cross in `/data/gang.txt` now crosses as a JSON argument: the tick body returns
+it, and ascend and equip receive it. **`respectForNextRecruit` is `Infinity` at a full roster and JSON
+has no `Infinity`**, so it crosses as `-1` and the ascend body turns it back — the same number that
+killed ascend and equip once already when it went through a file.
 
-Figures in those lines go through `ns.format.number` / `.percent` / `.time` — the game's own
+Figures go through `ns.format.number` / `.percent` / `.time` in `gang.js` — the game's own
 formatters at 0 GB. A hand-rolled one produced `$5.43e+7` in a live log, which is not a money
 format; a test bans `toExponential`, `ns.formatNumber` and `(x * 100).toFixed` across the subtree.
 
-**Every transient reports exactly one line on every path it can take**, including the paths where
-it did nothing. That is what lets `gang.js` treat silence as a *thrown script* rather than a quiet
-pass — otherwise an exception and an idle tick look identical from here, and the only trace is a
-log window that has already closed. `war.js` is the case that motivated it: it logged only on a
-state change, so "why are we not taking territory" — the question actually asked — had no answer in
-the log. A test counts `report()` calls against early `return`s in each transient and fails if any
-path can exit silently.
+**The log says something on every pass, including the passes that did nothing.** The war line
+reports every run, not only on a change: "why are we not taking territory" — the question actually
+asked — is answered by "standing down, worst win chance 41%", and a log that only spoke on a
+transition had no answer. A pass that buys no gear says why.
 
 **Two identifier collisions cost real GB here**, both of them fields the API hands you:
 
 - `GangMemberInfo.hack` (also `GangTaskStats`, `GangMemberAscension`) — `m.hack` is 0.10 GB in the
   file that writes it *and* in every importer. `STAT_KEYS` + `m[k]` is why `gang/math.js` is 0 GB.
-- `GangGenInfo.respectForNextRecruit` is also a **1.00 GB `ns.gang` function**. `tick.js` reads it
+- `GangGenInfo.respectForNextRecruit` is also a **1.00 GB `ns.gang` function**. The tick body reads it
   as `info["respectForNextRecruit"]`; a computed key is a Literal and costs nothing.
 
 Two tests in `tests/gang.test.mjs` pin both, because neither has a symptom short of the game
@@ -697,7 +699,7 @@ Things that look arbitrary in there and aren't:
   kills a member.
 - **Ascension is refused when it would cost the next recruit.** `result.respect` is respect *lost*,
   and respect is what gates recruiting; under a full roster a recruit beats a multiplier on one
-  member. `ascend.js` decrements its own running total rather than re-reading the gang.
+  member. The ascend body decrements its own running total rather than re-reading the gang.
 - **Gear is bought in every phase, TRAIN included, though `ascend()` reapplies only augs.** It
   used to wait out TRAIN as money the next ascension burns, which had it backwards: member stats
   include the equipment multipliers, so gear lifts trainees over `TRAIN_STAT_FLOOR` sooner, and
@@ -717,15 +719,15 @@ Things that look arbitrary in there and aren't:
   a $12m Katana, skipped a $25m Liquid Body Armor and spent the $8m remainder on the Rootkit
   anyway. `considerItems` is the gate, and it is the only implementation of it - `planPurchases`
   calls it twice against the same mutating `owned` map so a sweep big enough to finish the combat
-  list opens the tier in that sweep rather than ~30 s later, and `equip.js` re-derives the log's
+  list opens the tier in that sweep rather than ~30 s later, and the equip body re-derives the log's
   shortlist through it so a zero-buy line cannot name a cause the planner did not use. The price
   is idle cash in the window `cloud.js` is bidding for it; the budget is re-priced every sweep, so
   the money is offered elsewhere rather than lost.
 
-  The mirrored rule for a hacking gang is deliberately NOT implemented - `tick.js` refuses those
+  The mirrored rule for a hacking gang is deliberately NOT implemented - the tick body refuses those
   outright, so nothing writes `isHacking` true; the marker carries the flag anyway so the gate is
   right on the day that changes rather than silently backwards.
-- **A pass that buys nothing must say WHY.** `equip.js` originally printed only when it bought
+- **A pass that buys nothing must say WHY.** The equip transient originally printed only when it bought
   something, so "the gang already owns everything", "the budget is too
   small" and "no marker yet" were all one blank line. `eligibleItems` is exported so the log
   re-derives the shortlist through the same function the planner used, rather than a copy that can
@@ -735,11 +737,11 @@ Things that look arbitrary in there and aren't:
   which is the batcher's whole growth path, stops growing.
 
 **Which config changes need a restart.** `gang.js` is the only long-lived process, so it is the
-only one holding stale constants: `TICK_EVERY`, `WAR_EVERY`, `ASCEND_EVERY`, `EQUIP_EVERY` and
-`TRANSIENT_TIMEOUT_MS` are frozen at the value it started with. **Everything else is read inside a
-transient and takes effect on that transient's next run** — `Script.ts` cascades
-`invalidateModule()` to every dependent, so writing `config.js` re-compiles `math.js` and all four
-transients, and the next `ns.run` picks up the new value with no restart.
+only one holding stale constants: `TICK_EVERY`, `WAR_EVERY`, `ASCEND_EVERY`, `EQUIP_EVERY`, and the
+`ASCEND_MULT_THRESHOLD` its log line quotes, are frozen at the value it started with. **Everything else is read inside an rpc
+body and takes effect on that body's next run** — `Script.ts` cascades
+`invalidateModule()` to every dependent, so writing `config.js` re-compiles `math.js` and every
+generated transient that imports it, and the next `ns.run` picks up the new value with no restart.
 
 `boot.js` gates the service on `ns.gang.inGang()` (0 GB) rather than starting it blind — without a
 gang the supervisor exits at once and `ensureService` would relaunch it every tick forever, the
@@ -849,7 +851,7 @@ are `undefined` here, which is a `TypeError` at the call site and nowhere else.
 **Format at the CALL SITE, not inside a 0 GB pure module.** `config.js`, `verify.js`,
 `gang/math.js` and the like have no `ns` and must keep it that way; threading one in to format a
 string is the wrong trade. Return the number, let the script that has `ns` print it — that is why
-`gang/report.js` takes a finished string.
+gang.js's rpc bodies return numbers and gang.js formats them.
 
 **ponytail: five hand-rolled copies survive, four of them with a known ceiling.**
 `capacity.js:70`, `cloud.js:63`, `managerCore.js:96` and `prepper.js:72` each carry
