@@ -165,13 +165,15 @@ export const tests = {
     assert(r.launched.includes("scripts/manager.js"), `expected manager.js, launched: ${r.launched}`);
   },
 
-  // The backend swap still exists - for CONTINUOUS, which still has one file
-  // per backend. The shotgun has a single file whose math.js chooses per
-  // process, so these move to the pair that still has two.
-  "with Formulas, boot launches the continuous formulas build": async () => {
+  // Neither system has a formulas BUILD any more: each math module picks per
+  // process, and the continuous one re-checks every rescan. So owning
+  // Formulas.exe must not change which file boot runs.
+  "with Formulas, boot still launches the one continuous manager": async () => {
     const r = await runBoot({ files: {}, hasFormulas: true });
-    assert(r.launched.includes("scripts/continuous/manager-formulas.js"),
-      `expected the formulas build, launched: ${r.launched}`);
+    assert(r.launched.includes("scripts/continuous/manager.js"),
+      `expected continuous/manager.js, launched: ${r.launched}`);
+    assert(!r.launched.includes("scripts/continuous/manager-formulas.js"),
+      "manager-formulas.js is retired and must never be started");
   },
 
   // What replaced the shotgun swap. There is one file, so the flag has to
@@ -188,29 +190,34 @@ export const tests = {
       `--no-formulas must be forwarded, got args: ${JSON.stringify(proc.args)}`);
   },
 
-  "buying Formulas swaps the running manager": async () => {
-    const r = await runBoot({
-      hasFormulas: true,
-      running: ["scripts/continuous/manager.js"],
-    });
-    assert(r.killed.includes("scripts/continuous/manager.js"),
-      `should kill the analyze build, killed: ${r.killed}`);
-    assert(r.launched.includes("scripts/continuous/manager-formulas.js"), "should start the formulas build");
-    const live = r.procs.filter((p) => p.filename.startsWith("scripts/continuous/manager"));
-    assert(live.length === 1, `exactly one manager must run, found ${live.length}`);
+  // What used to be a swap is now nothing at all - the running manager
+  // switches backend at its next rescan. Killing it would cost its whole
+  // pipeline for no reason.
+  "buying Formulas leaves the running manager alone": async () => {
+    const r = await runBoot({ hasFormulas: true, running: ["scripts/continuous/manager.js"] });
+    assert(!r.killed.includes("scripts/continuous/manager.js"),
+      `the manager should be kept, killed: ${r.killed}`);
+    assert(!r.launched.some((f) => f.startsWith("scripts/continuous/manager")),
+      `nothing should be relaunched, launched: ${r.launched}`);
   },
 
-  "--no-formulas forces the continuous analyze build": async () => {
+  "--no-formulas reaches the continuous manager": async () => {
     const r = await runBoot({ args: ["--no-formulas"], hasFormulas: true });
-    assert(r.launched.includes("scripts/continuous/manager.js"), "should honour --no-formulas");
-    assert(!r.launched.includes("scripts/continuous/manager-formulas.js"),
-      "should not launch the formulas build");
+    const proc = r.procs.find((x) => x.filename === "scripts/continuous/manager.js");
+    assert(proc, `continuous/manager.js should be running, procs: ${r.procs.map((x) => x.filename)}`);
+    assert(proc.args.includes("--no-formulas"),
+      `--no-formulas must be forwarded, got args: ${JSON.stringify(proc.args)}`);
   },
 
-  "boot writes the formulas marker": async () => {
-    const r = await runBoot({ files: {}, hasFormulas: true });
-    assert(/^1/.test(r.store["/data/formulas.txt"] ?? ""),
-      `marker should record ownership, got: ${r.store["/data/formulas.txt"]}`);
+  // filesync never deletes from the game, so the retired formulas build is
+  // still on home - and possibly still RUNNING from before the upgrade. The
+  // continuous manager aborts beside any rival, so one left alive would stop
+  // the new manager starting, once a tick, forever.
+  "a retired manager-formulas.js still running is stopped": async () => {
+    const r = await runBoot({ running: ["scripts/continuous/manager-formulas.js"] });
+    assert(r.killed.includes("scripts/continuous/manager-formulas.js"),
+      `the retired build should be stopped, killed: ${r.killed}`);
+    assert(r.launched.includes("scripts/continuous/manager.js"), "the one manager should start");
   },
 
   // A manager killed mid-volley leaves hundreds of batches running. They hold
@@ -220,14 +227,14 @@ export const tests = {
   "swapping managers kills the workers the old one left behind": async () => {
     const r = await runBoot({
       hasFormulas: true,
-      running: ["scripts/continuous/manager.js"], workers: ORPHANS,
+      running: ["scripts/continuous/manager-formulas.js"], workers: ORPHANS,
     });
-    assert(r.killed.includes("scripts/continuous/manager.js"), "the analyze build should be stopped");
+    assert(r.killed.includes("scripts/continuous/manager-formulas.js"), "the retired build should be stopped");
     for (const w of ORPHANS) {
       assert(r.killed.includes(w.filename), `${w.filename} should have been killed, killed: ${r.killed}`);
     }
     assert(!r.procs.some((p) => p.filename.endsWith("hack.js")), "a worker survived the swap");
-    assert(r.launched.includes("scripts/continuous/manager-formulas.js"), "the formulas build should start");
+    assert(r.launched.includes("scripts/continuous/manager.js"), "the continuous manager should start");
   },
 
   // Share workers are NOT in WORKER_LIST, and that is deliberate: none of the
@@ -239,7 +246,7 @@ export const tests = {
   "a manager swap spares the share workers": async () => {
     const r = await runBoot({
       hasFormulas: true,
-      running: ["scripts/continuous/manager.js"],
+      running: ["scripts/continuous/manager-formulas.js"],
       workers: [...ORPHANS, { filename: "scripts/share.js", host: "p1", threads: 2921 }],
     });
     assert(!r.killed.includes("scripts/share.js"),
@@ -269,9 +276,9 @@ export const tests = {
   "a swap with nothing in flight kills nothing extra": async () => {
     const r = await runBoot({
       hasFormulas: true,
-      running: ["scripts/continuous/manager.js"],
+      running: ["scripts/continuous/manager-formulas.js"],
     });
-    assert(r.killed.filter(Boolean).join(",") === "scripts/continuous/manager.js",
+    assert(r.killed.filter(Boolean).join(",") === "scripts/continuous/manager-formulas.js",
       `only the old manager should be killed, killed: ${r.killed}`);
   },
 

@@ -9,8 +9,7 @@ import {
 /**
  * Share mode for the continuous batcher.
  *
- *   ns.fileExists   0.10 GB   (the only cost this file ADDS; on the formulas
- *                              build lib/mathFormulas.js already pays it)
+ *   ns.fileExists   0.10 GB   (the only cost this file adds)
  *   ns.exec         1.30      already paid by lib/stream.js
  *   ns.ps           0.20      already paid by core.js findRivals
  *   ns.read         0

@@ -7,7 +7,7 @@
 > Adaptive steal and the 3-target limit are the newest changes and have not had a long run yet.
 >
 > **Run it:** `run scripts/continuous/manager.js --minutes 30 --verbose`
-> (`manager-formulas.js` when Formulas.exe is owned - cheaper AND more precise.)
+> (One entry for both backends now - `lib/math.js` uses Formulas.exe when owned and re-checks every rescan.)
 > Flags: `--targets N` `--steal F` `--fixed-steal` `--target host` `--prep-only` `--minutes N` `--verbose`
 >
 > ### What it does now
