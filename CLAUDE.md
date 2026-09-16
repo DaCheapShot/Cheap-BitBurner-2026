@@ -81,9 +81,10 @@ node tests/run.mjs                      # run the test suite
 
 **Only one process may own the RAM pool and the report port.** `port.read()` removes the
 message and `Server.pending` is per-process memory, so a second owner steals reports and
-over-commits the same RAM. There are **four** manager files — `manager.js`,
-`manager-formulas.js`, `continuous/manager.js`, `continuous/manager-formulas.js` — and all four
-are alternatives, not services. Only one may run. Do not run `prep.js` alongside any of them —
+over-commits the same RAM. There are **three** manager files — `manager.js`,
+`continuous/manager.js`, `continuous/manager-formulas.js` — and all three are alternatives,
+not services. Only one may run. (It was four: the shotgun's pair collapsed into one file when
+`math.js` took both backends, and the continuous tree still carries its own twin math libs.) Do not run `prep.js` alongside any of them —
 prep runs *inside* the manager. `boot.js` enforces this by killing every rival before it starts
 the one it wants (duplicates of the same file: lowest PID wins).
 
@@ -216,10 +217,12 @@ collisions; it is the only thing standing between this repo and a 25 GB variable
   the whole rooted network in another. Everything downstream reads the snapshot and stays
   **synchronous**, which is what kept this from cascading `async` through `managerCore` and
   `prepper`.
-- **The analyze build is now the CHEAPER one** (5.40 against 6.90), which it never was before.
-  `mathFormulas` still holds `getServer` and `getPlayer` resident because `ns.formulas.*` needs
-  the objects in hand and is itself 0 GB; moving those two would cost it the same 1.00 for
-  `ns.run` and save 1.50, worth doing alongside the twin merge rather than on its own.
+- **One module holds BOTH backends for 1.00 GB**, where analyze alone cost 2.55 and formulas
+  2.50. `ns.formulas.*` was always 0 GB — what cost 2.50 was `getServer` and `getPlayer`, the
+  two reads that fetch the objects to hand it. Those objects survive JSON: `helpers.server()`
+  checks only that 14 plain data keys are present, and `helpers.person()` likewise, so
+  `snapshot()` fetches them through `rpc` and the formulas calls run resident on the
+  round-tripped objects.
 
 Worker scripts pay their cost **per thread**, so `hack.js` / `grow.js` / `weaken.js` contain
 nothing beyond one op and one port write. `share.js` follows the same rule and pays the most for
@@ -270,16 +273,28 @@ body's RAM is only ever charged to a transient, so the exposure is a runtime `ns
 manager that will not start. Bodies must be plain template literals — an interpolated one is
 rejected, because no check can read it and it would mint a file per distinct value.
 
-### Two math backends
+### Two math backends, one module
 
-`mathAnalyze.js` and `mathFormulas.js` implement the same interface. They must never be
-reachable from the same entry point — Bitburner charges for every `ns` function reachable
-through imports, so a script touching both pays ~2.5 GB it cannot use. `tests/isolation.test.mjs`
-enforces this by walking the import closure; `tests/ram.test.mjs` asserts the resulting totals.
+`scripts/math.js` holds both and picks per PROCESS, in `prepare()`: formulas when the program
+is owned, analyze otherwise, and analyze always under `--no-formulas`, which it reads straight
+off `ns.args`. Buying Formulas mid-run no longer needs a manager swap.
 
-`growThreadsToRestore(snap, from, to, atSecurity)` is where they differ. Formulas honours
-`atSecurity` by cloning the server object; analyze cannot, and always evaluates at current
-security. That asymmetry is deliberate and tested — do not "fix" it into an equivalence.
+**This used to be forbidden**, and the rule that forbade it was right at the time: a script
+reachable from both paid for both, so there were twin math modules, twin managers, twin preps,
+a `tests/isolation.test.mjs` to keep them apart and a swap in `boot.js` between the files. All
+of that is deleted. What changed is that neither backend costs anything resident any more —
+see the `rpc.js` section above.
+
+`growThreadsToRestore(snap, from, to, atSecurity)` is where the two paths differ. Formulas
+honours `atSecurity` by cloning the server object; analyze cannot, because `growthLogK` was
+measured at the snapshot's security. That asymmetry is deliberate and tested — do not "fix" it
+into an equivalence. It is now a difference between two MODES of one module rather than two
+files, which makes it easier to tidy away by accident, so `tests/math.test.mjs` pins it with
+two separate module instances.
+
+**`scripts/continuous/lib/` still has its own twin pair**, untouched by this, and the isolation
+rule still applies there: `mathAnalyze.js` and `mathFormulas.js` in that tree must never be
+reachable from one entry point. `tests/continuous.test.mjs` enforces it.
 
 ## Architecture
 
@@ -297,13 +312,10 @@ editor's RAM panel when one moves.
 | `ram.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
 | `rpc.js` | run a body in a throwaway script, get its value back | 1.00 |
 | `prepper.js` | prep as a module (manager runs it in-process) | 2.40 |
-| `mathAnalyze.js` | math interface via *Analyze, reached entirely through `rpc.js` | 1.00 |
-| `mathFormulas.js` | math interface via `ns.formulas` | 2.50 |
+| `math.js` | both math backends, reached entirely through `rpc.js` | 1.00 |
 | `managerCore.js` | the volley loop + share top-up, math-free | 2.80 |
-| `manager.js` | entry: core + mathAnalyze (always works) | 5.40 |
-| `manager-formulas.js` | entry: core + mathFormulas | 6.90 |
-| `prep.js` | entry: prepper + mathAnalyze | 5.00 |
-| `prep-formulas.js` | entry: prepper + mathFormulas | 6.50 |
+| `manager.js` | entry: core + math (the only shotgun entry) | 5.40 |
+| `prep.js` | entry: prepper + math | 5.00 |
 | `boot.js` | supervisor, picks the batcher | 3.60 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
@@ -340,7 +352,7 @@ so unreachable rows are dropped rather than reported as an error.
 
 `capacity.js` (8.15) is the surviving diagnostic. It ranks targets by real throughput, which
 the manager does not do — `pickTarget` chooses the richest *hackable* server, not the most
-profitable one. `prep.js` / `prep-formulas.js` are manual entry points to
+profitable one. `prep.js` is a manual entry point to
 logic the supervisor otherwise drives. `scan.js` predates the batcher.
 
 ### Prep, and why it fans out

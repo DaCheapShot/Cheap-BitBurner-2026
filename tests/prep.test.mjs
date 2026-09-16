@@ -146,24 +146,24 @@ export const tests = {
   // only checks that measure() plumbs an ns/host/math triple through to a sane
   // moneyOk/secOk result.
   "prepper.measure delegates to the injected math module": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+    const { prepper, math } = await loadScripts();
     const ns = makeNs({
       servers: { x: { moneyMax: 100, moneyAvailable: 100, minDifficulty: 1, hackDifficulty: 1 } },
       files: {
       },
     });
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
-    const m = await prepper.measure(ns, "x", mathAnalyze);
+    assert((await math.prepare(ns)).ok, "prepare failed");
+    const m = await prepper.measure(ns, "x", math);
     assert(m.moneyOk === true, "moneyOk should be true at max money");
     assert(m.secOk === true, "secOk should be true at min security");
   },
 
-  "prep converges with mathAnalyze injected": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+  "prep converges on the analyze path": async () => {
+    const { prepper, math } = await loadScripts();
     const ns = wireExec(driftedNs());
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
-    const res = await prepper.prep(ns, HOST, { math: mathAnalyze, maxCycles: 60, log: () => {} });
+    const res = await prepper.prep(ns, HOST, { math: math, maxCycles: 60, log: () => {} });
     assert(res.ok, `prep failed: ${res.reason}`);
     const s = ns._servers[HOST];
     assert(s.moneyAvailable >= s.moneyMax * 0.999, "money not restored");
@@ -171,12 +171,12 @@ export const tests = {
     assert(Object.values(ns._used).every((v) => Math.abs(v) < 1e-9), "RAM leaked");
   },
 
-  "prep converges with mathFormulas injected": async () => {
-    const { prepper, mathFormulas } = await loadScripts();
+  "prep converges on the formulas path": async () => {
+    const { prepper, math } = await loadScripts();
     const ns = wireExec(withFormulas(driftedNs()));
-    assert((await mathFormulas.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
-    const res = await prepper.prep(ns, HOST, { math: mathFormulas, maxCycles: 60, log: () => {} });
+    const res = await prepper.prep(ns, HOST, { math: math, maxCycles: 60, log: () => {} });
     assert(res.ok, `prep failed: ${res.reason}`);
     const s = ns._servers[HOST];
     assert(s.moneyAvailable >= s.moneyMax * 0.999, "money not restored");
@@ -197,12 +197,12 @@ export const tests = {
   // --- fan-out ------------------------------------------------------------
 
   "pickTarget is the head of rankTargets, so the two cannot disagree": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+    const { prepper, math } = await loadScripts();
     const ns = fleetNs();
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
-    const ranked = await prepper.rankTargets(ns, mathAnalyze);
+    assert((await math.prepare(ns)).ok, "prepare failed");
+    const ranked = await prepper.rankTargets(ns, math);
     assert(ranked[0] === "rich", `richest should lead, got ${ranked.join(",")}`);
-    assert(await prepper.pickTarget(ns, mathAnalyze) === ranked[0], "pickTarget diverged from the ranking");
+    assert(await prepper.pickTarget(ns, math) === ranked[0], "pickTarget diverged from the ranking");
     // Ordering is by max money descending, and nothing above hacking level or
     // without money is listed at all.
     assert(ranked.join(",") === "rich,mid,slow,poor", `bad ranking: ${ranked.join(",")}`);
@@ -212,12 +212,12 @@ export const tests = {
   // planned, so an extra can never take RAM the primary wanted. Without it,
   // fanning out would slow down the one server the manager is blocked on.
   "the primary launches first and at full size, whatever the extras want": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+    const { prepper, math } = await loadScripts();
     const ns = fleetNs();
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
-    const alone = await oneCycle(ns, prepper, mathAnalyze, { fanout: 0 });
-    const withExtras = await oneCycle(fleetNs(), prepper, mathAnalyze, { fanout: 3 });
+    const alone = await oneCycle(ns, prepper, math, { fanout: 0 });
+    const withExtras = await oneCycle(fleetNs(), prepper, math, { fanout: 3 });
 
     assert(withExtras[0].target === "rich", `primary should exec first, got ${withExtras[0].target}`);
     const threadsAlone = sumThreads(alone, "rich");
@@ -228,11 +228,11 @@ export const tests = {
   },
 
   "extras stop at the fanout cap even with RAM to spare": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+    const { prepper, math } = await loadScripts();
     const ns = fleetNs();
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
-    const execs = await oneCycle(ns, prepper, mathAnalyze, { fanout: 1 });
+    const execs = await oneCycle(ns, prepper, math, { fanout: 1 });
     const targets = targetsIn(execs);
     assert(targets.length === 2, `expected primary + 1 extra, got ${targets.join(",")}`);
     assert(targets[0] === "rich", "primary should still be first");
@@ -242,11 +242,11 @@ export const tests = {
   // longer window would hold the cycle open past the primary's landing - making
   // prep of the target we are blocked on slower, which is the opposite of the point.
   "an extra whose weaken window outlasts the primary's is skipped": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+    const { prepper, math } = await loadScripts();
     const ns = fleetNs();
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
-    const targets = targetsIn(await oneCycle(ns, prepper, mathAnalyze, { fanout: 3 }));
+    const targets = targetsIn(await oneCycle(ns, prepper, math, { fanout: 3 }));
     assert(targets.includes("rich"), "primary missing");
     assert(!targets.includes("slow"),
       `slow has a 900ms weaken against the primary's 200ms and must be skipped, got ${targets.join(",")}`);
@@ -254,13 +254,13 @@ export const tests = {
   },
 
   "extras stop early when the pool has nothing left": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+    const { prepper, math } = await loadScripts();
     // 609GB seats exactly the primary's 348 weaken threads at 1.75GB each
     // and not one more, so there is genuinely nothing left for an extra.
     const ns = fleetNs({ home: 0, p0: 609 });
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
-    const targets = targetsIn(await oneCycle(ns, prepper, mathAnalyze, { fanout: 3 }));
+    const targets = targetsIn(await oneCycle(ns, prepper, math, { fanout: 3 }));
     assert(targets.length === 1 && targets[0] === "rich",
       `a full pool should leave the primary alone, got ${targets.join(",")}`);
   },
@@ -289,10 +289,10 @@ export const tests = {
   },
 
   "a fanned-out cycle leaks no RAM": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+    const { prepper, math } = await loadScripts();
     const ns = fleetNs();
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
-    await oneCycle(ns, prepper, mathAnalyze, { fanout: 3 });
+    assert((await math.prepare(ns)).ok, "prepare failed");
+    await oneCycle(ns, prepper, math, { fanout: 3 });
     // wireFleet gives every worker back its RAM on landing, so anything left
     // pending is a placement the cycle failed to release.
     assert(Object.values(ns._used).every((v) => Math.abs(v) < 1e-9),
@@ -307,9 +307,9 @@ export const tests = {
   // nothing fit, and STOPPED - so boot restarted it a tick later into the same
   // wall, once a minute until the workers drained.
   "prep waits out a full pool instead of failing": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+    const { prepper, math } = await loadScripts();
     const ns = fleetNs();
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
     // Occupy every host, as a killed manager's batches in flight would.
     for (const h of Object.keys(ns._hosts)) ns._used[h] = ns._hosts[h];
@@ -323,7 +323,7 @@ export const tests = {
     };
 
     const res = await prepper.prepGroup(ns, "rich", {
-      math: mathAnalyze, maxCycles: 2, log: () => {}, poolWait: 30,
+      math: math, maxCycles: 2, log: () => {}, poolWait: 30,
     });
 
     assert(waits >= 3, `should have waited for RAM, slept ${waits} time(s)`);
@@ -335,9 +335,9 @@ export const tests = {
   // Waiting cycles must not spend the prep budget, or a busy pool would fail the
   // prep by simply exhausting maxCycles - the same outcome by a slower route.
   "waiting for RAM does not consume the cycle budget": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+    const { prepper, math } = await loadScripts();
     const ns = fleetNs();
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
     for (const h of Object.keys(ns._hosts)) ns._used[h] = ns._hosts[h];
 
     let waits = 0;
@@ -349,7 +349,7 @@ export const tests = {
 
     // One cycle of budget, but five waits before any of it can be used.
     await prepper.prepGroup(ns, "rich", {
-      math: mathAnalyze, maxCycles: 1, log: () => {}, poolWait: 30,
+      math: math, maxCycles: 1, log: () => {}, poolWait: 30,
     });
     assert(ns._execs.length > 0,
       "the single cycle should have survived five waits and still launched");
@@ -358,13 +358,13 @@ export const tests = {
   // The wait is bounded: a pool that is empty rather than busy - no rooted
   // hosts, or workers never deployed - is a real failure worth surfacing.
   "the wait is bounded and still reports a genuinely empty pool": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+    const { prepper, math } = await loadScripts();
     const ns = fleetNs();
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
     for (const h of Object.keys(ns._hosts)) ns._used[h] = ns._hosts[h];
 
     const res = await prepper.prepGroup(ns, "rich", {
-      math: mathAnalyze, maxCycles: 5, log: () => {}, poolWait: 3,
+      math: math, maxCycles: 5, log: () => {}, poolWait: 3,
     });
     assert(res.ok === false, "an ever-full pool must eventually fail");
     assert(/nothing fits/.test(res.reason), `expected a nothing-fits reason, got: ${res.reason}`);
@@ -375,13 +375,13 @@ export const tests = {
   // sits most idle and a prep can run for ten minutes, so deferring a share
   // toggle until prep finished would make the toggle look broken.
   "the cycle hook runs before the wave is planned": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+    const { prepper, math } = await loadScripts();
     const ns = wireFleet(fleetNs());
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
     let calls = 0;
     let execsWhenCalled = -1;
-    await oneCycle(ns, prepper, mathAnalyze, {
+    await oneCycle(ns, prepper, math, {
       onCycle: () => { calls++; execsWhenCalled = ns._execs.length; },
     });
 
@@ -393,12 +393,12 @@ export const tests = {
   // A hook that exec'd something has changed the game's used RAM, and the wave
   // planned next must not be sized against bytes that are already gone.
   "RAM the hook takes is gone from the wave that follows": async () => {
-    const { prepper, mathAnalyze } = await loadScripts();
+    const { prepper, math } = await loadScripts();
 
     const threadsWith = async (hook) => {
       const ns = wireFleet(fleetNs());
-      assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
-      const execs = await oneCycle(ns, prepper, mathAnalyze, hook ? { onCycle: hook(ns) } : {});
+      assert((await math.prepare(ns)).ok, "prepare failed");
+      const execs = await oneCycle(ns, prepper, math, hook ? { onCycle: hook(ns) } : {});
       return execs.reduce((n, e) => n + e.threads, 0);
     };
 

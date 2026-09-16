@@ -693,12 +693,12 @@ export async function prep(ns, host, opts = {}) {
 }
 
 /**
- * CLI body shared by scripts/prep.js and scripts/prep-formulas.js.
+ * CLI body for scripts/prep.js.
  *
- * The two entry scripts are identical apart from which math module they inject
- * - the same shape managerCore.runVolley() already shares between manager.js and
- * manager-formulas.js. Pulling the body out here stops the two prep CLIs
- * drifting apart the way they had.
+ * There used to be two entry scripts here, identical apart from which math
+ * module they injected. scripts/math.js holds both backends now, so there is
+ * one - but the body stays factored out, because runVolley() calls prep()
+ * in-process and this file is the hand-run path to the same logic.
  *
  * @param {NS} ns
  * @param {object} math injected math implementation

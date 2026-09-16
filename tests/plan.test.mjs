@@ -43,7 +43,7 @@ function guardedMath(growThreadsToRestore) {
   );
 }
 
-// Route A: closed-form natural log, the shape mathAnalyze's cached growth base
+// Route A: closed-form natural log, the shape math's cached growth base
 // uses (t = log(mult) / log(base)).
 const mathNaturalLog = () =>
   guardedMath((snap, from, to) => {
@@ -130,21 +130,21 @@ export const tests = {
   // one window. The picker maximises money per batch, so with RAM plentiful and
   // the batch count capped it climbs to whatever ceiling exists.
   "the auto picker never exceeds MAX_STEAL_FRACTION": async () => {
-    const { managerCore, mathAnalyze, config, ram: ramMod } = await loadScripts();
+    const { managerCore, math, config, ram: ramMod } = await loadScripts();
     const ns = stealNs();
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
-    const snap = await mathAnalyze.snapshot(ns, "fat");
+    const snap = await math.snapshot(ns, "fat");
     const pool = ramMod.ServerPool.build(ns, { homeReserve: 0 });
-    const perThread = mathAnalyze.hackFractionPerThread(snap);
+    const perThread = math.hackFractionPerThread(snap);
     const consts = {
-      hackSec: mathAnalyze.securityPerHackThread(snap),
-      growSec: mathAnalyze.securityPerGrowThread(snap),
-      weakenSec: mathAnalyze.securityPerWeakenThread(snap),
+      hackSec: math.securityPerHackThread(snap),
+      growSec: math.securityPerGrowThread(snap),
+      weakenSec: math.securityPerWeakenThread(snap),
     };
 
     const pick = managerCore.chooseSteal(
-      pool, { hack: 1.7, grow: 1.75, weaken: 1.75 }, mathAnalyze, snap, perThread, consts, 400,
+      pool, { hack: 1.7, grow: 1.75, weaken: 1.75 }, math, snap, perThread, consts, 400,
     );
     assert(pick && pick.chosen, "the picker found nothing at all");
     assert(pick.chosen.steal <= config.MAX_STEAL_FRACTION,

@@ -133,34 +133,51 @@ export const tests = {
       `boot should name the stale copy, said: ${JSON.stringify(said)}`);
   },
 
-  "without Formulas, boot launches the analyze manager": async () => {
+  "without Formulas, boot launches the shotgun manager": async () => {
     const r = await runBoot({ args: SHOTGUN, hasFormulas: false });
     assert(r.launched.includes("scripts/manager.js"), `expected manager.js, launched: ${r.launched}`);
-    assert(!r.launched.includes("scripts/manager-formulas.js"), "should not launch the formulas build");
   },
 
-  "with Formulas, boot launches the formulas manager": async () => {
-    const r = await runBoot({ args: SHOTGUN, files: {}, hasFormulas: true });
-    assert(r.launched.includes("scripts/manager-formulas.js"), `expected manager-formulas.js, launched: ${r.launched}`);
+  // The backend swap still exists - for CONTINUOUS, which still has one file
+  // per backend. The shotgun has a single file whose math.js chooses per
+  // process, so these move to the pair that still has two.
+  "with Formulas, boot launches the continuous formulas build": async () => {
+    const r = await runBoot({ files: {}, hasFormulas: true });
+    assert(r.launched.includes("scripts/continuous/manager-formulas.js"),
+      `expected the formulas build, launched: ${r.launched}`);
+  },
+
+  // What replaced the shotgun swap. There is one file, so the flag has to
+  // reach the PROCESS: scripts/math.js reads it off ns.args in prepare().
+  "the shotgun gets one manager, with --no-formulas forwarded to it": async () => {
+    const owned = await runBoot({ args: SHOTGUN, hasFormulas: true });
+    assert(owned.launched.includes("scripts/manager.js"),
+      `there is only one shotgun manager now, launched: ${owned.launched}`);
+
+    const forced = await runBoot({ args: [...SHOTGUN, "--no-formulas"], hasFormulas: true });
+    const proc = forced.procs.find((x) => x.filename === "scripts/manager.js");
+    assert(proc, `manager.js should be running, procs: ${forced.procs.map((x) => x.filename)}`);
+    assert(proc.args.includes("--no-formulas"),
+      `--no-formulas must be forwarded, got args: ${JSON.stringify(proc.args)}`);
   },
 
   "buying Formulas swaps the running manager": async () => {
     const r = await runBoot({
-      args: SHOTGUN, hasFormulas: true,
-      running: ["scripts/manager.js"],
+      hasFormulas: true,
+      running: ["scripts/continuous/manager.js"],
     });
-    assert(r.killed.includes("scripts/manager.js"), `should kill the analyze manager, killed: ${r.killed}`);
-    assert(r.launched.includes("scripts/manager-formulas.js"), "should start the formulas manager");
-    const live = r.procs.filter((p) => p.filename.startsWith("scripts/manager"));
+    assert(r.killed.includes("scripts/continuous/manager.js"),
+      `should kill the analyze build, killed: ${r.killed}`);
+    assert(r.launched.includes("scripts/continuous/manager-formulas.js"), "should start the formulas build");
+    const live = r.procs.filter((p) => p.filename.startsWith("scripts/continuous/manager"));
     assert(live.length === 1, `exactly one manager must run, found ${live.length}`);
   },
 
-  "--no-formulas forces the analyze build": async () => {
-    const r = await runBoot({
-      args: [...SHOTGUN, "--no-formulas"], hasFormulas: true,
-    });
-    assert(r.launched.includes("scripts/manager.js"), "should honour --no-formulas");
-    assert(!r.launched.includes("scripts/manager-formulas.js"), "should not launch the formulas build");
+  "--no-formulas forces the continuous analyze build": async () => {
+    const r = await runBoot({ args: ["--no-formulas"], hasFormulas: true });
+    assert(r.launched.includes("scripts/continuous/manager.js"), "should honour --no-formulas");
+    assert(!r.launched.includes("scripts/continuous/manager-formulas.js"),
+      "should not launch the formulas build");
   },
 
   "boot writes the formulas marker": async () => {
@@ -175,15 +192,15 @@ export const tests = {
   // target on a plan nobody owns any more.
   "swapping managers kills the workers the old one left behind": async () => {
     const r = await runBoot({
-      args: SHOTGUN, hasFormulas: true,
-      running: ["scripts/manager.js"], workers: ORPHANS,
+      hasFormulas: true,
+      running: ["scripts/continuous/manager.js"], workers: ORPHANS,
     });
-    assert(r.killed.includes("scripts/manager.js"), "the analyze manager should be stopped");
+    assert(r.killed.includes("scripts/continuous/manager.js"), "the analyze build should be stopped");
     for (const w of ORPHANS) {
       assert(r.killed.includes(w.filename), `${w.filename} should have been killed, killed: ${r.killed}`);
     }
     assert(!r.procs.some((p) => p.filename.endsWith("hack.js")), "a worker survived the swap");
-    assert(r.launched.includes("scripts/manager-formulas.js"), "the formulas manager should start");
+    assert(r.launched.includes("scripts/continuous/manager-formulas.js"), "the formulas build should start");
   },
 
   // Share workers are NOT in WORKER_LIST, and that is deliberate: none of the
@@ -194,8 +211,8 @@ export const tests = {
   // Killing them would drop the reputation bonus for a tick and buy nothing.
   "a manager swap spares the share workers": async () => {
     const r = await runBoot({
-      args: SHOTGUN, hasFormulas: true,
-      running: ["scripts/manager.js"],
+      hasFormulas: true,
+      running: ["scripts/continuous/manager.js"],
       workers: [...ORPHANS, { filename: "scripts/share.js", host: "p1", threads: 2921 }],
     });
     assert(!r.killed.includes("scripts/share.js"),
@@ -224,10 +241,10 @@ export const tests = {
 
   "a swap with nothing in flight kills nothing extra": async () => {
     const r = await runBoot({
-      args: SHOTGUN, hasFormulas: true,
-      running: ["scripts/manager.js"],
+      hasFormulas: true,
+      running: ["scripts/continuous/manager.js"],
     });
-    assert(r.killed.filter(Boolean).join(",") === "scripts/manager.js",
+    assert(r.killed.filter(Boolean).join(",") === "scripts/continuous/manager.js",
       `only the old manager should be killed, killed: ${r.killed}`);
   },
 

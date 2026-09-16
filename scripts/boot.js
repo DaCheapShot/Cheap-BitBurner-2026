@@ -30,10 +30,11 @@ import { GANG_SERVICE } from "./gang/config.js";
  * per weaken window. They are ALTERNATIVES in the strongest sense: each believes
  * it owns the RAM pool and its report port, so two of them running is silent
  * corruption, not a slow mode. Continuous is the default; --shotgun picks the
- * other. See ensureOneManager, which has to police all four files, not two.
+ * other. See ensureOneManager, which has to police every manager file, not two.
  *
- * The backend choice is re-made EVERY tick within whichever system is chosen,
- * since Formulas.exe can be bought or lost at any time.
+ * The backend choice is re-made EVERY tick for continuous, which still has one
+ * file per backend. The shotgun has a single file that chooses for itself at
+ * startup, so --no-formulas is simply forwarded to it.
  *
  * TRANSIENTS RUN ONE AT A TIME, and the tick waits for each to exit before
  * starting the next. They all run on home, and the manager reserves everything
@@ -44,14 +45,14 @@ import { GANG_SERVICE } from "./gang/config.js";
  * Services are identified by filename in ns.ps("home"), so a manager you
  * started by hand is adopted rather than duplicated. Two managers would be
  * actively harmful: each would believe it owned the pool and the report port.
- * The same is true of the two manager BUILDS - see ensureOneManager.
+ * The same is true of continuous's two BUILDS - see ensureOneManager.
  *
  * Usage:  run scripts/boot.js
  *         run scripts/boot.js --target joesguns   (pin the manager's target)
  *         run scripts/boot.js --once              (one pass, then exit)
  *         run scripts/boot.js --no-cloud          (don't buy servers)
  *         run scripts/boot.js --no-gang           (don't supervise the gang)
- *         run scripts/boot.js --no-formulas       (always use the analyze build)
+ *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
  *         run scripts/boot.js --shotgun           (the volley batcher, not the stream)
  *         run scripts/boot.js --targets 5         (continuous only; shotgun ignores it)
  *         run scripts/boot.js --interval 30000
@@ -74,24 +75,24 @@ const ROOT = "/scripts/root.js";
 const DEPLOY = "/scripts/deploy.js";
 const CLOUD = "/scripts/cloud.js";
 /**
- * The manager files, by system and then by backend.
+ * The manager files, by system: the always-available entry first, then the
+ * Formulas-only one where a system still has a separate build.
  *
- * A table rather than four constants because the two choices are INDEPENDENT:
- * --shotgun picks the row, Formulas.exe picks the column, and every one of the
- * other three files is a rival that must not be left running.
+ * The SHOTGUN NO LONGER HAS A PAIR. scripts/math.js holds both backends for
+ * 1.00 GB and picks between them per process, so manager.js is the only shotgun
+ * file and buying Formulas mid-run changes a branch rather than a filename. The
+ * continuous tree still carries its own twin math libs and so still has two.
+ *
+ * A list rather than named fields so a system can have one entry or two, and
+ * this collapses to a single file per system on the day continuous merges too.
+ * Every file that is not the wanted one is a rival that must not be left running.
  */
 const MANAGERS = {
-  continuous: {
-    analyze: "/scripts/continuous/manager.js",
-    formulas: "/scripts/continuous/manager-formulas.js",
-  },
-  shotgun: {
-    analyze: "/scripts/manager.js",
-    formulas: "/scripts/manager-formulas.js",
-  },
+  continuous: ["/scripts/continuous/manager.js", "/scripts/continuous/manager-formulas.js"],
+  shotgun: ["/scripts/manager.js"],
 };
 
-const ALL_MANAGERS = Object.values(MANAGERS).flatMap((m) => [m.analyze, m.formulas]);
+const ALL_MANAGERS = Object.values(MANAGERS).flat();
 
 const DEFAULT_TICK_MS = 60000;
 
@@ -317,6 +318,10 @@ export async function main(ns) {
   const managerArgs = [
     ...(target ? ["--target", target] : []),
     ...(targets ? ["--targets", targets] : []),
+    // Forwarded, not interpreted. The shotgun has one file whose math.js reads
+    // this off ns.args and picks the *Analyze path; continuous still picks by
+    // filename, where the flag has already done its work via hasFormulas.
+    ...(noFormulas ? ["--no-formulas"] : []),
   ];
   const iIdx = args.indexOf("--interval");
   const tickMs = iIdx >= 0 ? Math.max(5000, Number(args[iIdx + 1]) || DEFAULT_TICK_MS) : DEFAULT_TICK_MS;
@@ -419,7 +424,9 @@ export async function main(ns) {
       }
     }
     if (!noManager) {
-      const wanted = hasFormulas ? pair.formulas : pair.analyze;
+      // pair[1] only exists while a system still has a Formulas-only build;
+      // the shotgun's math.js decides for itself and is passed --no-formulas.
+      const wanted = (hasFormulas && pair[1]) || pair[0];
       ensureOneManager(ns, wanted, ALL_MANAGERS.filter((f) => f !== wanted), managerArgs, log);
     }
     // The gang supervisor. Gated on inGang() rather than started unconditionally

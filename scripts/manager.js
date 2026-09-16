@@ -1,31 +1,25 @@
 import { runVolley } from "./managerCore.js";
-import * as math from "./mathAnalyze.js";
+import * as math from "./math.js";
 
 /**
- * The shotgun volley loop, using the *Analyze API through rpc.js.
+ * The shotgun volley loop.
  *
- * This is the always-available build: it needs no programs and works from
- * minute one of a BitNode, which is why it keeps the plain name. If you own
- * Formulas.exe, scripts/manager-formulas.js computes the same batches exactly -
- * see docs/superpowers/specs/2026-09-05-formulas-integration-design.md.
+ * THE ONLY SHOTGUN ENTRY POINT. There used to be a second, manager-formulas.js,
+ * because a script reachable from both math backends paid for both. scripts/
+ * math.js now holds both for 1.00 GB total - every *Analyze name lives in an rpc
+ * body, and ns.formulas.* was always 0 GB - so the split, its isolation test and
+ * boot's swap between the two files are all gone.
  *
- * Do not import mathFormulas here. Bitburner charges for every ns function
- * reachable through imports, so touching both backends from one script would
- * cost 2.50 GB that this build never uses. tests/isolation.test.mjs enforces it.
+ * math.prepare() picks the backend per process: formulas when the program is
+ * owned, analyze otherwise, and analyze always under --no-formulas.
  *
- * RAM: 1.60 base + managerCore/prepper/ram 2.80 + mathAnalyze 1.00 = 5.40 GB
+ * RAM: 1.60 base + managerCore/prepper/ram 2.80 + math.js 1.00 = 5.40 GB
  *
- * mathAnalyze costs 1.00 and not 2.55 because every *Analyze name it uses lives
- * inside an rpc body - a string literal to the RAM calculator - so the 1.00 is
- * rpc.js's ns.run and nothing else. This build is now CHEAPER than the formulas
- * one (6.90), which it never was before.
+ * Both backends for 1.00, where analyze alone used to cost 2.55 and formulas
+ * 2.50. The pair of entry points cost 6.95 and 6.90.
  */
 
 /** @param {NS} ns */
 export async function main(ns) {
-  // Free: fileExists is already charged to this build via buildWorkerPool.
-  if (ns.fileExists("Formulas.exe", "home")) {
-    ns.print("note: Formulas.exe is available - scripts/manager-formulas.js is more accurate");
-  }
   await runVolley(ns, math);
 }

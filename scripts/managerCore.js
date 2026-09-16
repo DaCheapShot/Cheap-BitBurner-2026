@@ -57,7 +57,7 @@ import {
  * fixed one leaves money on the table.
  *
  * `run(ns, math)` is called by the entry scripts, scripts/manager.js and
- * scripts/manager-formulas.js - each injects its own math implementation so
+ * scripts/prep.js - the math implementation is injected so
  * this module never has to pick one.
  *
  * Usage:  run scripts/manager.js
@@ -81,9 +81,9 @@ import {
  *   ram.js/prepper.js union 2.00 + exec (already counted)
  *   + ps 0.20 (the share census) + getSharePower 0.20 (the only honest reading
  *     of the bonus) = 2.40 GB
- * The math implementation's cost is added by whichever entry script imports it:
- *   manager.js + mathAnalyze  = 6.55 GB
- *   manager-formulas.js + mathFormulas = 6.50 GB
+ * The math implementation's cost is added by the entry script that imports it:
+ *   manager.js + math.js = 5.40 GB - one entry, both backends, because every
+ *   ns call in math.js goes through an rpc body and costs only ns.run.
  */
 
 const padL = (s, n) => String(s).padStart(n);
@@ -899,7 +899,7 @@ function serviceShare(ns, pool, ramPerThread, log, prefix = INDENT) {
  *
  * @param {NS} ns
  * @param {object} math injected math implementation - see the math interface
- *                      documented in mathAnalyze.js / mathFormulas.js
+ *                      documented in math.js
  */
 export async function runVolley(ns, math) {
   ns.disableLog("ALL");
@@ -1180,7 +1180,7 @@ export async function runVolley(ns, math) {
       );
       ns.print(
         `           [v] state: money ${fmtMoney(m.money)}/${fmtMoney(m.maxMoney)}, ` +
-          `sec ${m.sec.toFixed(2)}/${m.minSec.toFixed(2)}, backend ${math.NAME}, ` +
+          `sec ${m.sec.toFixed(2)}/${m.minSec.toFixed(2)}, backend ${math.backend()}, ` +
           `hack fraction/thread ${perThread.toExponential(3)}`,
       );
       ns.print(

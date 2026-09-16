@@ -103,13 +103,13 @@ const logOf = (ns) => ns._log.join("\n");
 
 export const tests = {
   "a full manager cycle runs to completion on the analyze build": async () => {
-    const { managerCore, mathAnalyze } = await loadScripts();
+    const { managerCore, math } = await loadScripts();
     const ns = volleyNs();
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
     // Any ReferenceError, TDZ error or bad call site inside run() surfaces here
     // and nowhere else in this suite.
-    await managerCore.runVolley(ns, mathAnalyze);
+    await managerCore.runVolley(ns, math);
 
     const log = logOf(ns);
     assert(/cycle\s+1/.test(log), `no cycle was reported:\n${log}`);
@@ -117,22 +117,22 @@ export const tests = {
   },
 
   "the same cycle runs on the formulas build": async () => {
-    const { managerCore, mathFormulas } = await loadScripts();
+    const { managerCore, math } = await loadScripts();
     const ns = volleyNs({ formulas: true });
-    assert((await mathFormulas.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
-    await managerCore.runVolley(ns, mathFormulas);
+    await managerCore.runVolley(ns, math);
     assert(/landed \d+ ok/.test(logOf(ns)), "the formulas build produced no landing summary");
   },
 
   // The path both ReferenceErrors were on. Naming the lines individually means a
   // future one fails here with the line that broke, not a bare stack.
   "--verbose reports every diagnostic line": async () => {
-    const { managerCore, mathAnalyze } = await loadScripts();
+    const { managerCore, math } = await loadScripts();
     const ns = volleyNs();
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
-    await managerCore.runVolley(ns, mathAnalyze);
+    await managerCore.runVolley(ns, math);
 
     const log = logOf(ns);
     for (const line of [
@@ -155,17 +155,17 @@ export const tests = {
   // smaller pool by lowering the steal fraction instead and the count does not
   // move - which is correct behaviour and a useless assertion.
   "share mode takes its slice out of the volley": async () => {
-    const { managerCore, mathAnalyze } = await loadScripts();
+    const { managerCore, math } = await loadScripts();
     const poolIn = (log) => Number(/volley \d+ batches[\s\S]*?of ([\d.]+)TB/.exec(log)?.[1] ?? -1);
 
     const off = volleyNs();
-    assert((await mathAnalyze.prepare(off)).ok, "prepare failed");
-    await managerCore.runVolley(off, mathAnalyze);
+    assert((await math.prepare(off)).ok, "prepare failed");
+    await managerCore.runVolley(off, math);
     const offLog = logOf(off);
 
     const on = volleyNs({ share: 0.25 });
-    assert((await mathAnalyze.prepare(on)).ok, "prepare failed");
-    await managerCore.runVolley(on, mathAnalyze);
+    assert((await math.prepare(on)).ok, "prepare failed");
+    await managerCore.runVolley(on, math);
     const onLog = logOf(on);
 
     assert(!/share \d+t on/.test(offLog), `share is off but a share line was printed:
@@ -183,11 +183,11 @@ ${onLog}`);
   },
 
   "a cycle leaks no RAM": async () => {
-    const { managerCore, mathAnalyze } = await loadScripts();
+    const { managerCore, math } = await loadScripts();
     const ns = volleyNs();
-    assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
+    assert((await math.prepare(ns)).ok, "prepare failed");
 
-    await managerCore.runVolley(ns, mathAnalyze);
+    await managerCore.runVolley(ns, math);
     // Workers hand their RAM back on landing, so anything still held is a
     // reservation the cycle failed to release.
     assert(Object.values(ns._used).every((v) => v < 1e-6),
