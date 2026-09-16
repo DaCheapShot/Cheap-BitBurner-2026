@@ -1,4 +1,3 @@
-import { loadCalibration, calibAgeMs } from "./calib.js";
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
          FORMULAS_PROGRAM, FORMULAS_MARKER, WORKER_LIST,
          DEPLOY_LIST, DEPLOY_MANIFEST } from "./config.js";
@@ -15,11 +14,7 @@ import { GANG_SERVICE } from "./gang/config.js";
  * Each tick, in order:
  *   1. root.js      - open ports and NUKE anything new
  *   2. deploy.js    - push workers, but only if root.js actually rooted something
- *   3. calibrate.js - only when the cache is missing or stale, and only for the
- *                     SHOTGUN's analyze build. Skipped entirely when Formulas.exe
- *                     is owned, and skipped entirely under continuous, whose
- *                     analyze backend keeps no cache and never reads one.
- *   4. cloud.js     - kept alive as a service (buys and upgrades servers), but
+ *   3. cloud.js     - kept alive as a service (buys and upgrades servers), but
  *                     only until the fleet is maxed; see CLOUD_DONE_MARKER
  *   5. manager      - kept alive as a service. FOUR files, two independent
  *                     choices: which SYSTEM (continuous or shotgun) and which
@@ -35,28 +30,29 @@ import { GANG_SERVICE } from "./gang/config.js";
  * per weaken window. They are ALTERNATIVES in the strongest sense: each believes
  * it owns the RAM pool and its report port, so two of them running is silent
  * corruption, not a slow mode. Continuous is the default; --shotgun picks the
- * other. See ensureOneManager, which has to police all four files, not two.
+ * other. See ensureOneManager, which has to police every manager file, not two.
  *
- * The backend choice is re-made EVERY tick within whichever system is chosen,
- * since Formulas.exe can be bought or lost at any time.
+ * The backend choice is re-made EVERY tick for continuous, which still has one
+ * file per backend. The shotgun has a single file that chooses for itself at
+ * startup, so --no-formulas is simply forwarded to it.
  *
  * TRANSIENTS RUN ONE AT A TIME, and the tick waits for each to exit before
  * starting the next. They all run on home, and the manager reserves everything
- * except HOME_RESERVE_GB - so running root, deploy and calibrate concurrently
+ * except HOME_RESERVE_GB - so running root and deploy concurrently
  * could exceed the reserve and fail to launch. Sequential keeps the peak to a
  * single script's footprint.
  *
  * Services are identified by filename in ns.ps("home"), so a manager you
  * started by hand is adopted rather than duplicated. Two managers would be
  * actively harmful: each would believe it owned the pool and the report port.
- * The same is true of the two manager BUILDS - see ensureOneManager.
+ * The same is true of continuous's two BUILDS - see ensureOneManager.
  *
  * Usage:  run scripts/boot.js
  *         run scripts/boot.js --target joesguns   (pin the manager's target)
  *         run scripts/boot.js --once              (one pass, then exit)
  *         run scripts/boot.js --no-cloud          (don't buy servers)
  *         run scripts/boot.js --no-gang           (don't supervise the gang)
- *         run scripts/boot.js --no-formulas       (always use the analyze build)
+ *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
  *         run scripts/boot.js --shotgun           (the volley batcher, not the stream)
  *         run scripts/boot.js --targets 5         (continuous only; shotgun ignores it)
  *         run scripts/boot.js --interval 30000
@@ -71,44 +67,34 @@ import { GANG_SERVICE } from "./gang/config.js";
  * resolves to nothing: findFunc in RamCalculations.ts matches a key only when
  * its value is a function or a number, so a bare `gang` descends into the
  * namespace, finds no leaf of that name, and adds 0.)
- * (calib.js is 0 GB, ns.read/ns.write are 0 GB, and root.js is imported only
- * for the marker path constant - a plain string, so it adds nothing.)
+ * (ns.read/ns.write are 0 GB, and root.js is imported only for the marker path
+ * constant - a plain string, so it adds nothing.)
  */
 
 const ROOT = "/scripts/root.js";
 const DEPLOY = "/scripts/deploy.js";
-const CALIBRATE = "/scripts/calibrate.js";
 const CLOUD = "/scripts/cloud.js";
 /**
- * The manager files, by system and then by backend.
+ * The manager files, by system: the always-available entry first, then the
+ * Formulas-only one where a system still has a separate build.
  *
- * A table rather than four constants because the two choices are INDEPENDENT:
- * --shotgun picks the row, Formulas.exe picks the column, and every one of the
- * other three files is a rival that must not be left running.
+ * The SHOTGUN NO LONGER HAS A PAIR. scripts/math.js holds both backends for
+ * 1.00 GB and picks between them per process, so manager.js is the only shotgun
+ * file and buying Formulas mid-run changes a branch rather than a filename. The
+ * continuous tree still carries its own twin math libs and so still has two.
+ *
+ * A list rather than named fields so a system can have one entry or two, and
+ * this collapses to a single file per system on the day continuous merges too.
+ * Every file that is not the wanted one is a rival that must not be left running.
  */
 const MANAGERS = {
-  continuous: {
-    analyze: "/scripts/continuous/manager.js",
-    formulas: "/scripts/continuous/manager-formulas.js",
-  },
-  shotgun: {
-    analyze: "/scripts/manager.js",
-    formulas: "/scripts/manager-formulas.js",
-  },
+  continuous: ["/scripts/continuous/manager.js", "/scripts/continuous/manager-formulas.js"],
+  shotgun: ["/scripts/manager.js"],
 };
 
-const ALL_MANAGERS = Object.values(MANAGERS).flatMap((m) => [m.analyze, m.formulas]);
+const ALL_MANAGERS = Object.values(MANAGERS).flat();
 
 const DEFAULT_TICK_MS = 60000;
-
-/**
- * Re-calibrate when the cache is older than this.
- *
- * The cached constants are linear and do not drift on their own, but per-host
- * growth bases are only recorded for servers at minimum security, so a cache
- * written before you rooted today's best target simply won't mention it.
- */
-const CALIB_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 /** How long to wait for a transient before giving up and moving on. */
 const TRANSIENT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -332,6 +318,10 @@ export async function main(ns) {
   const managerArgs = [
     ...(target ? ["--target", target] : []),
     ...(targets ? ["--targets", targets] : []),
+    // Forwarded, not interpreted. The shotgun has one file whose math.js reads
+    // this off ns.args and picks the *Analyze path; continuous still picks by
+    // filename, where the flag has already done its work via hasFormulas.
+    ...(noFormulas ? ["--no-formulas"] : []),
   ];
   const iIdx = args.indexOf("--interval");
   const tickMs = iIdx >= 0 ? Math.max(5000, Number(args[iIdx + 1]) || DEFAULT_TICK_MS) : DEFAULT_TICK_MS;
@@ -342,12 +332,6 @@ export async function main(ns) {
     `boot: ${mode}, tick ${Math.round(tickMs / 1000)}s, manager target ` +
       `${target ?? "auto"}${noCloud ? ", cloud off" : ""}${noManager ? ", manager off" : ""}`,
   );
-  // Said once, at startup, rather than as a skipped-step line every tick. The
-  // continuous analyze backend reads no calibration cache at all - see
-  // scripts/continuous/lib/mathAnalyze.js - so calibrating for it would be a
-  // 6.20 GB transient buying nothing.
-  if (mode === "continuous") ns.print("boot: continuous needs no calibration cache - skipping calibrate.js");
-
   let lastRootStamp = ns.read(ROOT_MARKER);
   let firstPass = true;
   // Say "fleet is maxed" once, not every tick - the whole point of this change
@@ -356,14 +340,10 @@ export async function main(ns) {
 
   do {
     // -- 0. did the manager die? -------------------------------------------
-    // Checked BEFORE calibrating, not after restarting it. A manager that exits
-    // on its own has almost always hit a target with no cached growth base - a
-    // newly rooted, richer server it auto-picked - so the cache must be
-    // refreshed in THIS tick, before the restart, or it just dies again.
     // Of the CHOSEN system's pair. A manager of the other system running is not
-    // this one surviving - it is a rival, and ensureOneManager is about to kill
-    // it - so counting it here would suppress the calibration refresh on exactly
-    // the tick that needs it.
+    // this one surviving - it is a rival that ensureOneManager is about to kill,
+    // so counting it here would report a live manager on exactly the tick it
+    // exited.
     const pair = MANAGERS[mode];
     const managerDied = !firstPass && !noManager
       && !isUp(ns, pair.analyze) && !isUp(ns, pair.formulas);
@@ -421,29 +401,7 @@ export async function main(ns) {
       }
     }
 
-    // -- 3. calibrate -------------------------------------------------------
-    // The calibration cache exists only to feed mathAnalyze. On the formulas
-    // build it is dead weight, and calibrating costs a 6.20 GB transient.
-    //
-    // Skipped outright under continuous. The cache exists to feed scripts/
-    // mathAnalyze.js; scripts/continuous/lib/mathAnalyze.js deliberately has no
-    // cache and never reads /data/calib.json, so under continuous this whole
-    // step is a 6.20 GB transient whose output nothing will open.
-    const wantsCalib = mode === "shotgun" && !hasFormulas;
-    const calib = wantsCalib ? loadCalibration(ns) : null;
-    const age = calib ? calibAgeMs(calib) : Infinity;
-    if (wantsCalib && (!calib || age > CALIB_MAX_AGE_MS || managerDied)) {
-      log(
-        !calib
-          ? "no calibration cache - calibrating"
-          : managerDied
-            ? "refreshing calibration before restarting the manager"
-            : `calibration is ${fmtAge(age)} old - refreshing`,
-      );
-      await runToCompletion(ns, CALIBRATE, [], log);
-    }
-
-    // -- 4. services --------------------------------------------------------
+    // -- 3. services --------------------------------------------------------
     // Sweep duplicates first. If an earlier build (or a hand-started copy) left
     // extras running, they are cleaned up before anything else is decided.
     if (!noCloud) {
@@ -466,7 +424,9 @@ export async function main(ns) {
       }
     }
     if (!noManager) {
-      const wanted = hasFormulas ? pair.formulas : pair.analyze;
+      // pair[1] only exists while a system still has a Formulas-only build;
+      // the shotgun's math.js decides for itself and is passed --no-formulas.
+      const wanted = (hasFormulas && pair[1]) || pair[0];
       ensureOneManager(ns, wanted, ALL_MANAGERS.filter((f) => f !== wanted), managerArgs, log);
     }
     // The gang supervisor. Gated on inGang() rather than started unconditionally

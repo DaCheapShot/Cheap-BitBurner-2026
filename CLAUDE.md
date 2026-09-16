@@ -45,7 +45,7 @@ Everything runs from the in-game terminal. `boot.js` is the entry point and supe
 
 ```
 run scripts/boot.js                     # root -> deploy -> cloud -> continuous batcher
-run scripts/boot.js --shotgun           # the volley batcher instead (adds calibrate)
+run scripts/boot.js --shotgun           # the volley batcher instead
 run scripts/boot.js --target omega-net  # pin the manager's target instead of auto-picking
 run scripts/boot.js --targets 5         # continuous only; the shotgun ignores it
 run scripts/boot.js --once --no-cloud
@@ -55,16 +55,15 @@ run scripts/boot.js --no-formulas       # force the analyze build
 **Boot chooses between TWO batchers**, and the choice is a flag, not a marker - retype it if
 you restart boot. `scripts/continuous/` is the default and the better earner. `--shotgun` runs
 `scripts/manager.js`. Within either, boot re-picks the formulas or analyze build every tick,
-because Formulas.exe can be bought or lost at any time. Calibration is a shotgun-only step:
-`scripts/continuous/lib/mathAnalyze.js` deliberately keeps no cache and never reads
-`/data/calib.json`, so running `calibrate.js` for it is a 6.20 GB transient buying nothing.
+because Formulas.exe can be bought or lost at any time. There is no calibration step any
+more: the three per-thread security constants are measured by one `rpc.js` call at manager
+startup - see `rpc.js` below.
 
 Individual pieces, useful when diagnosing:
 
 ```
 run scripts/root.js                     # open ports + NUKE everything reachable
 run scripts/deploy.js                   # scp workers home -> every rooted host
-run scripts/calibrate.js                # write /data/calib.json (needs target at min security)
 run scripts/capacity.js --steal 0.05    # RAM/target/batch-size analysis, launches nothing
 run scripts/manager.js --dry-run        # plan a volley and print it
 run scripts/manager.js --once --verbose # one volley, measured vs planned outcome
@@ -82,9 +81,10 @@ node tests/run.mjs                      # run the test suite
 
 **Only one process may own the RAM pool and the report port.** `port.read()` removes the
 message and `Server.pending` is per-process memory, so a second owner steals reports and
-over-commits the same RAM. There are **four** manager files — `manager.js`,
-`manager-formulas.js`, `continuous/manager.js`, `continuous/manager-formulas.js` — and all four
-are alternatives, not services. Only one may run. Do not run `prep.js` alongside any of them —
+over-commits the same RAM. There are **three** manager files — `manager.js`,
+`continuous/manager.js`, `continuous/manager-formulas.js` — and all three are alternatives,
+not services. Only one may run. (It was four: the shotgun's pair collapsed into one file when
+`math.js` took both backends, and the continuous tree still carries its own twin math libs.) Do not run `prep.js` alongside any of them —
 prep runs *inside* the manager. `boot.js` enforces this by killing every rival before it starts
 the one it wants (duplicates of the same file: lowest PID wins).
 
@@ -190,34 +190,111 @@ object keys (`{ hack: 1.70 }`), because acorn-walk's `Property` visitor only wal
 key. `tests/ram.test.mjs` models all of this and has a guard test naming the expensive
 collisions; it is the only thing standing between this repo and a 25 GB variable.
 
-- `config.js` and `calib.js` are genuinely free to import: `config.js` has no `ns` call and
-  mentions `hack`/`grow`/`weaken` only as object keys, `calib.js` uses only `ns.read` at 0 GB.
+- `config.js` is genuinely free to import: it has no `ns` call and mentions
+  `hack`/`grow`/`weaken` only as object keys.
   Keep it that way — one billed `ns` call in `config.js` taxes every script in the repo.
 - `verify.js` has no `ns` call either but still costs **0.25 GB** to import, because it reads
   `.hack` and `.grow` off result objects. Nothing to fix; know it before budgeting.
 - `ram.js` deliberately touches only four cheap functions and **no analyze functions**.
-- Constants that are linear in threads are measured once by `calibrate.js`, cached to
-  `/data/calib.json`, and read back through `calib.js` at 0 GB. This replaces `weakenAnalyze`,
-  `hackAnalyzeSecurity` and `growthAnalyzeSecurity` (1 GB each).
-- `growthAnalyze` stays live: it reads security at call time, so it cannot be cached. For the
-  same reason `calib.js` refuses to answer growth questions for a drifted host.
-- `hackAnalyze` stays live: it moves with hacking level, and reacting to that is the point.
+- Constants that are linear in threads are measured once, at startup, by a single `rpc.js` call
+  in `mathAnalyze.prepare()`. This keeps `weakenAnalyze`, `hackAnalyzeSecurity` and
+  `growthAnalyzeSecurity` (1 GB each) out of the manager for the 1.00 GB `ns.run` costs.
+  `calibrate.js`, `calib.js` and `/data/calib.json` did the same job with a cached file and a
+  6.20 GB recurring transient, and are gone.
+- **`growthAnalyze` is exactly logarithmic in its multiplier**, which is why one reading per
+  snapshot replaces every call. `ServerHelpers.ts`: `numCycleForGrowth(server, growth) =
+  Math.log(growth) / calculateServerGrowthLog(...)` - the divisor does not depend on `growth`,
+  and nothing rounds or clamps. So `snapshot()` fetches `growthLogK` once and
+  `growThreadsToRestore` answers any multiplier from it locally, with the number a live call
+  would have given at that security. This is the identity `calibrate.js` used, measured per
+  snapshot instead of cached per session - so there is no drifted-host case left to guard.
+- `hackAnalyze` still moves with hacking level, and reacting to that is the point - it is read
+  in `snapshot()`, so it is exactly as live as the snapshot the planner is working from.
+- **The whole analyze backend now costs 1.00 GB, all of it `ns.run`.** Every `*Analyze` name
+  appears only inside an `rpc` body, which is a string literal to the calculator. Two round
+  trips per cycle buy that, not seven: `snapshot()` bundles the four `getServer*` fields, the
+  three op times, `hackAnalyze` and `growthLogK` into one call, and `maxMoneyOfAll` asks about
+  the whole rooted network in another. Everything downstream reads the snapshot and stays
+  **synchronous**, which is what kept this from cascading `async` through `managerCore` and
+  `prepper`.
+- **One module holds BOTH backends for 1.00 GB**, where analyze alone cost 2.55 and formulas
+  2.50. `ns.formulas.*` was always 0 GB — what cost 2.50 was `getServer` and `getPlayer`, the
+  two reads that fetch the objects to hand it. Those objects survive JSON: `helpers.server()`
+  checks only that 14 plain data keys are present, and `helpers.person()` likewise, so
+  `snapshot()` fetches them through `rpc` and the formulas calls run resident on the
+  round-tripped objects.
 
 Worker scripts pay their cost **per thread**, so `hack.js` / `grow.js` / `weaken.js` contain
 nothing beyond one op and one port write. `share.js` follows the same rule and pays the most for
 breaking it: `ns.share` is 2.40 GB, so the worker costs **4.00 GB per thread** and one stray
 import of `ram.js` would add 0.35 GB to every one of tens of thousands of them.
 
-### Two math backends
+### Escaping the name tax: `rpc.js`
 
-`mathAnalyze.js` and `mathFormulas.js` implement the same interface. They must never be
-reachable from the same entry point — Bitburner charges for every `ns` function reachable
-through imports, so a script touching both pays ~2.5 GB it cannot use. `tests/isolation.test.mjs`
-enforces this by walking the import closure; `tests/ram.test.mjs` asserts the resulting totals.
+The bill is on NAMES reachable through STATIC imports, and `RamCalculations.ts` walks only
+`ImportDeclaration` — so a script GENERATED at runtime is invisible to it. `rpc.js` writes one,
+runs it, and reads the value back off a port. The caller pays `ns.run` (1.00) and nothing else;
+the body's cost is charged to the transient, for as long as the transient lives.
 
-`growThreadsToRestore(snap, from, to, atSecurity)` is where they differ. Formulas honours
-`atSecurity` by cloning the server object; analyze cannot, and always evaluates at current
-security. That asymmetry is deliberate and tested — do not "fix" it into an equivalence.
+```js
+const c = await rpc(ns, `return { w: ns.weakenAnalyze(1) };`);
+const n = await rpc(ns, `return ns.getServerMaxMoney(args[0]);`, host);
+```
+
+Four things about it are load-bearing:
+
+- **The filename is a hash of the body.** `Script.ts:39` returns early from `set content` when the
+  code is unchanged, so an identical body is written once, never re-compiled and never re-priced.
+  The reply port arrives as ARGUMENT ZERO rather than being baked into the text — baked in, the
+  source would depend on the caller's pid and every restart would mint a new file, so the litter
+  would grow without bound.
+- **Each caller replies on `RPC_PORT_BASE + ns.pid`.** Ports 1–4 are taken, and a shared reply
+  port would let two resident callers read each other's answers — a wrong number, silently. Any
+  positive integer is a legal port (`NumNetscriptPorts` is `Number.MAX_SAFE_INTEGER`), so keying
+  by pid is free and cannot collide.
+- **A body may `import` the repo's 0 GB pure modules** (`config.js`, `verify.js`, `gang/math.js`);
+  `rpc.js` hoists the import lines out of `main`, where they would be a syntax error. That is what
+  keeps logic out of strings — a body stays a few `ns` calls around a real import.
+- **Every quiet failure is made loud.** `ns.run` returns a bare 0 for BOTH "no free RAM on home"
+  and "does not compile", so the throw names the file and both causes. The body's own throw is
+  caught inside the transient and returned as a value, because a transient that dies takes its log
+  window with it a few hundred ms later — the same trap `gang/report.js` exists to close. A
+  timed-out call clears its port first, so a late reply is never read as the next call's answer.
+  A second call while one is in flight throws: the game's own concurrency check does NOT catch
+  that, `nextWrite()` not being a blocking netscript call.
+
+**It only helps RESIDENT scripts.** `cloud.js`, `root.js`, `deploy.js` and the four `gang/`
+transients already hold their RAM for under a second, so routing them through here saves nothing
+and adds 1.00 GB each. Never for the workers — they are charged per thread and they ARE the call.
+
+**It is invisible to `ramOf()`**, which blanks string literals. `tests/rpc.test.mjs` extracts every
+body in `scripts/` and parses it, which recovers the syntax check but not the RAM accounting; a
+body's RAM is only ever charged to a transient, so the exposure is a runtime `ns.run` → 0, never a
+manager that will not start. Bodies must be plain template literals — an interpolated one is
+rejected, because no check can read it and it would mint a file per distinct value.
+
+### Two math backends, one module
+
+`scripts/math.js` holds both and picks per PROCESS, in `prepare()`: formulas when the program
+is owned, analyze otherwise, and analyze always under `--no-formulas`, which it reads straight
+off `ns.args`. Buying Formulas mid-run no longer needs a manager swap.
+
+**This used to be forbidden**, and the rule that forbade it was right at the time: a script
+reachable from both paid for both, so there were twin math modules, twin managers, twin preps,
+a `tests/isolation.test.mjs` to keep them apart and a swap in `boot.js` between the files. All
+of that is deleted. What changed is that neither backend costs anything resident any more —
+see the `rpc.js` section above.
+
+`growThreadsToRestore(snap, from, to, atSecurity)` is where the two paths differ. Formulas
+honours `atSecurity` by cloning the server object; analyze cannot, because `growthLogK` was
+measured at the snapshot's security. That asymmetry is deliberate and tested — do not "fix" it
+into an equivalence. It is now a difference between two MODES of one module rather than two
+files, which makes it easier to tidy away by accident, so `tests/math.test.mjs` pins it with
+two separate module instances.
+
+**`scripts/continuous/lib/` still has its own twin pair**, untouched by this, and the isolation
+rule still applies there: `mathAnalyze.js` and `mathFormulas.js` in that tree must never be
+reachable from one entry point. `tests/continuous.test.mjs` enforces it.
 
 ## Architecture
 
@@ -231,17 +308,14 @@ editor's RAM panel when one moves.
 | module | role | cost |
 |---|---|---|
 | `config.js` | every tunable, shared so nothing drifts | 0 |
-| `calib.js` | reads `/data/calib.json` | 0 |
 | `verify.js` | landing analysis — the definition of "landed correctly" | 0.25 |
 | `ram.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
+| `rpc.js` | run a body in a throwaway script, get its value back | 1.00 |
 | `prepper.js` | prep as a module (manager runs it in-process) | 2.40 |
-| `mathAnalyze.js` | math interface via *Analyze + calibration cache | 2.55 |
-| `mathFormulas.js` | math interface via `ns.formulas` | 2.50 |
+| `math.js` | both math backends, reached entirely through `rpc.js` | 1.00 |
 | `managerCore.js` | the volley loop + share top-up, math-free | 2.80 |
-| `manager.js` | entry: core + mathAnalyze (always works) | 6.95 |
-| `manager-formulas.js` | entry: core + mathFormulas | 6.90 |
-| `prep.js` | entry: prepper + mathAnalyze | 6.55 |
-| `prep-formulas.js` | entry: prepper + mathFormulas | 6.50 |
+| `manager.js` | entry: core + math (the only shotgun entry) | 5.40 |
+| `prep.js` | entry: prepper + math | 5.00 |
 | `boot.js` | supervisor, picks the batcher | 3.60 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
@@ -263,8 +337,7 @@ editor's RAM panel when one moves.
 The continuous entries are the two that have to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds them under 16 GB for that reason. The
 analyze build carries 3.00 GB of *Analyze functions the shotgun caches away through
-`calibrate.js`, and 2.00 GB for the `ns.getServer` in `continuous/lib/cores.js`; porting the
-calibration pair into that folder is the next 5 GB if one is ever needed.
+an `rpc.js` call at startup, and 2.00 GB for the `ns.getServer` in `continuous/lib/cores.js`.
 
 `connectme.js` (3.85) prints the terminal `connect` chain to a host. It trims the
 chain wherever `src/Terminal/commands/connect.ts` permits a direct jump - that is,
@@ -279,7 +352,7 @@ so unreachable rows are dropped rather than reported as an error.
 
 `capacity.js` (8.15) is the surviving diagnostic. It ranks targets by real throughput, which
 the manager does not do — `pickTarget` chooses the richest *hackable* server, not the most
-profitable one. `prep.js` / `prep-formulas.js` and `calibrate.js` are manual entry points to
+profitable one. `prep.js` is a manual entry point to
 logic the supervisor otherwise drives. `scan.js` predates the batcher.
 
 ### Prep, and why it fans out
@@ -518,8 +591,7 @@ They run on home only and are never `scp`'d, so the "a worker's imports must be 
 trap does not apply here.
 
 `/data/gang.txt` exists only so `ascend.js` and `equip.js` can skip a 2.00 GB
-`getGangInformation` for three numbers, exactly as `calib.js` spares the manager the analyze
-functions. `marker.js` collapses missing, corrupt and schema-invalid to `null`, same idiom.
+`getGangInformation` for three numbers. `marker.js` collapses missing, corrupt and schema-invalid to `null`, same idiom.
 
 **Transients report back on `GANG_PORT` (4), and `ns.print` is banned in them.** `ns.print` writes
 to the CALLING script's own log window, and a transient's window dies with the process a few
@@ -744,7 +816,7 @@ Three reasons this is not a style preference:
 **`ns.formatNumber()` and `ns.nFormat()` do not exist in this fork** — see Fork differences. Both
 are `undefined` here, which is a `TypeError` at the call site and nowhere else.
 
-**Format at the CALL SITE, not inside a 0 GB pure module.** `config.js`, `calib.js`, `verify.js`,
+**Format at the CALL SITE, not inside a 0 GB pure module.** `config.js`, `verify.js`,
 `gang/math.js` and the like have no `ns` and must keep it that way; threading one in to format a
 string is the wrong trade. Return the number, let the script that has `ns` print it — that is why
 `gang/report.js` takes a finished string.

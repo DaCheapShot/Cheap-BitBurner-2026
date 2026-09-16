@@ -57,7 +57,7 @@ import {
  * fixed one leaves money on the table.
  *
  * `run(ns, math)` is called by the entry scripts, scripts/manager.js and
- * scripts/manager-formulas.js - each injects its own math implementation so
+ * scripts/prep.js - the math implementation is injected so
  * this module never has to pick one.
  *
  * Usage:  run scripts/manager.js
@@ -81,9 +81,9 @@ import {
  *   ram.js/prepper.js union 2.00 + exec (already counted)
  *   + ps 0.20 (the share census) + getSharePower 0.20 (the only honest reading
  *     of the bonus) = 2.40 GB
- * The math implementation's cost is added by whichever entry script imports it:
- *   manager.js + mathAnalyze  = 6.55 GB
- *   manager-formulas.js + mathFormulas = 6.50 GB
+ * The math implementation's cost is added by the entry script that imports it:
+ *   manager.js + math.js = 5.40 GB - one entry, both backends, because every
+ *   ns call in math.js goes through an rpc body and costs only ns.run.
  */
 
 const padL = (s, n) => String(s).padStart(n);
@@ -899,13 +899,13 @@ function serviceShare(ns, pool, ramPerThread, log, prefix = INDENT) {
  *
  * @param {NS} ns
  * @param {object} math injected math implementation - see the math interface
- *                      documented in mathAnalyze.js / mathFormulas.js
+ *                      documented in math.js
  */
 export async function runVolley(ns, math) {
   ns.disableLog("ALL");
   ns.ui.openTail();
 
-  const ready = math.prepare(ns);
+  const ready = await math.prepare(ns);
   if (!ready.ok) {
     ns.tprint(`ERROR: ${ready.error}`);
     return;
@@ -939,7 +939,7 @@ export async function runVolley(ns, math) {
   // rooting new servers and levelling up both change what is reachable, and a
   // target chosen at launch goes stale within minutes.
   const pinnedTarget = tIdx >= 0 ? args[tIdx + 1] : null;
-  let target = pinnedTarget ?? pickTarget(ns, math);
+  let target = pinnedTarget ?? await pickTarget(ns, math);
   if (!target) {
     ns.tprint("ERROR: no rooted, money-bearing target found. Pass --target <host>.");
     return;
@@ -1007,10 +1007,12 @@ export async function runVolley(ns, math) {
     // else in the cycle: the previous volley has fully resolved and its RAM is
     // released, so nothing is in flight against the old target.
     if (!pinnedTarget) {
-      const best = pickTarget(ns, math);
+      const best = await pickTarget(ns, math);
       if (best && best !== target) {
-        const bestMoney = math.maxMoneyOf(ns, best);
-        const currentMoney = math.maxMoneyOf(ns, target);
+        // One round trip for both, rather than two - see math.maxMoneyOfAll.
+        const money = await math.maxMoneyOfAll(ns, [best, target]);
+        const bestMoney = money[best];
+        const currentMoney = money[target];
         if (bestMoney > currentMoney * TARGET_SWITCH_MARGIN) {
           ns.print(
             `retargeting ${target} (${fmtMoney(currentMoney)}) -> ${best} ` +
@@ -1032,7 +1034,7 @@ export async function runVolley(ns, math) {
     //
     // One snapshot per cycle. Everything downstream reads from it, so the
     // per-cycle ns cost is fixed no matter how many steal candidates are tried.
-    let m = math.snapshot(ns, target);
+    let m = await math.snapshot(ns, target);
     if (!isPrepped(m)) {
       ns.print(
         `cycle ${cycle}: ${target} needs prep - ${fmtMoney(m.money)}/${fmtMoney(m.maxMoney)}, ` +
@@ -1178,7 +1180,7 @@ export async function runVolley(ns, math) {
       );
       ns.print(
         `           [v] state: money ${fmtMoney(m.money)}/${fmtMoney(m.maxMoney)}, ` +
-          `sec ${m.sec.toFixed(2)}/${m.minSec.toFixed(2)}, backend ${math.NAME}, ` +
+          `sec ${m.sec.toFixed(2)}/${m.minSec.toFixed(2)}, backend ${math.backend()}, ` +
           `hack fraction/thread ${perThread.toExponential(3)}`,
       );
       ns.print(
@@ -1246,7 +1248,7 @@ export async function runVolley(ns, math) {
     // -- judge --------------------------------------------------------------
 
     const j = judgeVolley(byBatch, expected, timing.s);
-    const after = math.snapshot(ns, target);
+    const after = await math.snapshot(ns, target);
 
     // The drift measurement, free: hackFractionPerThread comes from the
     // snapshot already taken, and both math backends already price it.

@@ -150,14 +150,33 @@ export const tests = {
   // times.hack, ram.grow, threads.weaken1. The game charges those like calls.
   // Left alone: they are the clearest names available for what they hold, and
   // 0.40 GB does not buy renaming eight files' worth of them.
-  "manager.js (analyze) stays at 6.95 GB": () => {
+  // 6.95 before rpc.js, 7.95 with only the startup constants moved, 5.40 now
+  // that mathAnalyze reaches the *Analyze API entirely through rpc bodies. The
+  // whole of its 2.55 is gone and what remains of it is the 1.00 GB ns.run.
+  //
+  // Two round trips per cycle buy that, not seven: snapshot() bundles the four
+  // getServer* fields, the three op times, hackAnalyze and the growth constant
+  // into one call, and maxMoneyOfAll asks about the whole network in another.
+  // Everything downstream reads the snapshot and stays synchronous.
+  "manager.js (analyze) costs 5.40 GB": () => {
     const ram = ramOf("manager");
-    assert(Math.abs(ram - 6.95) < 0.011, `expected 6.95 GB, got ${ram.toFixed(2)}`);
+    assert(Math.abs(ram - 5.40) < 0.011, `expected 5.40 GB, got ${ram.toFixed(2)}`);
   },
 
-  "manager-formulas.js costs 6.90 GB": () => {
-    const ram = ramOf("manager-formulas");
-    assert(Math.abs(ram - 6.90) < 0.011, `expected 6.90 GB, got ${ram.toFixed(2)}`);
+  // 6.55 before. Same story as manager.js, one module further down.
+  "prep.js (analyze) costs 5.00 GB": () => {
+    const ram = ramOf("prep");
+    assert(Math.abs(ram - 5.00) < 0.011, `expected 5.00 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // The pair this replaced cost 6.95 and 6.90, and one of them was always
+  // wrong for the current state of Formulas.exe.
+  "one shotgun manager replaced the pair": () => {
+    assert(!scriptNames().includes("manager-formulas"),
+      "manager-formulas.js should be gone - math.js picks the backend per process");
+    assert(!scriptNames().includes("prep-formulas"), "prep-formulas.js should be gone too");
+    assert(!scriptNames().includes("mathAnalyze") && !scriptNames().includes("mathFormulas"),
+      "the twin math modules should be gone - scripts/math.js holds both");
   },
 
   // Charged PER THREAD, and the manager places tens of thousands of them, so a
@@ -225,7 +244,7 @@ export const tests = {
   // The manager reaches SHARE_WORKER as a STRING from config.js and must never
   // import the worker itself: ns.share is 2.40 GB for a function it never calls.
   "no manager build pays for ns.share": () => {
-    for (const entry of ["manager", "manager-formulas", "boot"]) {
+    for (const entry of ["manager", "boot"]) {
       assert(!closure(entry).has("share"),
         `${entry}.js imports share.js - 2.40 GB for a function it never calls`);
     }
@@ -239,9 +258,19 @@ export const tests = {
     assert(!readScript("connectme").includes('from "./'), "connectme.js should import no other script");
   },
 
-  "neither entry pays for the other's backend": () => {
-    assert(ramOf("manager") < 8, "analyze entry is paying formulas cost");
-    assert(ramOf("manager-formulas") < 8, "formulas entry is paying analyze cost");
+  // This replaces "neither entry pays for the other's backend", which guarded
+  // the twin split. math.js now holds BOTH backends: every *Analyze name is
+  // inside an rpc body, and ns.formulas.* was always 0 GB - what used to cost
+  // 2.50 was getServer and getPlayer, and snapshot() fetches those through rpc
+  // too, because helpers.server() only checks that 14 plain data keys are
+  // present and those survive JSON.
+  //
+  // If this ever exceeds 1.00, a backend has leaked out of an rpc body and
+  // every importer is paying for math it may not use.
+  "math.js holds both backends for 1.00 GB": () => {
+    const marginal = ramOf("math") - BASE;
+    assert(Math.abs(marginal - 1.00) < 0.011,
+      `expected 1.00 GB marginal (ns.run alone), got ${marginal.toFixed(2)}`);
   },
 
   // The continuous tree was never priced here at all - closure() only followed
@@ -343,8 +372,8 @@ export const tests = {
     const COPY = /\[\s*1e(?:9|12)\s*,\s*"[a-zA-Z]"\s*\]|"k"\s*,\s*"m"\s*,\s*"b"/;
 
     const seen = new Set();
-    for (const entry of ["boot", "manager", "manager-formulas", "capacity", "cloud", "deploy",
-                         "root", "sharemode", "connectme", "calibrate", "prep", "prep-formulas",
+    for (const entry of ["boot", "manager", "capacity", "cloud", "deploy",
+                         "root", "sharemode", "connectme", "prep",
                          "continuous/manager", "continuous/manager-formulas", "continuous/servers",
                          "continuous/capacity", "gang/gang", "gang/tick", "gang/ascend",
                          "gang/equip", "gang/war", "gang/create"]) {
@@ -379,8 +408,8 @@ export const tests = {
   "no script names a variable after an expensive ns function": () => {
     const BANNED = { window: 25, document: 25, attempt: 10, share: 2.4, run: 1, probe: 0.2 };
     const entries = new Set();
-    for (const e of ["boot", "manager", "manager-formulas", "capacity", "cloud", "deploy",
-                     "root", "sharemode", "connectme", "calibrate", "prep", "prep-formulas",
+    for (const e of ["boot", "manager", "capacity", "cloud", "deploy",
+                     "root", "sharemode", "connectme", "prep",
                      "continuous/manager", "continuous/manager-formulas", "continuous/servers",
                      "continuous/capacity",
                      "gang/gang", "gang/tick", "gang/ascend", "gang/equip", "gang/war",
@@ -414,5 +443,18 @@ export const tests = {
             `every script that imports it. Rename the variable.`);
       }
     }
+  },
+
+  // 1.60 base + ns.run 1.00, and that is the whole point: a caller pays for the
+  // generated script's ENTRY, never for what the body calls. write, read,
+  // getPortHandle, nextPortWrite, clear and asleep are all 0 GB in this fork.
+  //
+  // If this ever reads higher, something in rpc.js has been named after a
+  // billed function and every importer is paying for it.
+  "rpc.js costs 2.60 GB and imports nothing": () => {
+    const ram = ramOf("rpc");
+    assert(Math.abs(ram - 2.60) < 0.011, `expected 2.60 GB, got ${ram.toFixed(2)}`);
+    assert(!codeOnly(readScript("rpc")).includes('from "./'),
+      "rpc.js must import nothing - scripts/continuous/ imports it, and a dependency would cross that tree's self-containment rule for no RAM saving");
   },
 };

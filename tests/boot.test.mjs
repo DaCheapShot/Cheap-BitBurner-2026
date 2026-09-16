@@ -1,6 +1,6 @@
 import { loadScripts, assert } from "./harness.mjs";
 
-const TRANSIENT = ["scripts/root.js", "scripts/deploy.js", "scripts/calibrate.js"];
+const TRANSIENT = ["scripts/root.js", "scripts/deploy.js"];
 
 /**
  * Drive boot for a fixed number of ticks against a fake network.
@@ -87,11 +87,6 @@ const CONT_ORPHANS = [
  */
 const SHOTGUN = ["--shotgun"];
 
-const CALIB = JSON.stringify({
-  weakenPerThread: 0.05, hackSecPerThread: 0.002, growSecPerThread: 0.004,
-  written: Date.now(), hosts: {},
-});
-
 export const tests = {
   // Adding a worker file roots nothing, so ROOT_MARKER never moves, so deploy
   // never runs and the file sits on home while every host runs without it. The
@@ -102,7 +97,7 @@ export const tests = {
 
     // Steady state: manifest already records exactly what boot wants.
     const settled = await runBoot({
-      files: { "/data/calib.json": CALIB, [DEPLOY_MANIFEST]: DEPLOY_LIST.join(" ") },
+      files: { [DEPLOY_MANIFEST]: DEPLOY_LIST.join(" ") },
       hasFormulas: false, ticks: 3,
     });
     const deploys = settled.launched.filter((f) => f === "scripts/deploy.js").length;
@@ -110,7 +105,7 @@ export const tests = {
 
     // A worker file was added since the last broadcast.
     const stale = await runBoot({
-      files: { "/data/calib.json": CALIB, [DEPLOY_MANIFEST]: "scripts/hack.js" },
+      files: { [DEPLOY_MANIFEST]: "scripts/hack.js" },
       hasFormulas: false, ticks: 3,
     });
     assert(stale.launched.filter((f) => f === "scripts/deploy.js").length > 1,
@@ -129,7 +124,7 @@ export const tests = {
     const r = await runBoot({
       // deploy runs, but the manifest never catches up - exactly what an older
       // deploy.js with a shorter DEPLOY_LIST would leave behind.
-      files: { "/data/calib.json": CALIB, [DEPLOY_MANIFEST]: "scripts/hack.js" },
+      files: { [DEPLOY_MANIFEST]: "scripts/hack.js" },
       hasFormulas: false, ticks: 2, onTprint: (s) => said.push(s),
     });
 
@@ -138,36 +133,51 @@ export const tests = {
       `boot should name the stale copy, said: ${JSON.stringify(said)}`);
   },
 
-  "without Formulas, boot launches the analyze manager": async () => {
-    const r = await runBoot({ args: SHOTGUN, files: { "/data/calib.json": CALIB }, hasFormulas: false });
+  "without Formulas, boot launches the shotgun manager": async () => {
+    const r = await runBoot({ args: SHOTGUN, hasFormulas: false });
     assert(r.launched.includes("scripts/manager.js"), `expected manager.js, launched: ${r.launched}`);
-    assert(!r.launched.includes("scripts/manager-formulas.js"), "should not launch the formulas build");
   },
 
-  "with Formulas, boot launches the formulas manager and skips calibrate": async () => {
-    const r = await runBoot({ args: SHOTGUN, files: {}, hasFormulas: true });
-    assert(r.launched.includes("scripts/manager-formulas.js"), `expected manager-formulas.js, launched: ${r.launched}`);
-    assert(!r.launched.includes("scripts/calibrate.js"),
-      "calibrate.js feeds only mathAnalyze and must be skipped on the formulas build");
+  // The backend swap still exists - for CONTINUOUS, which still has one file
+  // per backend. The shotgun has a single file whose math.js chooses per
+  // process, so these move to the pair that still has two.
+  "with Formulas, boot launches the continuous formulas build": async () => {
+    const r = await runBoot({ files: {}, hasFormulas: true });
+    assert(r.launched.includes("scripts/continuous/manager-formulas.js"),
+      `expected the formulas build, launched: ${r.launched}`);
+  },
+
+  // What replaced the shotgun swap. There is one file, so the flag has to
+  // reach the PROCESS: scripts/math.js reads it off ns.args in prepare().
+  "the shotgun gets one manager, with --no-formulas forwarded to it": async () => {
+    const owned = await runBoot({ args: SHOTGUN, hasFormulas: true });
+    assert(owned.launched.includes("scripts/manager.js"),
+      `there is only one shotgun manager now, launched: ${owned.launched}`);
+
+    const forced = await runBoot({ args: [...SHOTGUN, "--no-formulas"], hasFormulas: true });
+    const proc = forced.procs.find((x) => x.filename === "scripts/manager.js");
+    assert(proc, `manager.js should be running, procs: ${forced.procs.map((x) => x.filename)}`);
+    assert(proc.args.includes("--no-formulas"),
+      `--no-formulas must be forwarded, got args: ${JSON.stringify(proc.args)}`);
   },
 
   "buying Formulas swaps the running manager": async () => {
     const r = await runBoot({
-      args: SHOTGUN, files: { "/data/calib.json": CALIB }, hasFormulas: true,
-      running: ["scripts/manager.js"],
+      hasFormulas: true,
+      running: ["scripts/continuous/manager.js"],
     });
-    assert(r.killed.includes("scripts/manager.js"), `should kill the analyze manager, killed: ${r.killed}`);
-    assert(r.launched.includes("scripts/manager-formulas.js"), "should start the formulas manager");
-    const live = r.procs.filter((p) => p.filename.startsWith("scripts/manager"));
+    assert(r.killed.includes("scripts/continuous/manager.js"),
+      `should kill the analyze build, killed: ${r.killed}`);
+    assert(r.launched.includes("scripts/continuous/manager-formulas.js"), "should start the formulas build");
+    const live = r.procs.filter((p) => p.filename.startsWith("scripts/continuous/manager"));
     assert(live.length === 1, `exactly one manager must run, found ${live.length}`);
   },
 
-  "--no-formulas forces the analyze build": async () => {
-    const r = await runBoot({
-      args: [...SHOTGUN, "--no-formulas"], files: { "/data/calib.json": CALIB }, hasFormulas: true,
-    });
-    assert(r.launched.includes("scripts/manager.js"), "should honour --no-formulas");
-    assert(!r.launched.includes("scripts/manager-formulas.js"), "should not launch the formulas build");
+  "--no-formulas forces the continuous analyze build": async () => {
+    const r = await runBoot({ args: ["--no-formulas"], hasFormulas: true });
+    assert(r.launched.includes("scripts/continuous/manager.js"), "should honour --no-formulas");
+    assert(!r.launched.includes("scripts/continuous/manager-formulas.js"),
+      "should not launch the formulas build");
   },
 
   "boot writes the formulas marker": async () => {
@@ -182,15 +192,15 @@ export const tests = {
   // target on a plan nobody owns any more.
   "swapping managers kills the workers the old one left behind": async () => {
     const r = await runBoot({
-      args: SHOTGUN, files: { "/data/calib.json": CALIB }, hasFormulas: true,
-      running: ["scripts/manager.js"], workers: ORPHANS,
+      hasFormulas: true,
+      running: ["scripts/continuous/manager.js"], workers: ORPHANS,
     });
-    assert(r.killed.includes("scripts/manager.js"), "the analyze manager should be stopped");
+    assert(r.killed.includes("scripts/continuous/manager.js"), "the analyze build should be stopped");
     for (const w of ORPHANS) {
       assert(r.killed.includes(w.filename), `${w.filename} should have been killed, killed: ${r.killed}`);
     }
     assert(!r.procs.some((p) => p.filename.endsWith("hack.js")), "a worker survived the swap");
-    assert(r.launched.includes("scripts/manager-formulas.js"), "the formulas manager should start");
+    assert(r.launched.includes("scripts/continuous/manager-formulas.js"), "the formulas build should start");
   },
 
   // Share workers are NOT in WORKER_LIST, and that is deliberate: none of the
@@ -201,8 +211,8 @@ export const tests = {
   // Killing them would drop the reputation bonus for a tick and buy nothing.
   "a manager swap spares the share workers": async () => {
     const r = await runBoot({
-      args: SHOTGUN, files: { "/data/calib.json": CALIB }, hasFormulas: true,
-      running: ["scripts/manager.js"],
+      hasFormulas: true,
+      running: ["scripts/continuous/manager.js"],
       workers: [...ORPHANS, { filename: "scripts/share.js", host: "p1", threads: 2921 }],
     });
     assert(!r.killed.includes("scripts/share.js"),
@@ -217,7 +227,7 @@ export const tests = {
   // ids out of argv. Only a swap that leaves NO manager may clear the network.
   "deduplicating managers leaves the survivor's workers alone": async () => {
     const r = await runBoot({
-      args: SHOTGUN, files: { "/data/calib.json": CALIB }, hasFormulas: false,
+      args: SHOTGUN, hasFormulas: false,
       running: ["scripts/manager.js", "scripts/manager.js"], workers: ORPHANS,
     });
     assert(r.killed.includes("scripts/manager.js"), "the duplicate should be killed");
@@ -231,17 +241,17 @@ export const tests = {
 
   "a swap with nothing in flight kills nothing extra": async () => {
     const r = await runBoot({
-      args: SHOTGUN, files: { "/data/calib.json": CALIB }, hasFormulas: true,
-      running: ["scripts/manager.js"],
+      hasFormulas: true,
+      running: ["scripts/continuous/manager.js"],
     });
-    assert(r.killed.filter(Boolean).join(",") === "scripts/manager.js",
+    assert(r.killed.filter(Boolean).join(",") === "scripts/continuous/manager.js",
       `only the old manager should be killed, killed: ${r.killed}`);
   },
 
   // ------------------------------------------------------------ two systems --
 
   "boot runs the continuous batcher unless told otherwise": async () => {
-    const r = await runBoot({ files: { "/data/calib.json": CALIB }, hasFormulas: false });
+    const r = await runBoot({ hasFormulas: false });
     assert(r.launched.includes("scripts/continuous/manager.js"),
       `expected the continuous manager, launched: ${r.launched}`);
     assert(!r.launched.includes("scripts/manager.js"),
@@ -249,7 +259,7 @@ export const tests = {
   },
 
   "--shotgun runs the volley batcher instead": async () => {
-    const r = await runBoot({ args: SHOTGUN, files: { "/data/calib.json": CALIB }, hasFormulas: false });
+    const r = await runBoot({ args: SHOTGUN, hasFormulas: false });
     assert(r.launched.includes("scripts/manager.js"), `expected the shotgun, launched: ${r.launched}`);
     assert(!r.launched.some((f) => f.startsWith("scripts/continuous/")),
       "nothing continuous should start under --shotgun");
@@ -263,7 +273,7 @@ export const tests = {
   // minute, forever, earning nothing.
   "starting continuous stops a running shotgun manager": async () => {
     const r = await runBoot({
-      files: { "/data/calib.json": CALIB }, hasFormulas: false,
+      hasFormulas: false,
       running: ["scripts/manager.js"], workers: ORPHANS,
     });
     assert(r.killed.includes("scripts/manager.js"),
@@ -281,7 +291,7 @@ export const tests = {
   // even picked.
   "switching to the shotgun clears the continuous workers": async () => {
     const r = await runBoot({
-      args: SHOTGUN, files: { "/data/calib.json": CALIB }, hasFormulas: false,
+      args: SHOTGUN, hasFormulas: false,
       running: ["scripts/continuous/manager.js"], workers: CONT_ORPHANS,
     });
     assert(r.killed.includes("scripts/continuous/manager.js"),
@@ -300,7 +310,7 @@ export const tests = {
   // as a build swap does.
   "a cross-system swap spares the share workers": async () => {
     const r = await runBoot({
-      args: SHOTGUN, files: { "/data/calib.json": CALIB }, hasFormulas: false,
+      args: SHOTGUN, hasFormulas: false,
       running: ["scripts/continuous/manager.js"],
       workers: [...CONT_ORPHANS, { filename: "scripts/share.js", host: "p1", threads: 2921 }],
     });
@@ -308,28 +318,12 @@ export const tests = {
       `share workers must survive a cross-system swap, killed: ${r.killed}`);
   },
 
-  // scripts/continuous/lib/mathAnalyze.js deliberately keeps no calibration
-  // cache and never reads /data/calib.json, so calibrating for it is a 6.20 GB
-  // transient whose output nothing opens. managerDied normally FORCES a refresh
-  // - that path has to be off too, not just the age check.
-  "continuous never calibrates, even with no cache and a dead manager": async () => {
-    const r = await runBoot({ files: {}, hasFormulas: false, ticks: 3 });
-    assert(!r.launched.includes("scripts/calibrate.js"),
-      `continuous reads no calibration cache, launched: ${r.launched}`);
-  },
-
-  "the shotgun still calibrates when its cache is missing": async () => {
-    const r = await runBoot({ args: SHOTGUN, files: {}, hasFormulas: false });
-    assert(r.launched.includes("scripts/calibrate.js"),
-      `the analyze shotgun build needs the cache, launched: ${r.launched}`);
-  },
-
   // --targets is continuous's; the shotgun ignores it. Passed through rather
   // than interpreted, so boot never has to know which flag belongs to which.
   "--target and --targets reach the manager": async () => {
     const r = await runBoot({
       args: ["--target", "phantasy", "--targets", "5"],
-      files: { "/data/calib.json": CALIB }, hasFormulas: false,
+      hasFormulas: false,
     });
     const mgr = r.procs.find((p) => p.filename === "scripts/continuous/manager.js");
     assert(mgr, `the continuous manager should be running, procs: ${r.procs.map((p) => p.filename)}`);
