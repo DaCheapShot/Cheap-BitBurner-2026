@@ -49,15 +49,15 @@ run scripts/boot.js --shotgun           # the volley batcher instead
 run scripts/boot.js --target omega-net  # pin the manager's target instead of auto-picking
 run scripts/boot.js --targets 5         # continuous only; the shotgun ignores it
 run scripts/boot.js --once --no-cloud
-run scripts/boot.js --no-formulas       # force the analyze build
+run scripts/boot.js --no-formulas       # force the *Analyze math path
 ```
 
 **Boot chooses between TWO batchers**, and the choice is a flag, not a marker - retype it if
 you restart boot. `scripts/continuous/` is the default and the better earner. `--shotgun` runs
-`scripts/manager.js`. Within either, boot re-picks the formulas or analyze build every tick,
-because Formulas.exe can be bought or lost at any time. There is no calibration step any
-more: the three per-thread security constants are measured by one `rpc.js` call at manager
-startup - see `rpc.js` below.
+`scripts/manager.js`. Neither has a formulas BUILD: each manager's math module uses
+Formulas.exe when owned, and the continuous one re-checks every rescan, so buying the program
+upgrades the running process. There is no calibration step any more: the per-thread security
+constants are measured by one `rpc.js` call at manager startup - see `rpc.js` below.
 
 Individual pieces, useful when diagnosing:
 
@@ -82,15 +82,16 @@ node tests/run.mjs                      # run the test suite
 
 **Only one process may own the RAM pool and the report port.** `port.read()` removes the
 message and `Server.pending` is per-process memory, so a second owner steals reports and
-over-commits the same RAM. There are **three** manager files — `manager.js`,
-`continuous/manager.js`, `continuous/manager-formulas.js` — and all three are alternatives,
-not services. Only one may run. (It was four: the shotgun's pair collapsed into one file when
-`math.js` took both backends, and the continuous tree still carries its own twin math libs.) Do not run `prep.js` alongside any of them —
+over-commits the same RAM. There are **two** manager files — `manager.js` and
+`continuous/manager.js` — and they are alternatives, not services. Only one may run. (It was
+four: each system's formulas/analyze pair collapsed into one file when its math module took
+both backends. The retired `manager-formulas.js` files are still killed as rivals — filesync
+never deletes from the game, so a stale copy can still be running.) Do not run `prep.js` alongside any of them —
 prep runs *inside* the manager. `boot.js` enforces this by killing every rival before it starts
 the one it wants (duplicates of the same file: lowest PID wins).
 
 The continuous side guards itself too: `findRivals` in `continuous/core.js` **aborts** rather
-than starting beside any of the four, and does not kill the rival — which system runs is the
+than starting beside any other manager, and does not kill the rival — which system runs is the
 user's decision. That is why boot has to clear the others first: a survivor does not make the
 incoming manager degrade, it makes it exit, and boot would restart it into the same wall once a
 minute forever.
@@ -294,9 +295,14 @@ into an equivalence. It is now a difference between two MODES of one module rath
 files, which makes it easier to tidy away by accident, so `tests/math.test.mjs` pins it with
 two separate module instances.
 
-**`scripts/continuous/lib/` still has its own twin pair**, untouched by this, and the isolation
-rule still applies there: `mathAnalyze.js` and `mathFormulas.js` in that tree must never be
-reachable from one entry point. `tests/continuous.test.mjs` enforces it.
+**`scripts/continuous/lib/math.js` did the same for the continuous tree**, with one difference
+forced by the stream: its hot path cannot go through `rpc.js`. `dispatch()` snapshots every
+cadence tick and the launch loop reads op times per op, so `hackAnalyze`, `hackAnalyzeChance`,
+`growthAnalyze` and the op-time getters stay resident. Only the constants — the three security
+figures and a 64-entry core-bonus table from `weakenAnalyze(1, c)` — go through one rpc call.
+That is 11.55 GB for both backends, against 13.35 (analyze) and 9.40 (formulas) as two files.
+A snapshot carries `player` only when formulas took it, and every function branches on the
+snapshot, so `refresh()` switching the module between a snapshot and its use cannot mix paths.
 
 ## Architecture
 
@@ -318,14 +324,13 @@ editor's RAM panel when one moves.
 | `managerCore.js` | the volley loop + share top-up, math-free | 2.80 |
 | `manager.js` | entry: core + math (the only shotgun entry) | 5.40 |
 | `prep.js` | entry: prepper + math | 5.00 |
-| `boot.js` | supervisor, picks the batcher | 3.60 |
+| `boot.js` | supervisor, picks the batcher | 3.50 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
 | `deploy.js` | scp workers home → every rooted host | 2.50 |
 | `share.js` | one `ns.share()` loop | 4.00 **per thread** |
 | `sharemode.js` | the share toggle | 4.20 |
-| `continuous/manager.js` | entry: continuous core + its mathAnalyze | 13.35 |
-| `continuous/manager-formulas.js` | entry: continuous core + its mathFormulas | 9.40 |
+| `continuous/manager.js` | entry: continuous core + `lib/math.js`, both backends | 11.55 |
 | `gang/config.js` | gang tunables, paths, STAT_KEYS | 0 |
 | `gang/math.js` | the game's gain formulas + every gang decision | 0 |
 | `gang/marker.js` | reads `/data/gang.txt` | 0 |
@@ -336,10 +341,10 @@ editor's RAM panel when one moves.
 | `gang/tick.js` | transient: recruit, tasks, wanted governor | 11.60 |
 | `gang/equip.js` | transient: equipment buying | 14.70 |
 
-The continuous entries are the two that have to fit a fresh BitNode's 32 GB home alongside
-`boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds them under 16 GB for that reason. The
-analyze build carries 3.00 GB of *Analyze functions the shotgun caches away through
-an `rpc.js` call at startup, and 2.00 GB for the `ns.getServer` in `continuous/lib/cores.js`.
+The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
+`boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
+carries 3.00 GB of live *Analyze reads the shotgun routes through `rpc.js` (a stream cannot),
+and 2.00 GB for `ns.getServer`, shared by `continuous/lib/cores.js` and the snapshot.
 
 `connectme.js` (3.85) prints the terminal `connect` chain to a host. It trims the
 chain wherever `src/Terminal/commands/connect.ts` permits a direct jump - that is,
@@ -760,10 +765,10 @@ Breaking any of these produces silent, compounding damage rather than an error:
   the byte total overstates what can actually be placed. Simulate placement instead.
 - **Judge timing on jitter (spread of drift within a batch), never absolute lateness.** The
   game lands whole batches tens of ms late together, which cannot reorder anything.
-- **A manager swap must clear the network.** boot switches builds when Formulas.exe is gained
-  or lost, and the outgoing manager's volley keeps running — hundreds of batches holding the
+- **A manager swap must clear the network.** When boot switches managers the outgoing one's
+  batches keep running — hundreds of batches holding the
   RAM the replacement needs and still working a target nobody owns. `killOrphanWorkers` runs
-  only when no manager of ANY of the four survives; doing it on every manager kill would
+  only when no manager of ANY system survives; doing it on every manager kill would
   destroy the volley of the survivor `killDuplicates` just kept. Switching BATCHERS is a manager
   swap too; both systems run the same worker files, so one kill list covers it. Nothing is lost by killing them:
   `ns.hack` credits money on landing, so a killed grow forfeits only the restore, which prep

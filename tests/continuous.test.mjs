@@ -169,9 +169,13 @@ async function makeMath(which, opts = {}) {
 
   resetCoreCache();
   const ns = mathNs({ ...opts, formulas: which === "formulas" });
-  const math = mods[which === "formulas" ? "lib/mathFormulas" : "lib/mathAnalyze"];
+  const math = mods["lib/math"];
 
-  const ready = math.prepare(ns);
+  // One module, both backends: prepare() picks from what ns offers, so the
+  // mock decides which path runs. Module state is shared across tests, which
+  // is why every fixture prepares its own.
+  const ready = await math.prepare(ns);
+  assert(math.backend() === which, `expected the ${which} backend, got ${math.backend()}`);
   assert(ready.ok, `${which} backend failed to prepare: ${ready.error}`);
 
   const pool = ServerPool.build(ns, {
@@ -800,99 +804,18 @@ export const tests = {
     assert(describeDeploy({ copied: 5, failed: [], skipped: 1 }, 6) === null, "silence on success");
   },
 
-  "the manager entries cost what the architecture says they do": async () => {
-    const { sources } = await loadContinuous();
-
-    // Verified against src/Netscript/RamCostGenerator.ts in this fork. Only the
-    // functions this folder actually reaches; an unlisted one shows up as a
-    // total that no longer matches, which is the point.
-    const COST = {
-      hack: 0.1, grow: 0.15, weaken: 0.15, scan: 0.2, exec: 1.3, scp: 0.6,
-      kill: 0.5, ps: 0.2, hasRootAccess: 0.05, getHostname: 0.05,
-      getHackingLevel: 0.05, getServer: 2, getServerMoneyAvailable: 0.1,
-      getServerSecurityLevel: 0.1, getServerMinSecurityLevel: 0.1,
-      getServerMaxMoney: 0.1, getServerRequiredHackingLevel: 0.1,
-      getServerGrowth: 0.1, getServerMaxRam: 0.05, getServerUsedRam: 0.05,
-      getServerNumPortsRequired: 0.1, fileExists: 0.1, getScriptRam: 0.1,
-      getHackTime: 0.05, getGrowTime: 0.05, getWeakenTime: 0.05,
-      hackAnalyze: 1, hackAnalyzeSecurity: 1, hackAnalyzeChance: 1,
-      growthAnalyze: 1, growthAnalyzeSecurity: 1, weakenAnalyze: 1,
-      getPlayer: 0.5, share: 2.4,
-      // Free, and load-bearing that they stay free: config.js is imported by
-      // every module in the folder and core.js mirrors its whole log to disk.
-      read: 0, write: 0, print: 0, tprint: 0, args: 0,
-    };
-
-    const ramOf = (entry) => {
-      const fns = new Set();
-      for (const mod of importClosure(entry, sources)) {
-        const src = stripComments(sources.get(mod + ".js"));
-        for (const m of src.matchAll(/ns\.(\w+)\s*\(/g)) {
-          if (COST[m[1]] !== undefined) fns.add(m[1]);
-        }
-      }
-      return 1.6 + [...fns].reduce((n, f) => n + COST[f], 0);
-    };
-
-    // The two backends must stay apart, and the totals are how that shows up as
-    // a number rather than as a graph walk.
-    // 12.85 -> 12.95 when lib/share.js arrived: ns.fileExists, 0.10, which the
-    // top-up needs to tell a host that HAS NOT GOT share.js from one that has it
-    // and refused the exec. Those two return the same bare 0 from exec and have
-    // opposite remedies, and merging them cost the shotgun two live runs.
-    //
-    // The formulas total does not move at all - lib/mathFormulas.js already pays
-    // for fileExists to check for Formulas.exe - which is why share is the rare
-    // addition that is free on one build and cheap on the other.
-    const analyze = ramOf("manager");
-    const formulas = ramOf("manager-formulas");
-    assert(Math.abs(analyze - 12.95) < 0.011, `manager.js: expected 12.95 GB, got ${analyze.toFixed(2)}`);
-    assert(Math.abs(formulas - 9.00) < 0.011, `manager-formulas.js: expected 9.00 GB, got ${formulas.toFixed(2)}`);
-  },
 
   // ---------------------------------------------------------- backends -----
 
-  "no entry point can reach both math backends": async () => {
-    const { sources } = await loadContinuous();
-
-    // Bitburner charges for every ns function reachable through imports, so a
-    // script touching both backends pays ~7GB for two complete sets of maths
-    // and can use exactly one of them.
-    for (const entry of ["manager", "manager-formulas", "core", "servers"]) {
-      const closure = importClosure(entry, sources);
-      const both = closure.has("lib/mathAnalyze") && closure.has("lib/mathFormulas");
-      assert(!both, `${entry}.js reaches BOTH math backends`);
-    }
-
-    // And each manager must actually reach its own, or the binding is broken.
-    assert(importClosure("manager", sources).has("lib/mathAnalyze"), "manager.js lost mathAnalyze");
-    assert(
-      importClosure("manager-formulas", sources).has("lib/mathFormulas"),
-      "manager-formulas.js lost mathFormulas",
-    );
-  },
 
   "core.js reaches no math backend of its own": async () => {
     const { sources } = await loadContinuous();
     const closure = importClosure("core", sources);
-    // core.js takes `math` as an argument. If it ever imports one directly,
-    // both entry points inherit it and the isolation above becomes untestable.
-    assert(!closure.has("lib/mathAnalyze"), "core.js imported mathAnalyze");
-    assert(!closure.has("lib/mathFormulas"), "core.js imported mathFormulas");
+    // core.js takes `math` as an argument, which is what lets every test above
+    // hand it a prepared module on a mock of its choosing.
+    assert(!closure.has("lib/math"), "core.js imported lib/math directly");
   },
 
-  "both backends expose the same interface": async () => {
-    const { mods } = await loadContinuous();
-    const wanted = [
-      "NAME", "prepare", "snapshot", "hackFractionPerThread", "hackChance",
-      "securityPerHackThread", "securityPerGrowThread", "weakenPerThread",
-      "coreBonusFor", "growThreadsToRestore", "opTimes",
-    ];
-    for (const name of wanted) {
-      assert(name in mods["lib/mathAnalyze"], `mathAnalyze is missing ${name}`);
-      assert(name in mods["lib/mathFormulas"], `mathFormulas is missing ${name}`);
-    }
-  },
 
   "formulas honours atSecurity for grow threads and analyze cannot": async () => {
     const fixture = {
@@ -920,6 +843,13 @@ export const tests = {
     // this backend answers for the server as it stands whatever it is asked.
     // That asymmetry is deliberate - do not "fix" it into an equivalence.
     assert(aMin === aNow, `analyze pretended to honour atSecurity: ${aMin} vs ${aNow}`);
+
+    // Both came from ONE module. A snapshot answers for the backend that took
+    // it, not for whatever the module switched to since - the formulas snapshot
+    // still honours atSecurity after the module has gone back to analyze.
+    assert(f.math === a.math, "both fixtures should share lib/math.js");
+    const late = f.math.growThreadsToRestore(fs, fs.money, fs.maxMoney, fs.minSec);
+    assert(late === atMin, `a formulas snapshot changed answer after a backend switch: ${late} vs ${atMin}`);
   },
 
   "a target already at max money needs no grow threads": async () => {
@@ -1148,14 +1078,14 @@ export const tests = {
   "ranking discounts a target by its hack chance": async () => {
     const { mods } = await loadContinuous();
     const { rankTargets } = mods["lib/target"];
-    const math = mods["lib/mathAnalyze"];
+    const math = mods["lib/math"];
 
     const servers = {
       sure: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5, hackChance: 1.0, weakenTime: 20000 },
       dicey: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5, hackChance: 0.25, weakenTime: 20000 },
     };
     const ns = mathNs({ hosts: { home: 4096 }, servers });
-    math.prepare(ns);
+    await math.prepare(ns);
 
     const ranked = rankTargets(ns, math);
     assert(ranked[0].host === "sure", `ranked ${ranked.map((r) => r.host)} - chance was ignored`);
@@ -1167,7 +1097,7 @@ export const tests = {
   "ranking prefers the target that earns more per unit of in-flight depth": async () => {
     const { mods } = await loadContinuous();
     const { rankTargets } = mods["lib/target"];
-    const math = mods["lib/mathAnalyze"];
+    const math = mods["lib/math"];
 
     const servers = {
       // Twice the money, but eight times the weaken time - so it needs roughly
@@ -1177,7 +1107,7 @@ export const tests = {
       quick: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5, weakenTime: 20000 },
     };
     const ns = mathNs({ hosts: { home: 4096 }, servers });
-    math.prepare(ns);
+    await math.prepare(ns);
 
     const ranked = rankTargets(ns, math);
     assert(ranked[0].host === "quick", `ranked ${ranked.map((r) => r.host)} on raw money, not per depth`);

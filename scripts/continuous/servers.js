@@ -2,7 +2,7 @@ import { ServerPool } from "scripts/continuous/lib/server";
 import { candidates, isPrepped } from "scripts/continuous/lib/target";
 import { chooseSteal } from "scripts/continuous/lib/plan";
 import { fmtMoney } from "scripts/continuous/lib/fmt";
-import * as math from "scripts/continuous/lib/mathAnalyze";
+import * as math from "scripts/continuous/lib/math";
 import {
   HOME_RESERVE_GB,
   MAX_TARGETS,
@@ -35,18 +35,15 @@ import {
  * from there on its own reports, so a running manager's log is the authority on
  * where a stream actually sits.
  *
- * Analyze backend only, deliberately: it always works, and the formulas build
- * would differ only in pricing UNPREPPED hosts, where growthAnalyze reads
- * current security and so over-states grow threads (and therefore under-states
- * steal). Unprepped rows are flagged for that reason.
+ * Uses lib/math.js exactly as the manager does, so Formulas.exe is used when
+ * owned. Without it, the analyze path prices UNPREPPED hosts pessimistically:
+ * growthAnalyze reads current security and so over-states grow threads (and
+ * under-states steal). Unprepped rows are flagged for that reason.
  *
  * RAM cost is the same looping or not - clearLog, sleep and args are all 0 GB.
- * Base 1.60 + lib/server.js 0.35 + lib/mathAnalyze.js (hackAnalyze,
- * growthAnalyze, weakenAnalyze, hackAnalyzeSecurity, growthAnalyzeSecurity,
- * hackAnalyzeChance at 1.00 each is the bulk) + getServerRequiredHackingLevel
- * 0.10 + getHackingLevel 0.05 + getScriptRam 0.10. Cores are NOT read:
- * lib/cores.js costs 2.00 GB for ns.getServer and would change nothing here
- * except the placement detail this report does not print.
+ * 9.35 GB, most of it lib/math.js's live reads: hackAnalyze, hackAnalyzeChance
+ * and growthAnalyze at 1.00 each, getServer 2.00, getPlayer 0.50, and ns.run
+ * 1.00 for the rpc call that measures the constants.
  */
 
 const pad = (s, n) => String(s).padEnd(n);
@@ -182,7 +179,7 @@ export async function main(ns) {
   // move - weakenAnalyze(1,1) and the two security-per-thread figures - so
   // re-calling it every pass would re-pay 3 GB of analyze calls for an answer
   // that cannot have changed.
-  const ready = math.prepare(ns);
+  const ready = await math.prepare(ns);
   if (!ready.ok) {
     ns.print(`ERROR: ${ready.error}`);
     return;

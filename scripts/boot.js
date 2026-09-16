@@ -1,5 +1,5 @@
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
-         FORMULAS_PROGRAM, FORMULAS_MARKER, WORKER_LIST,
+         WORKER_LIST,
          DEPLOY_LIST, DEPLOY_MANIFEST } from "./config.js";
 // The gang supervisor's path. Same kind of import as the line above - that file
 // is constants only, no ns call anywhere in it, so this is 0 GB.
@@ -13,9 +13,9 @@ import { GANG_SERVICE } from "./gang/config.js";
  *   2. deploy.js    - push workers, but only if root.js actually rooted something
  *   3. cloud.js     - kept alive as a service (buys and upgrades servers), but
  *                     only until the fleet is maxed; see CLOUD_DONE_MARKER
- *   5. manager      - kept alive as a service. FOUR files, two independent
- *                     choices: which SYSTEM (continuous or shotgun) and which
- *                     math BACKEND (formulas or analyze).
+ *   5. manager      - kept alive as a service. One file per SYSTEM
+ *                     (continuous or shotgun); each picks its own math backend
+ *                     in-process, so Formulas.exe never changes the file.
  *   6. gang         - kept alive as a service, but ONLY once a gang exists.
  *                     ns.gang.inGang() is 0 GB, so the check costs nothing on
  *                     every BitNode that will never have one. The gang
@@ -29,9 +29,8 @@ import { GANG_SERVICE } from "./gang/config.js";
  * corruption, not a slow mode. Continuous is the default; --shotgun picks the
  * other. See ensureOneManager, which has to police every manager file, not two.
  *
- * The backend choice is re-made EVERY tick for continuous, which still has one
- * file per backend. The shotgun has a single file that chooses for itself at
- * startup, so --no-formulas is simply forwarded to it.
+ * The math backend is not boot's choice for either system - each manager picks
+ * its own - so --no-formulas is simply forwarded.
  *
  * TRANSIENTS RUN ONE AT A TIME, and the tick waits for each to exit before
  * starting the next. They all run on home, and the manager reserves everything
@@ -42,7 +41,6 @@ import { GANG_SERVICE } from "./gang/config.js";
  * Services are identified by filename in ns.ps("home"), so a manager you
  * started by hand is adopted rather than duplicated. Two managers would be
  * actively harmful: each would believe it owned the pool and the report port.
- * The same is true of continuous's two BUILDS - see ensureOneManager.
  *
  * Usage:  run scripts/boot.js
  *         run scripts/boot.js --target joesguns   (pin the manager's target)
@@ -54,8 +52,8 @@ import { GANG_SERVICE } from "./gang/config.js";
  *         run scripts/boot.js --targets 5         (continuous only; shotgun ignores it)
  *         run scripts/boot.js --interval 30000
  *
- * RAM: 1.60 base + run 1.00 + ps 0.20 + kill 0.50 + fileExists 0.10
- *      + scan 0.20 (killOrphanWorkers must reach the whole network) = 3.60 GB
+ * RAM: 1.60 base + run 1.00 + ps 0.20 + kill 0.50
+ *      + scan 0.20 (killOrphanWorkers must reach the whole network) = 3.50 GB
  * (the deploy manifest check is ns.read/ns.write, 0 GB, and DEPLOY_LIST is a
  * plain array of strings from config.js. gang/config.js is the same kind of
  * file - constants only, no ns call anywhere in it - so importing it adds
@@ -72,24 +70,29 @@ const ROOT = "/scripts/root.js";
 const DEPLOY = "/scripts/deploy.js";
 const CLOUD = "/scripts/cloud.js";
 /**
- * The manager files, by system: the always-available entry first, then the
- * Formulas-only one where a system still has a separate build.
- *
- * The SHOTGUN NO LONGER HAS A PAIR. scripts/math.js holds both backends for
- * 1.00 GB and picks between them per process, so manager.js is the only shotgun
- * file and buying Formulas mid-run changes a branch rather than a filename. The
- * continuous tree still carries its own twin math libs and so still has two.
- *
- * A list rather than named fields so a system can have one entry or two, and
- * this collapses to a single file per system on the day continuous merges too.
- * Every file that is not the wanted one is a rival that must not be left running.
+ * The manager file for each system. One each: both math backends now live in
+ * one module per system (scripts/math.js, scripts/continuous/lib/math.js),
+ * which picks per process - so buying or losing Formulas.exe changes a branch
+ * inside the running manager, never which file boot runs.
  */
 const MANAGERS = {
-  continuous: ["/scripts/continuous/manager.js", "/scripts/continuous/manager-formulas.js"],
-  shotgun: ["/scripts/manager.js"],
+  continuous: "/scripts/continuous/manager.js",
+  shotgun: "/scripts/manager.js",
 };
 
-const ALL_MANAGERS = Object.values(MANAGERS).flat();
+/**
+ * Files that were managers once and are gone from disk - but NOT from the
+ * game. filesync never deletes, so the last copy stays on home and may still be
+ * RUNNING from before the upgrade. The continuous manager aborts beside any
+ * rival, so one of these left alive would stop the new manager starting, once a
+ * tick, forever. Killed like any other rival; never started.
+ */
+const RETIRED_MANAGERS = [
+  "/scripts/continuous/manager-formulas.js",
+  "/scripts/manager-formulas.js",
+];
+
+const ALL_MANAGERS = [...Object.values(MANAGERS), ...RETIRED_MANAGERS];
 
 const DEFAULT_TICK_MS = 60000;
 
@@ -223,7 +226,7 @@ function killOrphanWorkers(ns, log) {
  *
  * `others` is a LIST rather than the single other build, and that is what makes
  * the two systems switchable at all. scripts/continuous/core.js has its own
- * guard - findRivals refuses to start beside any of the four - so a surviving
+ * guard - findRivals refuses to start beside any other manager - so a surviving
  * shotgun manager does not merely coexist with an incoming continuous one, it
  * makes it ABORT and exit. Boot would then see no manager next tick, start it
  * again, and watch it abort again, once a minute forever. Killing every rival
@@ -314,9 +317,8 @@ export async function main(ns) {
   const managerArgs = [
     ...(target ? ["--target", target] : []),
     ...(targets ? ["--targets", targets] : []),
-    // Forwarded, not interpreted. The shotgun has one file whose math.js reads
-    // this off ns.args and picks the *Analyze path; continuous still picks by
-    // filename, where the flag has already done its work via hasFormulas.
+    // Forwarded, not interpreted. Both managers' math modules read it off
+    // ns.args and pick the *Analyze path.
     ...(noFormulas ? ["--no-formulas"] : []),
   ];
   const iIdx = args.indexOf("--interval");
@@ -346,23 +348,13 @@ export async function main(ns) {
 
   do {
     // -- 0. did the manager die? -------------------------------------------
-    // Any of the CHOSEN system's files. A manager of the other system running is
-    // not this one surviving - it is a rival that ensureOneManager is about to
-    // kill, so counting it here would report a live manager on exactly the tick
-    // it exited.
-    //
-    // A list, not .analyze/.formulas: MANAGERS became arrays when the shotgun's
-    // pair merged, this kept reading the old fields, both came back undefined,
-    // and it logged an exit every tick while the manager ran fine.
-    const pair = MANAGERS[mode];
-    const managerDied = !firstPass && !noManager && !pair.some((f) => isUp(ns, f));
+    // The CHOSEN system's file. A manager of the other system running is not
+    // this one surviving - it is a rival that ensureOneManager is about to kill,
+    // so counting it here would report a live manager on exactly the tick it
+    // exited.
+    const wanted = MANAGERS[mode];
+    const managerDied = !firstPass && !noManager && !isUp(ns, wanted);
     if (managerDied) log("manager is not running - it exited since the last tick");
-
-    // Re-checked every tick, not once at startup: Formulas.exe is lost on every
-    // augment install and can be bought at any time, so the correct build to run
-    // changes underneath a long-lived boot.
-    const hasFormulas = !noFormulas && ns.fileExists(FORMULAS_PROGRAM, "home");
-    ns.write(FORMULAS_MARKER, `${hasFormulas ? 1 : 0}\n${Date.now()}`, "w");
 
     // -- 1. root ------------------------------------------------------------
     await runToCompletion(ns, ROOT, ["--quiet"], log);
@@ -433,9 +425,6 @@ export async function main(ns) {
       }
     }
     if (!noManager) {
-      // pair[1] only exists while a system still has a Formulas-only build;
-      // the shotgun's math.js decides for itself and is passed --no-formulas.
-      const wanted = (hasFormulas && pair[1]) || pair[0];
       ensureOneManager(ns, wanted, ALL_MANAGERS.filter((f) => f !== wanted), managerArgs, log);
     }
     // The gang supervisor. Gated on inGang() rather than started unconditionally

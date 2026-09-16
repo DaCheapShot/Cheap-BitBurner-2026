@@ -73,8 +73,10 @@ const INDENT = "  ";
  */
 const RIVALS = [
   "scripts/manager.js",
-  "scripts/manager-formulas.js",
   "scripts/continuous/manager.js",
+  // Deleted from disk, but filesync never deletes from the game, so a stale
+  // copy can still be running. Still a pool owner, still a rival.
+  "scripts/manager-formulas.js",
   "scripts/continuous/manager-formulas.js",
 ];
 
@@ -191,7 +193,7 @@ export function admitTargets(priced, budget, maxTargets, opts = {}) {
  * 1.00 GB in every entry point that imports it.
  *
  * @param {NS} ns
- * @param {object} math one of lib/mathAnalyze or lib/mathFormulas
+ * @param {object} math lib/math.js, or a stand-in from a test
  */
 export async function runContinuous(ns, math) {
   ns.disableLog("ALL");
@@ -229,7 +231,7 @@ export async function runContinuous(ns, math) {
   const log = (s = "") => { ns.print(s); toFile(s); };
   const say = (s = "") => { ns.print(s); ns.tprint(s); toFile(s); };
 
-  log(`=== continuous batcher [${math.NAME}] ===`);
+  log("=== continuous batcher ===");
   // Named out loud because the file is written to the GAME's filesystem, not to
   // disk - the filesync extension only pushes the other way. Without the terminal
   // command spelled out, a log that is being written perfectly reads as one that
@@ -258,11 +260,12 @@ export async function runContinuous(ns, math) {
 
   // -- math backend ---------------------------------------------------------
 
-  const ready = math.prepare(ns);
+  const ready = await math.prepare(ns);
   if (!ready.ok) {
-    say(`ABORT: the ${math.NAME} backend is unavailable: ${ready.error}`);
+    say(`ABORT: the math backend is unavailable: ${ready.error}`);
     return;
   }
+  log(`${INDENT}math: ${math.backend()}`);
 
   // -- workers --------------------------------------------------------------
 
@@ -619,6 +622,9 @@ export async function supervise(ns, math, opts) {
     if (now >= nextRescan) {
       nextRescan = now + rescanMs;
       for (const s of streams) learned.set(s.host, s.steal);
+      // Formulas.exe can be bought at any time. The switch takes effect at the
+      // next snapshot; batches already sized keep the backend they were sized on.
+      if (math.refresh(ns)) log(`${INDENT}math: switched to ${math.backend()}`);
       streams = rescan(ns, math, {
         pool, ram, steal, pin, adaptive, maxTargets, forced,
         streams, preps, learned, log, verbose, shareRam,

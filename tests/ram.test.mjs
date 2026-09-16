@@ -282,11 +282,25 @@ export const tests = {
   // controller grows, and the number that matters is whether the manager still
   // launches beside boot (3.75) and cloud (1.75) on the smallest home a fresh
   // BitNode hands you.
-  "the continuous managers fit a fresh 32 GB home": () => {
-    for (const entry of ["continuous/manager", "continuous/manager-formulas"]) {
-      const ram = ramOf(entry);
-      assert(ram < 16, `${entry}.js is ${ram.toFixed(2)} GB; boot + cloud + this must clear 32`);
-    }
+  "the continuous manager fits a fresh 32 GB home": () => {
+    const ram = ramOf("continuous/manager");
+    assert(ram < 16, `continuous/manager.js is ${ram.toFixed(2)} GB; boot + cloud + this must clear 32`);
+  },
+
+  // One entry for both backends. The analyze build was 13.35 and the formulas
+  // build 9.40; the merged file pays for both backends' LIVE reads and nothing
+  // else. weakenAnalyze, hackAnalyzeSecurity and growthAnalyzeSecurity (3.00)
+  // moved into one rpc body at prepare(); getServer was already paid by
+  // lib/cores.js and now also replaces four getServer* reads (0.40); what is
+  // added is ns.run (1.00) and getPlayer (0.50).
+  //
+  // The formulas path is 2.15 GB dearer than its old entry - the price of
+  // hackAnalyze, hackAnalyzeChance and growthAnalyze staying reachable so that
+  // losing or never owning Formulas.exe needs no second file. They cannot move
+  // to rpc: stream.dispatch() calls them every cadence tick.
+  "continuous/manager.js holds both backends for 11.55 GB": () => {
+    const ram = ramOf("continuous/manager");
+    assert(Math.abs(ram - 11.55) < 0.011, `expected 11.55 GB, got ${ram.toFixed(2)}`);
   },
 
   // The whole reason the gang subsystem is split into a scheduler and four
@@ -335,9 +349,12 @@ export const tests = {
   // `gang` to nothing (it matches a key only when the value is a function or a
   // number, and the namespace is an object). So supervising a gang must cost
   // boot exactly nothing.
-  "boot.js still costs 3.60 GB with the gang service wired in": () => {
+  //
+  // 3.60 -> 3.50: fileExists went with the per-tick Formulas.exe check, which
+  // existed only to pick between two continuous files that are now one.
+  "boot.js still costs 3.50 GB with the gang service wired in": () => {
     const ram = ramOf("boot");
-    assert(Math.abs(ram - 3.60) < 0.011, `expected 3.60 GB, got ${ram.toFixed(2)}`);
+    assert(Math.abs(ram - 3.50) < 0.011, `expected 3.50 GB, got ${ram.toFixed(2)}`);
   },
 
   // Vanilla's formatters. Neither exists in this fork - formatting is an
@@ -374,7 +391,7 @@ export const tests = {
     const seen = new Set();
     for (const entry of ["boot", "manager", "capacity", "cloud", "deploy",
                          "root", "sharemode", "connectme", "prep",
-                         "continuous/manager", "continuous/manager-formulas", "continuous/servers",
+                         "continuous/manager", "continuous/servers",
                          "gang/gang", "gang/tick", "gang/ascend",
                          "gang/equip", "gang/war", "gang/create"]) {
       for (const mod of closure(entry)) seen.add(mod);
@@ -410,7 +427,7 @@ export const tests = {
     const entries = new Set();
     for (const e of ["boot", "manager", "capacity", "cloud", "deploy",
                      "root", "sharemode", "connectme", "prep",
-                     "continuous/manager", "continuous/manager-formulas", "continuous/servers",
+                     "continuous/manager", "continuous/servers",
                      "gang/gang", "gang/tick", "gang/ascend", "gang/equip", "gang/war",
                      "gang/create"]) {
       for (const mod of closure(e)) entries.add(mod);
