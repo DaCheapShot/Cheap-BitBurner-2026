@@ -315,8 +315,8 @@ export const tests = {
     assert(!/\bns\./.test(src), "config.js must contain no ns calls - it is imported everywhere");
     // Only scripts/config.js, which the ram test holds to 0 GB for the same reason.
     const froms = [...src.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]);
-    assert(froms.every((f) => f === "scripts/config"),
-      `config.js may import only scripts/config, found: ${froms.join(", ")}`);
+    assert(froms.every((f) => f === "scripts/config.js"),
+      `config.js may import only scripts/config.js, found: ${froms.join(", ")}`);
   },
 
   "lib/server.js never reaches ns.getServer, which would cost it 2GB": async () => {

@@ -496,8 +496,14 @@ whole window, and on a shared port they would be credited to batch ids that neve
 
 Both test loaders mirror the whole of `scripts/` through `mirrorScripts` in `tests/harness.mjs`,
 which rewrites both import spellings (`"./x.js"` and `"scripts/x"`). A cross-tree import will not
-load in a test otherwise. The game follows `export … from` (`ExportNamedDeclaration` in
-`NetscriptJSEvaluator.ts`), which is what the config re-export relies on.
+load in a test otherwise.
+
+**A re-export must spell its source `"scripts/<path>.js"`.** The module loader resolves
+`export … from` like an import, but `RamCalculations.ts` does not: its `ExportNamedDeclaration`
+branch looks the raw specifier up in the server's script map, whose keys carry the extension and
+no leading slash. `from "scripts/config"` ran fine and failed the RAM check with `Import Error
+"scripts/config" does not exist on server: home`, so the continuous manager would not start. A
+test in `tests/ram.test.mjs` checks every re-export's spelling.
 
 **Just-in-time dispatch is legal because op duration is fixed at CALL time**, not at landing —
 `NetscriptHelpers.tsx` resolves it when the op starts. So placing `G` a hundred seconds after

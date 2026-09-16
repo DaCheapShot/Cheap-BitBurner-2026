@@ -46,7 +46,7 @@ export {
   SHARE_MARKER, SHARE_PORT, SHARE_WORKER, SHARE_RAM_FALLBACK, SHARE_FRACTION,
   SHARE_MAX_FRACTION, shareFractionFrom,
   WORKER_FILES, WORKER_LIST, WORKER_RAM_FALLBACK,
-} from "scripts/config";
+} from "scripts/config.js";
 
 // -------------------------------------------------------------- batching ----
 

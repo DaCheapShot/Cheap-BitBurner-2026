@@ -1,4 +1,4 @@
-import { readScript, assert, loadScripts, scriptNames } from "./harness.mjs";
+import { readScript, assert, loadScripts, scriptNames, scriptFiles } from "./harness.mjs";
 
 // Verified against src/Netscript/RamCostGenerator.ts in this fork.
 const COST = {
@@ -90,9 +90,9 @@ function closure(bare, seen = new Set()) {
   // sibling at all.
   const dir = bare.includes("/") ? bare.slice(0, bare.lastIndexOf("/") + 1) : "";
   for (const m of src.matchAll(/from\s+"\.\/([\w\-/]+)\.js"/g)) closure(dir + m[1], seen);
-  for (const m of src.matchAll(/from\s+"scripts\/([\w\-/]+)"/g)) {
-    closure(m[1].replace(/\.js$/, ""), seen);
-  }
+  // The optional ".js" matters: a re-export must spell it (see the export-from
+  // test below), and without it here closure() silently skipped the module.
+  for (const m of src.matchAll(/from\s+"scripts\/([\w\-/]+?)(?:\.js)?"/g)) closure(m[1], seen);
   return seen;
 }
 
@@ -455,5 +455,27 @@ export const tests = {
     assert(Math.abs(ram - 2.60) < 0.011, `expected 2.60 GB, got ${ram.toFixed(2)}`);
     assert(!codeOnly(readScript("rpc")).includes('from "./'),
       "rpc.js must import nothing - scripts/continuous/ imports it, and a dependency would cross that tree's self-containment rule for no RAM saving");
+  },
+
+  // RamCalculations.ts resolves an IMPORT through getModuleScript, which adds
+  // ".js" and handles "./". Its ExportNamedDeclaration branch does not: it
+  // pushes node.source.value raw and looks that string up in the server's
+  // script map, whose keys are "scripts/config.js" - no leading slash, with the
+  // extension. So `export { X } from "scripts/config"` loads fine in the module
+  // loader and fails the RAM check with `Import Error "scripts/config" does not
+  // exist on server: home`, and the entry script will not start. It did: the
+  // continuous manager, on the first live run of the config re-export.
+  "every re-export spells its source exactly as the game stores it": () => {
+    const bad = [];
+    for (const rel of scriptFiles()) {
+      const src = readScript(rel.replace(/\.js$/, ""))
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/.*$/gm, "");
+      for (const m of src.matchAll(/export\s*(?:\*|\{[^}]*\})\s*from\s*"([^"]+)"/g)) {
+        if (!/^scripts\/[\w\-/]+\.js$/.test(m[1])) bad.push(`${rel}: "${m[1]}"`);
+      }
+    }
+    assert(bad.length === 0,
+      `re-exports must use "scripts/<path>.js" - the RAM calculator does not resolve them: ${bad.join(", ")}`);
   },
 };
