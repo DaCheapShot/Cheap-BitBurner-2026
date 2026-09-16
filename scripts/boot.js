@@ -67,6 +67,7 @@ import { GANG_SERVICE } from "./gang/config.js";
  * constant - a plain string, so it adds nothing.)
  */
 
+const BOOT = "/scripts/boot.js";
 const ROOT = "/scripts/root.js";
 const DEPLOY = "/scripts/deploy.js";
 const CLOUD = "/scripts/cloud.js";
@@ -327,6 +328,16 @@ export async function main(ns) {
     `boot: ${mode}, tick ${Math.round(tickMs / 1000)}s, manager target ` +
       `${target ?? "auto"}${noCloud ? ", cloud off" : ""}${noManager ? ", manager off" : ""}`,
   );
+  // ONE BOOT. Two supervisors with different flags each read the other's
+  // manager as a rival and kill it, every tick, forever - a live run swapped
+  // shotgun and continuous once a minute and killed 262 worker threads each
+  // time. The NEWEST wins, not the oldest as killDuplicates keeps for services:
+  // the boot just typed is the one carrying the flags the user wants now. The
+  // older boot's manager is then an ordinary swap for the loop below.
+  for (const p of instancesOf(ns, BOOT)) {
+    if (p.pid !== ns.pid && ns.kill(p.pid)) log(`stopped an older boot (pid ${p.pid}) - this one supersedes it`);
+  }
+
   let lastRootStamp = ns.read(ROOT_MARKER);
   let firstPass = true;
   // Say "fleet is maxed" once, not every tick - the whole point of this change
@@ -335,13 +346,16 @@ export async function main(ns) {
 
   do {
     // -- 0. did the manager die? -------------------------------------------
-    // Of the CHOSEN system's pair. A manager of the other system running is not
-    // this one surviving - it is a rival that ensureOneManager is about to kill,
-    // so counting it here would report a live manager on exactly the tick it
-    // exited.
+    // Any of the CHOSEN system's files. A manager of the other system running is
+    // not this one surviving - it is a rival that ensureOneManager is about to
+    // kill, so counting it here would report a live manager on exactly the tick
+    // it exited.
+    //
+    // A list, not .analyze/.formulas: MANAGERS became arrays when the shotgun's
+    // pair merged, this kept reading the old fields, both came back undefined,
+    // and it logged an exit every tick while the manager ran fine.
     const pair = MANAGERS[mode];
-    const managerDied = !firstPass && !noManager
-      && !isUp(ns, pair.analyze) && !isUp(ns, pair.formulas);
+    const managerDied = !firstPass && !noManager && !pair.some((f) => isUp(ns, f));
     if (managerDied) log("manager is not running - it exited since the last tick");
 
     // Re-checked every tick, not once at startup: Formulas.exe is lost on every
