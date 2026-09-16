@@ -2,7 +2,7 @@ import { runVolley } from "./managerCore.js";
 import * as math from "./mathAnalyze.js";
 
 /**
- * The shotgun volley loop, using the *Analyze API and the calibration cache.
+ * The shotgun volley loop, using the *Analyze API through rpc.js.
  *
  * This is the always-available build: it needs no programs and works from
  * minute one of a BitNode, which is why it keeps the plain name. If you own
@@ -13,7 +13,12 @@ import * as math from "./mathAnalyze.js";
  * reachable through imports, so touching both backends from one script would
  * cost 2.50 GB that this build never uses. tests/isolation.test.mjs enforces it.
  *
- * RAM: 1.60 base + managerCore/prepper 2.00 + mathAnalyze 2.55 = 6.15 GB
+ * RAM: 1.60 base + managerCore/prepper/ram 2.80 + mathAnalyze 1.00 = 5.40 GB
+ *
+ * mathAnalyze costs 1.00 and not 2.55 because every *Analyze name it uses lives
+ * inside an rpc body - a string literal to the RAM calculator - so the 1.00 is
+ * rpc.js's ns.run and nothing else. This build is now CHEAPER than the formulas
+ * one (6.90), which it never was before.
  */
 
 /** @param {NS} ns */
