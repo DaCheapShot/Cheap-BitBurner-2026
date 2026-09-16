@@ -375,7 +375,7 @@ export const tests = {
     for (const entry of ["boot", "manager", "capacity", "cloud", "deploy",
                          "root", "sharemode", "connectme", "prep",
                          "continuous/manager", "continuous/manager-formulas", "continuous/servers",
-                         "continuous/capacity", "gang/gang", "gang/tick", "gang/ascend",
+                         "gang/gang", "gang/tick", "gang/ascend",
                          "gang/equip", "gang/war", "gang/create"]) {
       for (const mod of closure(entry)) seen.add(mod);
     }
@@ -411,7 +411,6 @@ export const tests = {
     for (const e of ["boot", "manager", "capacity", "cloud", "deploy",
                      "root", "sharemode", "connectme", "prep",
                      "continuous/manager", "continuous/manager-formulas", "continuous/servers",
-                     "continuous/capacity",
                      "gang/gang", "gang/tick", "gang/ascend", "gang/equip", "gang/war",
                      "gang/create"]) {
       for (const mod of closure(e)) entries.add(mod);

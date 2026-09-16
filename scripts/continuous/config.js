@@ -1,15 +1,21 @@
 /**
  * Configuration for the continuous (streaming) HWGW batcher.
  *
- * Plain constants only - no ns calls, no imports. Bitburner charges an importer
- * for every ns function reachable through a module, so this file costs 0 GB to
- * import. Adding one billed call here would tax every file in the folder.
+ * Plain constants only - no ns calls, and one import of scripts/config.js,
+ * which has none either. Bitburner charges an importer for every ns function
+ * reachable through a module, so this file costs 0 GB to import. Adding one
+ * billed call here would tax every file in the folder.
  *
- * Deliberately a SEPARATE file from scripts/config.js, not an import of it.
- * This system is self-contained by requirement, and the two must be free to
- * disagree: the shotgun's numbers were tuned for one volley sized against one
- * snapshot, while a stream re-derives every batch at dispatch. Several values
- * here will want to diverge once Phase 4 measures a live stream.
+ * TUNING is local. The shotgun's numbers were tuned for one volley sized
+ * against one snapshot, while a stream re-derives every batch at dispatch, so
+ * the two must be free to disagree - several already do (MAX_STEAL_FRACTION,
+ * STEAL_FRACTION, DESYNC_STRIKES), and GROW_MARGIN, SPACER_MS, the tolerances
+ * and POOL_WAIT_* are defined twice on purpose even where they match today.
+ *
+ * CONTRACTS are imported, below. Those are values a second party reads without
+ * knowing which batcher is up - sharemode.js and share.js, the shared worker
+ * files, the home both managers live on - so a copy here was never free to
+ * diverge. It was a second place to forget, pinned by a test.
  *
  * Import style throughout this folder is absolute-from-root and extensionless:
  *
@@ -22,6 +28,25 @@
  * relative "./config.js" form; both resolve, and mixing them inside one folder
  * would only make the deploy list harder to reason about.
  */
+
+// ------------------------------------------------------------- contracts ----
+
+/**
+ * Shared with the shotgun, defined once in scripts/config.js.
+ *
+ * The share protocol (marker, gate port, worker, fraction bounds and the parser)
+ * is written by sharemode.js and peeked by share.js, neither of which knows
+ * which batcher is running; a different port here left `sharemode.js on`
+ * looking broken under continuous. The batch workers are ONE set of files for
+ * both systems - their code was identical and the report port was always an
+ * argument - so boot's orphan kill covers either system with one list.
+ */
+export {
+  BATCH_OPS, OP_WORKER, HOME_RESERVE_GB, PORT_CAPACITY, FORMULAS_PROGRAM,
+  SHARE_MARKER, SHARE_PORT, SHARE_WORKER, SHARE_RAM_FALLBACK, SHARE_FRACTION,
+  SHARE_MAX_FRACTION, shareFractionFrom,
+  WORKER_FILES, WORKER_LIST, WORKER_RAM_FALLBACK,
+} from "scripts/config";
 
 // -------------------------------------------------------------- batching ----
 
@@ -458,18 +483,6 @@ export const MAX_DRIFT_TOLERANCE = 0.25;
  */
 export const CONT_LOG_FILE = "/data/continuous.log.txt";
 
-/**
- * Ops of a batch, in LANDING order.
- *
- * Also the planning order, with one exception documented where it happens:
- * weaken-2 is sized from grow's PLACED raw thread count, so grow must be
- * placed before W2 can be sized.
- */
-export const BATCH_OPS = ["H", "W1", "G", "W2"];
-
-/** Which worker file each op runs. */
-export const OP_WORKER = { H: "hack", W1: "weaken", G: "grow", W2: "weaken" };
-
 // ----------------------------------------------------------------- cores ----
 
 /**
@@ -513,15 +526,6 @@ export const OP_FILL_ORDER = { H: "coresAsc", W1: "coresDesc", G: "coresDesc", W
 // ------------------------------------------------------------------- ram ----
 
 /**
- * GB withheld on home for the manager itself and whatever you run by hand.
- *
- * The manager, its imports and a terminal script or two live here. Too low and
- * the stream starves the process steering it; too high and the pool's largest
- * and best-cored host is mostly wasted.
- */
-export const HOME_RESERVE_GB = 32;
-
-/**
  * Fraction of each host's RAM the pool is willing to plan against.
  *
  * 1.00 - trust our own accounting - is the honest default: the pool tracks the
@@ -548,142 +552,6 @@ export const RAM_SAFETY_FRACTION = 1.00;
  * that never existed here. Port 2 is the shotgun's share gate.
  */
 export const CONT_REPORT_PORT = 3;
-
-/**
- * Netscript port capacity, entries.
- *
- * Not exposed by the API - the .d.ts documents no number - so it is recorded
- * here for the drain loop's own sizing and checked against the game by watching
- * port.full(). A full port DISCARDS THE OLDEST entry, so an overflowing report
- * port silently loses the earliest landings of a batch, which is exactly the
- * data an order check needs.
- */
-export const PORT_CAPACITY = 50;
-
-// ----------------------------------------------------------------- share ----
-
-/**
- * Share mode, mirrored from scripts/config.js.
- *
- * EVERY VALUE BELOW MUST EQUAL THE SHOTGUN'S. This is not a copy that may
- * diverge - it is the same protocol read from a second place. scripts/
- * sharemode.js writes the marker and broadcasts the port, and scripts/share.js
- * peeks that port to decide whether to keep running; neither of them knows
- * which batcher is up. A different port number here would leave `sharemode.js
- * on` looking simply broken under continuous - workers launched and exiting a
- * millisecond later - so tests/continuous.test.mjs pins the equality.
- *
- * They are duplicated rather than imported because this tree may not import
- * from scripts/, and because doing so would drag the shotgun's config into
- * every continuous entry point. Only the values cross the boundary, never a
- * module.
- */
-
-/**
- * Written by scripts/sharemode.js, read by the manager and by every share
- * worker. Holds the FRACTION of the pool to devote to ns.share, not a bare
- * on/off flag, so the amount is retunable from the terminal.
- */
-export const SHARE_MARKER = "/data/share.txt";
-
-/**
- * Port the share fraction is BROADCAST on, for the workers to read.
- *
- * The marker cannot do this job, and assuming it could cost the shotgun a live
- * run: ns.read resolves against the server the CALLING script runs on, and
- * /data/share.txt exists on home alone - so a share worker anywhere else read
- * "", parsed it as off, and exited within milliseconds of a perfectly valid
- * pid. Ports are the only channel a worker on a purchased server can hear.
- *
- * This is also why CONT_REPORT_PORT is 3 and not 2: the share gate is peeked,
- * never drained, and a drain loop on it would consume the setting.
- */
-export const SHARE_PORT = 2;
-
-/** The share worker. A path only - importing it would cost 2.40 GB for ns.share. */
-export const SHARE_WORKER = "/scripts/share.js";
-
-/** Per-thread RAM of the share worker: 1.60 base + 2.40 ns.share. */
-export const SHARE_RAM_FALLBACK = 4.00;
-
-/**
- * Fraction of the pool `sharemode.js on` asks for.
- *
- * ns.share's bonus is 1 + ln(shareThreads)/25 (src/NetworkShare/Share.ts), so
- * every DOUBLING of share RAM is worth a flat ln(2)/25 = 2.77 percentage points,
- * forever, while hack income is roughly linear in RAM. The last three quarters
- * of a pool buy 5.6 points and cost three quarters of the income. 25% sits near
- * the knee.
- */
-export const SHARE_FRACTION = 0.25;
-
-/**
- * Hard clamp on the share fraction, whatever the marker says.
- *
- * The shotgun needs this to stop a 100% marker starving its prep gate into a
- * boot restart loop. Continuous fails more gently - a stream that cannot fit
- * simply refuses its batches and says so - but the clamp is kept identical
- * anyway, because sharemode.js reports what it wrote against SHARE_MAX_FRACTION
- * and a second, larger bound here would make that report a lie.
- */
-export const SHARE_MAX_FRACTION = 0.90;
-
-/**
- * Parse SHARE_MARKER's contents into a fraction in [0, SHARE_MAX_FRACTION].
- *
- * Anything unparseable reads as OFF rather than as a default. A NaN would
- * compare false against every bound, so garbage in the marker must mean "stop",
- * never "carry on with some number I invented".
- *
- * Pure arithmetic, no ns calls - this file must stay 0 GB.
- */
-export function shareFractionFrom(text) {
-  const word = String(text ?? "").trim().split("\n")[0].trim().toLowerCase();
-  if (word === "" || word === "off" || word === "false") return 0;
-  if (word === "on" || word === "true") return SHARE_FRACTION;
-  const n = Number(word);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.min(n, SHARE_MAX_FRACTION);
-}
-
-// --------------------------------------------------------------- workers ----
-
-/**
- * Worker paths, absolute in-game.
- *
- * On disk these are scripts/continuous/*.js, and filesync's `scriptsFolder: "."`
- * preserves that path verbatim, so the in-game path keeps the scripts/ prefix.
- */
-export const WORKER_FILES = {
-  hack: "/scripts/continuous/hack.js",
-  grow: "/scripts/continuous/grow.js",
-  weaken: "/scripts/continuous/weaken.js",
-};
-
-/**
- * Every file this system must scp to a host before it can exec there.
- *
- * scripts/deploy.js broadcasts only DEPLOY_LIST from scripts/config.js, which
- * this system may not edit, so it copies its own workers. Without that, exec
- * returns a bare 0 on every host but home - the same value it returns when the
- * script is absent, which is why that failure took two live runs to diagnose in
- * the shotgun.
- *
- * The workers import nothing, so this list needs no dependency closure. Keep it
- * that way: a worker pays its RAM cost PER THREAD, and an import that reaches
- * one ns call would multiply across tens of thousands of threads.
- */
-export const WORKER_LIST = Object.values(WORKER_FILES);
-
-/**
- * Per-thread RAM to assume when a worker file does not exist yet.
- *
- * Phase 1 runs before the workers are written, so getScriptRam returns 0 and
- * the harness would report infinite capacity without these. Values are the
- * shotgun's measured ones for identical single-op workers; Phase 2 replaces
- * them with the real reading, and the harness says which it used.
- */
-export const WORKER_RAM_FALLBACK = { hack: 1.70, grow: 1.75, weaken: 1.75 };
 
 // ---------------------------------------------------------------- stream ----
 
@@ -996,28 +864,3 @@ export const PREP_MAX_CYCLES = 50;
  */
 export const POOL_WAIT_MS = 10000;
 export const POOL_WAIT_CYCLES = 90;
-
-// -------------------------------------------------------------- formulas ----
-
-/**
- * Unlocks ns.formulas.hacking.*, which the precise math backend needs.
- *
- * Checked once, at backend prepare(). There is deliberately no periodic
- * re-check here: gaining or losing the program means swapping between
- * manager.js and manager-formulas.js, and swapping entry points is the
- * supervisor's job, not a running manager's. boot.js owns that in production.
- */
-export const FORMULAS_PROGRAM = "Formulas.exe";
-
-// --------------------------------------------------------------- harness ----
-
-/**
- * Nominal HWGW thread split, for Phase 1 capacity reporting only.
- *
- * Batch shape is a property of the TARGET and cannot be known before the math
- * backends land in Phase 3. This is a stand-in so placement can be exercised
- * against a realistically lopsided batch - grow dominates - because a profile
- * of four equal ops would hide exactly the fragmentation the harness exists to
- * find. Override with --threads h,w1,g,w2.
- */
-export const NOMINAL_BATCH = { H: 25, W1: 2, G: 60, W2: 5 };

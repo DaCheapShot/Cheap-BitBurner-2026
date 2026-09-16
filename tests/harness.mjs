@@ -6,21 +6,18 @@ import { pathToFileURL } from "node:url";
 const SCRIPTS = path.resolve(import.meta.dirname, "..", "scripts");
 
 /**
- * Files BELOW scripts/ that a top-level script imports.
+ * Files BELOW scripts/ that loadScripts() imports and keys by nested name.
  *
- * boot.js reaches scripts/continuous/config.js for the continuous worker paths.
- * It has to kill BOTH systems' orphan workers when it swaps between them, and a
- * hand-copied list of those paths would drift the moment a worker is renamed -
- * silently, since the only symptom is RAM held by batches nobody owns.
- *
- * Listed explicitly rather than walked recursively so this loader stays the
- * flat-file one. The continuous tree imports by absolute in-game path
- * ("scripts/continuous/lib/plan"), which needs the different rewrite in
- * tests/continuous.test.mjs; mirroring it here would mean two loaders that have
- * to agree about that.
+ * Every file is MIRRORED (see mirrorScripts), so an import into a subfolder
+ * resolves whether or not it is listed here. This list is only what gets
+ * imported up front - which also PARSES it, the one syntax check a nested
+ * module gets.
  */
 const NESTED = [
   "continuous/config.js",
+  // managerCore.js imports the share functions from here, so the shotgun and
+  // the continuous batcher run one copy of them.
+  "continuous/lib/share.js",
   // The gang subsystem's pure modules. gang/math.js is where every gang
   // decision is made and it holds no ns call, so it is testable directly -
   // which is the point of putting the decisions there rather than in the
@@ -46,27 +43,57 @@ const NESTED = [
   "gang/create.js",
 ];
 
+/** Every .js under scripts/, as posix paths relative to it. */
+export function scriptFiles(dir = SCRIPTS, prefix = "") {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) out.push(...scriptFiles(path.join(dir, entry.name), rel));
+    else if (entry.name.endsWith(".js")) out.push(rel);
+  }
+  return out;
+}
+
 /**
- * Mirror scripts/ into a temp dir as .mjs so Node can import them.
+ * Point one import specifier at the mirrored .mjs, relative to the importer.
+ *
+ * Both of the game's spellings, because the trees now import each other: the
+ * top level writes "./continuous/lib/share.js", the continuous tree writes
+ * "scripts/config". One rewrite for both is what lets a cross-tree import load
+ * at all - the two loaders this replaced each knew only their own spelling.
+ */
+export function rewriteImports(src, rel) {
+  const from = path.posix.dirname(rel);
+  const to = (target) => {
+    const spec = path.posix.relative(from, `${target}.mjs`);
+    return spec.startsWith(".") ? spec : `./${spec}`;
+  };
+  return src
+    .replace(/from\s+"scripts\/([\w\-/]+?)(?:\.js)?"/g, (_m, t) => `from "${to(t)}"`)
+    .replace(/from\s+"\.\/([\w\-/]+)\.js"/g, (_m, t) => `from "${to(path.posix.join(from, t))}"`);
+}
+
+/**
+ * Mirror ALL of scripts/ into a fresh temp dir as .mjs, and return the dir.
  *
  * Bitburner resolves "./config.js"; Node needs the real extension. Rewriting on
  * a copy keeps the game files untouched and means tests always run against what
  * is actually on disk, not a hand-maintained duplicate.
  */
-export async function loadScripts() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bbtest-"));
-  const names = fs.readdirSync(SCRIPTS).filter((f) => f.endsWith(".js"));
-
-  for (const f of [...names, ...NESTED]) {
-    const src = fs.readFileSync(path.join(SCRIPTS, f), "utf8");
-    // The character class admits "/" so "./continuous/config.js" is rewritten
-    // too; without it the specifier survives as .js and Node cannot resolve it,
-    // which breaks every caller of loadScripts, not just boot's.
-    const rewritten = src.replace(/from\s+"\.\/([\w\-/]+)\.js"/g, 'from "./$1.mjs"');
-    const dest = path.join(dir, f.replace(/\.js$/, ".mjs"));
+export function mirrorScripts(prefix = "bbtest-") {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  for (const rel of scriptFiles()) {
+    const src = fs.readFileSync(path.join(SCRIPTS, rel), "utf8");
+    const dest = path.join(dir, rel.replace(/\.js$/, ".mjs"));
     fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(dest, rewritten);
+    fs.writeFileSync(dest, rewriteImports(src, rel));
   }
+  return dir;
+}
+
+export async function loadScripts() {
+  const dir = mirrorScripts();
+  const names = fs.readdirSync(SCRIPTS).filter((f) => f.endsWith(".js"));
 
   // Nested modules are keyed by their nested name ("gang/math"), so a caller
   // asking for a flat script cannot collide with one. They are imported here

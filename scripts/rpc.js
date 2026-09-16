@@ -13,10 +13,10 @@
  * The caller pays ns.run (1.00) and NOTHING else - write, read, getPortHandle,
  * nextPortWrite, clear and asleep are all 0 GB in this fork.
  *
- * ONE COPY, SHARED. scripts/continuous/ imports this directly rather than
- * carrying its own. That tree's self-containment rule exists to stop RAM
- * contamination, and a shared 1.00 GB module costs exactly what two copies
- * would.
+ * ONE COPY, SHARED. scripts/continuous/ may import this directly rather than
+ * carry its own - that tree already imports scripts/config.js, and its
+ * self-containment rule exists to stop RAM contamination, which a shared
+ * 1.00 GB module does not cause: it costs exactly what two copies would.
  *
  * NOT for cheap or short-lived scripts. cloud.js, root.js, deploy.js and the
  * four gang/ transients already hold their RAM for under a second - routing

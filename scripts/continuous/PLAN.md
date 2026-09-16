@@ -25,7 +25,8 @@
 > ### Known gaps
 >
 > - **Formulas.exe swap is boot.js's job**, by decision - a running manager never re-checks.
-> - `capacity.js` still reports the Phase 1 model (nominal batch, no adaptive steal).
+> - `capacity.js` is deleted - it still reported the Phase 1 model. `servers.js` is the live diagnostic.
+> - The batch workers are `scripts/{hack,grow,weaken}.js`, shared with the shotgun; the Phase 2 copies here are gone.
 > - **Spacer/cadence is untouched.** `SPACER_MS` 100 gives `CADENCE_MS` 400. Measured jitter was
 >   avg 10ms / max 29ms, so spacer 50 would double depth and double income with a 1.7x margin
 >   instead of 3.4x. Deliberately left for a run where it is the only variable changed.

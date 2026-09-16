@@ -72,13 +72,6 @@ const ORPHANS = [
   { filename: "scripts/weaken.js", host: "p1", threads: 200 },
 ];
 
-/** The same, for the continuous batcher - different files, same damage. */
-const CONT_ORPHANS = [
-  { filename: "scripts/continuous/hack.js", host: "p0", threads: 400 },
-  { filename: "scripts/continuous/grow.js", host: "p0", threads: 900 },
-  { filename: "scripts/continuous/weaken.js", host: "p1", threads: 200 },
-];
-
 /**
  * Boot runs the CONTINUOUS batcher unless told otherwise, so every case below
  * that is about the shotgun's two builds has to say so. Spelled out at each
@@ -292,11 +285,11 @@ export const tests = {
   "switching to the shotgun clears the continuous workers": async () => {
     const r = await runBoot({
       args: SHOTGUN, hasFormulas: false,
-      running: ["scripts/continuous/manager.js"], workers: CONT_ORPHANS,
+      running: ["scripts/continuous/manager.js"], workers: ORPHANS,
     });
     assert(r.killed.includes("scripts/continuous/manager.js"),
       `the continuous manager should be stopped, killed: ${r.killed}`);
-    for (const w of CONT_ORPHANS) {
+    for (const w of ORPHANS) {
       assert(r.killed.includes(w.filename),
         `${w.filename} should have been killed, killed: ${r.killed}`);
     }
@@ -312,7 +305,7 @@ export const tests = {
     const r = await runBoot({
       args: SHOTGUN, hasFormulas: false,
       running: ["scripts/continuous/manager.js"],
-      workers: [...CONT_ORPHANS, { filename: "scripts/share.js", host: "p1", threads: 2921 }],
+      workers: [...ORPHANS, { filename: "scripts/share.js", host: "p1", threads: 2921 }],
     });
     assert(!r.killed.includes("scripts/share.js"),
       `share workers must survive a cross-system swap, killed: ${r.killed}`);

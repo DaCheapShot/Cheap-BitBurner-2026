@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { assert, assertClose, loadScripts } from "./harness.mjs";
+import { assert, assertClose, loadScripts, mirrorScripts, readScript, scriptFiles } from "./harness.mjs";
 import { makeNs, withFormulas } from "./mockNs.mjs";
 
 /**
@@ -24,15 +24,7 @@ const ROOT = path.resolve(import.meta.dirname, "..");
 const SRC = path.join(ROOT, "scripts", "continuous");
 
 /** Every .js under scripts/continuous, as paths relative to that folder. */
-function sourceFiles(dir = SRC, prefix = "") {
-  const out = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) out.push(...sourceFiles(path.join(dir, entry.name), rel));
-    else if (entry.name.endsWith(".js")) out.push(rel);
-  }
-  return out;
-}
+const sourceFiles = () => scriptFiles(SRC);
 
 let loaded = null;
 
@@ -48,28 +40,12 @@ let loaded = null;
 async function loadContinuous() {
   if (loaded) return loaded;
 
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bbcont-"));
+  // The whole of scripts/, not just this folder: the continuous tree imports
+  // scripts/config.js for the constants both batchers must agree on.
+  const dir = path.join(mirrorScripts("bbcont-"), "continuous");
   const files = sourceFiles();
   const sources = new Map();
-
-  for (const rel of files) {
-    const src = fs.readFileSync(path.join(SRC, rel), "utf8");
-    sources.set(rel, src);
-
-    const fromDir = path.posix.dirname(rel);
-    const rewritten = src.replace(
-      /from\s+"scripts\/continuous\/([\w\-/]+)"/g,
-      (_match, target) => {
-        let spec = path.posix.relative(fromDir === "." ? "" : fromDir, `${target}.mjs`);
-        if (!spec.startsWith(".")) spec = `./${spec}`;
-        return `from "${spec}"`;
-      },
-    );
-
-    const dest = path.join(dir, rel.replace(/\.js$/, ".mjs"));
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(dest, rewritten);
-  }
+  for (const rel of files) sources.set(rel, fs.readFileSync(path.join(SRC, rel), "utf8"));
 
   const mods = {};
   for (const rel of files) {
@@ -337,7 +313,10 @@ export const tests = {
     const { sources } = await loadContinuous();
     const src = stripComments(sources.get("config.js"));
     assert(!/\bns\./.test(src), "config.js must contain no ns calls - it is imported everywhere");
-    assert(!/\bimport\b/.test(src), "config.js must import nothing");
+    // Only scripts/config.js, which the ram test holds to 0 GB for the same reason.
+    const froms = [...src.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]);
+    assert(froms.every((f) => f === "scripts/config"),
+      `config.js may import only scripts/config, found: ${froms.join(", ")}`);
   },
 
   "lib/server.js never reaches ns.getServer, which would cost it 2GB": async () => {
@@ -517,9 +496,9 @@ export const tests = {
   // ------------------------------------------------------------- workers ----
 
   "the workers import nothing at all": async () => {
-    const { sources } = await loadContinuous();
+    // One worker set for both batchers - these are scripts/{hack,grow,weaken}.js.
     for (const w of ["hack", "grow", "weaken"]) {
-      const src = stripComments(sources.get(`${w}.js`));
+      const src = stripComments(readScript(w));
       // A worker pays its RAM PER THREAD, so one import reaching one 1GB
       // analyze function would add that GB to every one of tens of thousands of
       // threads. And a missing import makes exec return a bare 0 - the same
@@ -529,11 +508,10 @@ export const tests = {
   },
 
   "each worker runs one op and writes the port exactly once": async () => {
-    const { sources } = await loadContinuous();
     const ops = { hack: "hack", grow: "grow", weaken: "weaken" };
 
     for (const [file, op] of Object.entries(ops)) {
-      const src = stripComments(sources.get(`${file}.js`));
+      const src = stripComments(readScript(file));
 
       const awaits = [...src.matchAll(/await\s+ns\.(hack|grow|weaken)\(/g)].map((m) => m[1]);
       assert(awaits.length === 1, `${file}.js should await exactly one op, found ${awaits.length}`);
@@ -547,9 +525,8 @@ export const tests = {
   },
 
   "no worker reads a file, because ns.read is host-local": async () => {
-    const { sources } = await loadContinuous();
     for (const w of ["hack", "grow", "weaken"]) {
-      const src = stripComments(sources.get(`${w}.js`));
+      const src = stripComments(readScript(w));
       // ns.read resolves against the server the CALLING script runs on, so a
       // worker reading a file that exists only on home gets "" and acts on it.
       // Everything a worker needs arrives as an argument.
@@ -881,7 +858,7 @@ export const tests = {
     // Bitburner charges for every ns function reachable through imports, so a
     // script touching both backends pays ~7GB for two complete sets of maths
     // and can use exactly one of them.
-    for (const entry of ["manager", "manager-formulas", "core", "capacity"]) {
+    for (const entry of ["manager", "manager-formulas", "core", "servers"]) {
       const closure = importClosure(entry, sources);
       const both = closure.has("lib/mathAnalyze") && closure.has("lib/mathFormulas");
       assert(!both, `${entry}.js reaches BOTH math backends`);
@@ -4226,24 +4203,19 @@ export const tests = {
   // are one protocol read from two places. A divergence here does not fail
   // loudly: `sharemode.js on` would launch workers that read an empty port,
   // parse it as off, and exit a millisecond after a perfectly valid pid.
-  "the share protocol matches the shotgun's exactly": async () => {
-    const root = (await loadScripts())["config"];
-    const { mods } = await loadContinuous();
-    const cont = mods["config"];
-
-    for (const key of ["SHARE_MARKER", "SHARE_PORT", "SHARE_WORKER",
-                       "SHARE_FRACTION", "SHARE_MAX_FRACTION", "SHARE_RAM_FALLBACK"]) {
-      assert(cont[key] === root[key],
-        `${key} diverged: continuous has ${JSON.stringify(cont[key])}, ` +
-          `scripts/config.js has ${JSON.stringify(root[key])}`);
-    }
-
-    // The parser too, not just the constants - it decides whether a worker
-    // lives, and "anything unreadable means OFF" is the load-bearing half.
-    for (const text of ["", "off", "false", "on", "true", "0.4", "9", "banana", "-1"]) {
-      assert(cont.shareFractionFrom(text) === root.shareFractionFrom(text),
-        `shareFractionFrom("${text}") diverged: ${cont.shareFractionFrom(text)} ` +
-          `vs ${root.shareFractionFrom(text)}`);
+  //
+  // So they are IMPORTED, not copied. This pins that a copy does not creep
+  // back: a local `export const SHARE_PORT` would shadow nothing and diverge
+  // silently, which is how the copies were kept in step before - by this test.
+  "the share protocol and workers are the shotgun's, not a copy": async () => {
+    const { sources } = await loadContinuous();
+    const src = stripComments(sources.get("config.js"));
+    for (const key of ["SHARE_MARKER", "SHARE_PORT", "SHARE_WORKER", "SHARE_FRACTION",
+                       "SHARE_MAX_FRACTION", "SHARE_RAM_FALLBACK", "shareFractionFrom",
+                       "WORKER_FILES", "WORKER_LIST", "WORKER_RAM_FALLBACK"]) {
+      assert(!new RegExp(`export\\s+(const|function)\\s+${key}\\b`).test(src),
+        `continuous/config.js defines ${key} locally - it must re-export scripts/config.js's`);
+      assert(new RegExp(`\\b${key}\\b`).test(src), `continuous/config.js does not re-export ${key}`);
     }
   },
 
