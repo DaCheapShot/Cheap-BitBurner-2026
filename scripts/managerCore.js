@@ -939,7 +939,7 @@ export async function runVolley(ns, math) {
   // rooting new servers and levelling up both change what is reachable, and a
   // target chosen at launch goes stale within minutes.
   const pinnedTarget = tIdx >= 0 ? args[tIdx + 1] : null;
-  let target = pinnedTarget ?? pickTarget(ns, math);
+  let target = pinnedTarget ?? await pickTarget(ns, math);
   if (!target) {
     ns.tprint("ERROR: no rooted, money-bearing target found. Pass --target <host>.");
     return;
@@ -1007,10 +1007,12 @@ export async function runVolley(ns, math) {
     // else in the cycle: the previous volley has fully resolved and its RAM is
     // released, so nothing is in flight against the old target.
     if (!pinnedTarget) {
-      const best = pickTarget(ns, math);
+      const best = await pickTarget(ns, math);
       if (best && best !== target) {
-        const bestMoney = math.maxMoneyOf(ns, best);
-        const currentMoney = math.maxMoneyOf(ns, target);
+        // One round trip for both, rather than two - see math.maxMoneyOfAll.
+        const money = await math.maxMoneyOfAll(ns, [best, target]);
+        const bestMoney = money[best];
+        const currentMoney = money[target];
         if (bestMoney > currentMoney * TARGET_SWITCH_MARGIN) {
           ns.print(
             `retargeting ${target} (${fmtMoney(currentMoney)}) -> ${best} ` +
@@ -1032,7 +1034,7 @@ export async function runVolley(ns, math) {
     //
     // One snapshot per cycle. Everything downstream reads from it, so the
     // per-cycle ns cost is fixed no matter how many steal candidates are tried.
-    let m = math.snapshot(ns, target);
+    let m = await math.snapshot(ns, target);
     if (!isPrepped(m)) {
       ns.print(
         `cycle ${cycle}: ${target} needs prep - ${fmtMoney(m.money)}/${fmtMoney(m.maxMoney)}, ` +
@@ -1246,7 +1248,7 @@ export async function runVolley(ns, math) {
     // -- judge --------------------------------------------------------------
 
     const j = judgeVolley(byBatch, expected, timing.s);
-    const after = math.snapshot(ns, target);
+    const after = await math.snapshot(ns, target);
 
     // The drift measurement, free: hackFractionPerThread comes from the
     // snapshot already taken, and both math backends already price it.

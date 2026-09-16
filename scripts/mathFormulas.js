@@ -38,7 +38,7 @@ export async function prepare(ns) {
   }
 }
 
-export function snapshot(ns, host) {
+export async function snapshot(ns, host) {
   const server = ns.getServer(host);
   const player = ns.getPlayer();
   const maxMoney = server.moneyMax;
@@ -52,9 +52,14 @@ export function snapshot(ns, host) {
   };
 }
 
-/** See mathAnalyze.maxMoneyOf. getServer is already charged here, so this is free. */
-export function maxMoneyOf(ns, host) {
-  return ns.getServer(host).moneyMax;
+/**
+ * See mathAnalyze.maxMoneyOfAll. Bundled there to keep seventy rpc calls down
+ * to one; here the loop is just seventy getServer reads, already charged.
+ */
+export async function maxMoneyOfAll(ns, hosts) {
+  const out = {};
+  for (const h of hosts) out[h] = ns.getServer(h).moneyMax;
+  return out;
 }
 
 export function hackFractionPerThread(snap) {

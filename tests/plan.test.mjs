@@ -134,7 +134,7 @@ export const tests = {
     const ns = stealNs();
     assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
 
-    const snap = mathAnalyze.snapshot(ns, "fat");
+    const snap = await mathAnalyze.snapshot(ns, "fat");
     const pool = ramMod.ServerPool.build(ns, { homeReserve: 0 });
     const perThread = mathAnalyze.hackFractionPerThread(snap);
     const consts = {

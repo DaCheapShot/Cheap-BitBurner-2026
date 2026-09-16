@@ -200,11 +200,26 @@ collisions; it is the only thing standing between this repo and a 25 GB variable
   `growthAnalyzeSecurity` (1 GB each) out of the manager for the 1.00 GB `ns.run` costs.
   `calibrate.js`, `calib.js` and `/data/calib.json` did the same job with a cached file and a
   6.20 GB recurring transient, and are gone.
-- `growthAnalyze` stays live: it reads security at call time, so it cannot be cached. The cached
-  growth base that used to shortcut it carried no extra information - `calibrate.js` computed it
-  as `2 ** (1 / growthAnalyze(host, 2))` at minimum security, so the two agreed exactly in the
-  only state the cache was used in.
-- `hackAnalyze` stays live: it moves with hacking level, and reacting to that is the point.
+- **`growthAnalyze` is exactly logarithmic in its multiplier**, which is why one reading per
+  snapshot replaces every call. `ServerHelpers.ts`: `numCycleForGrowth(server, growth) =
+  Math.log(growth) / calculateServerGrowthLog(...)` - the divisor does not depend on `growth`,
+  and nothing rounds or clamps. So `snapshot()` fetches `growthLogK` once and
+  `growThreadsToRestore` answers any multiplier from it locally, with the number a live call
+  would have given at that security. This is the identity `calibrate.js` used, measured per
+  snapshot instead of cached per session - so there is no drifted-host case left to guard.
+- `hackAnalyze` still moves with hacking level, and reacting to that is the point - it is read
+  in `snapshot()`, so it is exactly as live as the snapshot the planner is working from.
+- **The whole analyze backend now costs 1.00 GB, all of it `ns.run`.** Every `*Analyze` name
+  appears only inside an `rpc` body, which is a string literal to the calculator. Two round
+  trips per cycle buy that, not seven: `snapshot()` bundles the four `getServer*` fields, the
+  three op times, `hackAnalyze` and `growthLogK` into one call, and `maxMoneyOfAll` asks about
+  the whole rooted network in another. Everything downstream reads the snapshot and stays
+  **synchronous**, which is what kept this from cascading `async` through `managerCore` and
+  `prepper`.
+- **The analyze build is now the CHEAPER one** (5.40 against 6.90), which it never was before.
+  `mathFormulas` still holds `getServer` and `getPlayer` resident because `ns.formulas.*` needs
+  the objects in hand and is itself 0 GB; moving those two would cost it the same 1.00 for
+  `ns.run` and save 1.50, worth doing alongside the twin merge rather than on its own.
 
 Worker scripts pay their cost **per thread**, so `hack.js` / `grow.js` / `weaken.js` contain
 nothing beyond one op and one port write. `share.js` follows the same rule and pays the most for
@@ -282,12 +297,12 @@ editor's RAM panel when one moves.
 | `ram.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
 | `rpc.js` | run a body in a throwaway script, get its value back | 1.00 |
 | `prepper.js` | prep as a module (manager runs it in-process) | 2.40 |
-| `mathAnalyze.js` | math interface via *Analyze; constants via `rpc.js` | 3.55 |
+| `mathAnalyze.js` | math interface via *Analyze, reached entirely through `rpc.js` | 1.00 |
 | `mathFormulas.js` | math interface via `ns.formulas` | 2.50 |
 | `managerCore.js` | the volley loop + share top-up, math-free | 2.80 |
-| `manager.js` | entry: core + mathAnalyze (always works) | 6.95 |
+| `manager.js` | entry: core + mathAnalyze (always works) | 5.40 |
 | `manager-formulas.js` | entry: core + mathFormulas | 6.90 |
-| `prep.js` | entry: prepper + mathAnalyze | 6.55 |
+| `prep.js` | entry: prepper + mathAnalyze | 5.00 |
 | `prep-formulas.js` | entry: prepper + mathFormulas | 6.50 |
 | `boot.js` | supervisor, picks the batcher | 3.60 |
 | `root.js` | port openers + NUKE | 2.15 |

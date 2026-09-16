@@ -2,23 +2,23 @@ import { MONEY_TOLERANCE, SEC_TOLERANCE } from "./config.js";
 import { rpc } from "./rpc.js";
 
 /**
- * Math interface backed by the *Analyze API plus the calibration cache.
+ * Math interface backed by the *Analyze API, reached entirely through rpc.js.
  *
  * This is the always-available implementation: it needs no programs and works
  * from minute one of a BitNode. It is also honestly approximate - see
  * growThreadsToRestore.
  *
- * RAM charged to whoever imports this:
- *   4x getServer* 0.40 + hackAnalyze 1.00 + growthAnalyze 1.00
- *   + getHackTime/getGrowTime/getWeakenTime 0.15 + rpc.js 1.00
- *   = 3.55 GB   (config.js is 0 GB)
+ * RAM charged to whoever imports this: 1.00 GB, all of it rpc.js's ns.run.
+ * Every *Analyze function is named only inside an rpc body, which is a string
+ * literal to the RAM calculator, so none of them is billed here. It was 2.55
+ * when the calls were resident.
  *
- * The three per-thread security constants USED to live in /data/calib.json,
- * written by a calibrate.js transient, purely so this module would not import
- * weakenAnalyze, hackAnalyzeSecurity and growthAnalyzeSecurity at 1.00 GB each.
- * They are read once, at startup, which makes them the cheapest possible rpc
- * call - so the cache, its writer, its staleness guard and boot's refresh phase
- * are all gone, at a cost of the 1.00 GB ns.run that rpc.js carries.
+ * TWO ns CALLS PER CYCLE, NOT SEVEN. snapshot() fetches the four getServer*
+ * fields, the three op times, hackAnalyze AND the growth constant in one round
+ * trip, because the body-taking form of rpc() makes a bundle cost exactly what
+ * a single value costs. Everything downstream then reads the snapshot and stays
+ * SYNCHRONOUS - which is the whole reason this module can change without an
+ * async cascade through managerCore and prepper.
  */
 
 export const NAME = "analyze";
@@ -56,32 +56,72 @@ export async function prepare(ns) {
   return { ok: true };
 }
 
-export function snapshot(ns, host) {
-  const maxMoney = ns.getServerMaxMoney(host);
-  const money = ns.getServerMoneyAvailable(host);
-  const minSec = ns.getServerMinSecurityLevel(host);
-  const sec = ns.getServerSecurityLevel(host);
+/**
+ * Everything the planner needs about a host, in ONE round trip.
+ *
+ * growthLogK is the load-bearing one. src/Server/ServerHelpers.ts:
+ *
+ *     numCycleForGrowth(server, growth) = Math.log(growth) / calculateServerGrowthLog(...)
+ *
+ * The divisor does not depend on `growth`, and there is no rounding or clamping
+ * anywhere in it - so growthAnalyze is EXACTLY logarithmic in its multiplier.
+ * One call therefore yields the constant, and growThreadsToRestore can answer
+ * any multiplier from it locally, with the same number a live call would give
+ * at this security.
+ *
+ * That is the same identity calibrate.js used (growBase = 2 ** (1 / growthAnalyze
+ * (host, 2))), but measured per snapshot instead of cached per session, so there
+ * is no drifted-host case to guard against - the constant is always read at the
+ * security it is about to be used at.
+ *
+ * ns is re-attached AFTER the round trip: it cannot survive JSON, and nothing
+ * downstream needs it any more, but prepper and managerCore still read snap.ns
+ * in a few places and the formulas snapshot carries it too.
+ */
+export async function snapshot(ns, host) {
+  const s = await rpc(ns, `
+    const host = args[0];
+    return {
+      maxMoney: ns.getServerMaxMoney(host),
+      money: ns.getServerMoneyAvailable(host),
+      minSec: ns.getServerMinSecurityLevel(host),
+      sec: ns.getServerSecurityLevel(host),
+      hackFraction: ns.hackAnalyze(host),
+      growthLogK: Math.log(2) / ns.growthAnalyze(host, 2),
+      times: {
+        hack: ns.getHackTime(host),
+        grow: ns.getGrowTime(host),
+        weaken: ns.getWeakenTime(host),
+      },
+    };
+  `, host);
+
   return {
-    ns, host, maxMoney, money, minSec, sec,
-    moneyOk: money >= maxMoney * MONEY_TOLERANCE,
-    secOk: sec <= minSec + SEC_TOLERANCE,
+    ns, host, ...s,
+    moneyOk: s.money >= s.maxMoney * MONEY_TOLERANCE,
+    secOk: s.sec <= s.minSec + SEC_TOLERANCE,
   };
 }
 
 /**
- * Max money of a host, without building a full snapshot.
+ * Max money for many hosts at once.
  *
- * For scanning many candidates (pickTarget, the retarget check). Kept separate
- * so the formulas build never needs ns.getServerMaxMoney, which is its only
- * remaining use and would cost it 0.10 GB for nothing.
+ * Bundled rather than per-host because rankTargets asks about the WHOLE rooted
+ * network - about seventy hosts. Seventy rpc calls would be seventy script
+ * launches per cycle, each one a chance for ns.run to return 0 on a busy home,
+ * to answer a question one call already answers.
  */
-export function maxMoneyOf(ns, host) {
-  return ns.getServerMaxMoney(host);
+export async function maxMoneyOfAll(ns, hosts) {
+  return rpc(ns, `
+    const out = {};
+    for (const h of args) out[h] = ns.getServerMaxMoney(h);
+    return out;
+  `, ...hosts);
 }
 
-/** Live: moves with hacking level, which is why it is never cached. */
+/** From the snapshot, so it moves with hacking level exactly as a live call does. */
 export function hackFractionPerThread(snap) {
-  return snap.ns.hackAnalyze(snap.host);
+  return snap.hackFraction;
 }
 
 // Measured once by prepare(), above.
@@ -92,30 +132,21 @@ export function securityPerWeakenThread() { return consts.weakenPerThread; }
 /**
  * Grow threads to take money from fromMoney to toMoney.
  *
- * APPROXIMATE, deliberately and unavoidably. growthAnalyze evaluates at the
- * target's CURRENT security, so the atSecurity argument cannot be honoured -
- * it is accepted only so this signature matches mathFormulas, which can. When
- * the two disagree, formulas is right.
+ * APPROXIMATE, deliberately and unavoidably. growthLogK was measured at the
+ * snapshot's security, so the atSecurity argument cannot be honoured - it is
+ * accepted only so this signature matches mathFormulas, which can. When the two
+ * disagree, formulas is right.
  *
- * Always a live growthAnalyze. There used to be a cached growth base to prefer,
- * but it carried no information this call does not: calibrate.js computed it as
- * 2 ** (1 / growthAnalyze(host, 2)) at minimum security, so the two agree
- * exactly in the only state the cache was ever used in, and the live call is
- * strictly better when the host has drifted. growthAnalyze is charged to this
- * module either way.
+ * log(mult) / growthLogK is what ns.growthAnalyze(host, mult) would return, by
+ * the identity in snapshot() above - not an approximation of it.
  */
 export function growThreadsToRestore(snap, fromMoney, toMoney, atSecurity) {
   const from = Math.max(fromMoney, 1);
   const to = Math.min(toMoney, snap.maxMoney);
   if (to <= from) return 0;
-  const mult = to / from;
-  return snap.ns.growthAnalyze(snap.host, mult);
+  return Math.log(to / from) / snap.growthLogK;
 }
 
 export function opTimes(snap) {
-  return {
-    hack: snap.ns.getHackTime(snap.host),
-    grow: snap.ns.getGrowTime(snap.host),
-    weaken: snap.ns.getWeakenTime(snap.host),
-  };
+  return snap.times;
 }

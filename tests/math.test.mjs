@@ -26,12 +26,12 @@ export const tests = {
     const ready = await mathAnalyze.prepare(ns);
     assert(ready.ok, `prepare failed: ${ready.error}`);
 
-    const snap = mathAnalyze.snapshot(ns, HOST);
+    const snap = await mathAnalyze.snapshot(ns, HOST);
     assert(snap.maxMoney === 62.5e6, "maxMoney wrong");
     assert(snap.moneyOk === true, "moneyOk should be true at max money");
     assert(snap.secOk === true, "secOk should be true at min security");
 
-    assert(mathAnalyze.maxMoneyOf(ns, HOST) === 62.5e6, "maxMoneyOf wrong");
+    assert((await mathAnalyze.maxMoneyOfAll(ns, [HOST]))[HOST] === 62.5e6, "maxMoneyOfAll wrong");
     assertClose(mathAnalyze.hackFractionPerThread(snap), 0.0037, 1e-9, "hack fraction");
     assertClose(mathAnalyze.securityPerHackThread(snap), 0.002, 1e-9, "hack security");
     assertClose(mathAnalyze.securityPerGrowThread(snap), 0.004, 1e-9, "grow security");
@@ -70,10 +70,10 @@ export const tests = {
     const ready = await mathFormulas.prepare(ns);
     assert(ready.ok, `prepare failed: ${ready.error}`);
 
-    const snap = mathFormulas.snapshot(ns, HOST);
+    const snap = await mathFormulas.snapshot(ns, HOST);
     assert(snap.maxMoney === 62.5e6, "maxMoney wrong");
     assert(snap.moneyOk === true, "moneyOk should be true at max money");
-    assert(mathFormulas.maxMoneyOf(ns, HOST) === 62.5e6, "maxMoneyOf wrong");
+    assert((await mathFormulas.maxMoneyOfAll(ns, [HOST]))[HOST] === 62.5e6, "maxMoneyOfAll wrong");
     assertClose(mathFormulas.hackFractionPerThread(snap), 0.0037, 1e-9, "hack fraction");
     assertClose(mathFormulas.securityPerWeakenThread(snap), 0.05, 1e-9, "weaken security");
 
@@ -98,14 +98,14 @@ export const tests = {
 
     const nsF = withFormulas(baseNs({ moneyAvailable: 50e6 }));
     await mathFormulas.prepare(nsF);
-    const snapF = mathFormulas.snapshot(nsF, HOST);
+    const snapF = await mathFormulas.snapshot(nsF, HOST);
     const atMin = mathFormulas.growThreadsToRestore(snapF, 50e6, 62.5e6, 5);
     const atHigh = mathFormulas.growThreadsToRestore(snapF, 50e6, 62.5e6, 25);
     assert(atHigh > atMin, `growth is worse at high security: ${atHigh} should exceed ${atMin}`);
 
     const nsA = baseNs({ moneyAvailable: 50e6 });
     await mathAnalyze.prepare(nsA);
-    const snapA = mathAnalyze.snapshot(nsA, HOST);
+    const snapA = await mathAnalyze.snapshot(nsA, HOST);
     const aMin = mathAnalyze.growThreadsToRestore(snapA, 50e6, 62.5e6, 5);
     const aHigh = mathAnalyze.growThreadsToRestore(snapA, 50e6, 62.5e6, 25);
     assertClose(aMin, aHigh, 1e-9, "analyze cannot honour atSecurity and must return the same");

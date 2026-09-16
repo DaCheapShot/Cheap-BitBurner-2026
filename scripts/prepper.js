@@ -128,7 +128,7 @@ export function shareRam(ns) {
  * holds a getServer object with these fields, and paying 0.40 GB for four
  * getServer* calls to re-read them would cancel out the swap's RAM saving.
  */
-export function measure(ns, host, math) {
+export async function measure(ns, host, math) {
   return math.snapshot(ns, host);
 }
 
@@ -149,16 +149,22 @@ export const isPrepped = (m) => m.moneyOk && m.secOk;
  * across the next few candidates (PREP_FANOUT) with the RAM the primary's wave
  * cannot use. Same ns calls as picking one - the scan was already whole-network.
  */
-export function rankTargets(ns, math) {
+export async function rankTargets(ns, math) {
   const level = ns.getHackingLevel();
-  const found = [];
+  const candidates = [];
   for (const host of ServerPool.scanAll(ns)) {
     if (host === "home" || !ns.hasRootAccess(host)) continue;
-    const maxMoney = math.maxMoneyOf(ns, host);
-    if (maxMoney <= 0) continue;
     if (ns.getServerRequiredHackingLevel(host) > level) continue;
-    found.push({ host, maxMoney });
+    candidates.push(host);
   }
+  // ONE round trip for the whole rooted network, not one per host - see
+  // math.maxMoneyOfAll. The level filter runs first so the call carries only
+  // hosts that could still qualify; both are filters, so the order of the two
+  // cannot change the result.
+  const money = await math.maxMoneyOfAll(ns, candidates);
+  const found = candidates
+    .filter((h) => money[h] > 0)
+    .map((h) => ({ host: h, maxMoney: money[h] }));
   found.sort((a, b) => b.maxMoney - a.maxMoney);
   return found.map((f) => f.host);
 }
@@ -169,8 +175,8 @@ export function rankTargets(ns, math) {
  * Defined in terms of rankTargets so the manager's choice of primary and prep's
  * choice of extras can never disagree about the ordering.
  */
-export function pickTarget(ns, math) {
-  return rankTargets(ns, math)[0] ?? null;
+export async function pickTarget(ns, math) {
+  return (await rankTargets(ns, math))[0] ?? null;
 }
 
 /**
@@ -501,7 +507,7 @@ export async function prepGroup(ns, host, opts = {}) {
       pool.refresh();
     }
 
-    const m = math.snapshot(ns, host);
+    const m = await math.snapshot(ns, host);
 
     if (isPrepped(m)) {
       log(
@@ -594,11 +600,11 @@ export async function prepGroup(ns, host, opts = {}) {
     // mis-sized extra can do is waste RAM and leave a server slightly dirty,
     // which that server's own next cycle re-measures and corrects.
     let n = 0;
-    for (const other of extras()) {
+    for (const other of await extras()) {
       if (n >= fanout) break;
       if (other === host) continue;
 
-      const om = math.snapshot(ns, other);
+      const om = await math.snapshot(ns, other);
       if (isPrepped(om)) continue;
 
       // LOAD-BEARING. Every placement releases together at the end of the cycle,
@@ -647,7 +653,7 @@ export async function prepGroup(ns, host, opts = {}) {
     const launched = waves[0].launched;
     const reports = seen.get(waves[0].batch) ?? 0;
 
-    const after = math.snapshot(ns, host);
+    const after = await math.snapshot(ns, host);
     log(
       `         landed ${reports}/${launched} report(s), ${waves[0].threads}t  ->  ` +
         `${fmtMoney(after.money)} (${((after.money / after.maxMoney) * 100).toFixed(1)}%), ` +
@@ -672,7 +678,7 @@ export async function prepGroup(ns, host, opts = {}) {
     }
   }
 
-  return { ok: false, cycles: maxCycles, reason: "hit max cycles", m: math.snapshot(ns, host) };
+  return { ok: false, cycles: maxCycles, reason: "hit max cycles", m: await math.snapshot(ns, host) };
 }
 
 /**
@@ -712,7 +718,7 @@ export async function prepCli(ns, math) {
     return;
   }
 
-  const host = tIdx >= 0 ? args[tIdx + 1] : pickTarget(ns, math);
+  const host = tIdx >= 0 ? args[tIdx + 1] : await pickTarget(ns, math);
   if (!host) {
     ns.tprint("ERROR: no rooted, money-bearing target found. Pass --target <host>.");
     return;
@@ -722,7 +728,7 @@ export async function prepCli(ns, math) {
   // Safe here because this process owns the port; the manager clears its own.
   ns.getPortHandle(REPORT_PORT).clear();
 
-  const start = measure(ns, host, math);
+  const start = await measure(ns, host, math);
   ns.print(
     `prep ${host}: money ${fmtMoney(start.money)}/${fmtMoney(start.maxMoney)}  ` +
       `sec ${start.sec.toFixed(2)}/${start.minSec.toFixed(2)}`,

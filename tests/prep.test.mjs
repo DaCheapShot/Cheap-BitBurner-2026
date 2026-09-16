@@ -153,7 +153,7 @@ export const tests = {
       },
     });
     assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
-    const m = prepper.measure(ns, "x", mathAnalyze);
+    const m = await prepper.measure(ns, "x", mathAnalyze);
     assert(m.moneyOk === true, "moneyOk should be true at max money");
     assert(m.secOk === true, "secOk should be true at min security");
   },
@@ -200,9 +200,9 @@ export const tests = {
     const { prepper, mathAnalyze } = await loadScripts();
     const ns = fleetNs();
     assert((await mathAnalyze.prepare(ns)).ok, "prepare failed");
-    const ranked = prepper.rankTargets(ns, mathAnalyze);
+    const ranked = await prepper.rankTargets(ns, mathAnalyze);
     assert(ranked[0] === "rich", `richest should lead, got ${ranked.join(",")}`);
-    assert(prepper.pickTarget(ns, mathAnalyze) === ranked[0], "pickTarget diverged from the ranking");
+    assert(await prepper.pickTarget(ns, mathAnalyze) === ranked[0], "pickTarget diverged from the ranking");
     // Ordering is by max money descending, and nothing above hacking level or
     // without money is listed at all.
     assert(ranked.join(",") === "rich,mid,slow,poor", `bad ranking: ${ranked.join(",")}`);

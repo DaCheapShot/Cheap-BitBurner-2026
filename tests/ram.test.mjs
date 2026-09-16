@@ -150,19 +150,34 @@ export const tests = {
   // times.hack, ram.grow, threads.weaken1. The game charges those like calls.
   // Left alone: they are the clearest names available for what they hold, and
   // 0.40 GB does not buy renaming eight files' worth of them.
-  // 6.95 before rpc.js. The +1.00 is ns.run, and it is the ENTRY FEE for the
-  // mechanism, not a regression: it bought the deletion of calib.js,
-  // calibrate.js, /data/calib.json, boot's refresh phase and the staleness
-  // guard. The 3.00 GB of *Analyze functions that cache existed to keep out of
-  // mathAnalyze.js is still out - now in an rpc body, charged to a transient
-  // that lives for a millisecond at startup.
+  // 6.95 before rpc.js, 7.95 with only the startup constants moved, 5.40 now
+  // that mathAnalyze reaches the *Analyze API entirely through rpc bodies. The
+  // whole of its 2.55 is gone and what remains of it is the 1.00 GB ns.run.
   //
-  // Moving the REST of mathAnalyze's calls the same way reclaims 2.55 and takes
-  // this below where it started; the shotgun recomputes once per volley, so
-  // there is no timing risk in doing it.
-  "manager.js (analyze) costs 7.95 GB": () => {
+  // Two round trips per cycle buy that, not seven: snapshot() bundles the four
+  // getServer* fields, the three op times, hackAnalyze and the growth constant
+  // into one call, and maxMoneyOfAll asks about the whole network in another.
+  // Everything downstream reads the snapshot and stays synchronous.
+  "manager.js (analyze) costs 5.40 GB": () => {
     const ram = ramOf("manager");
-    assert(Math.abs(ram - 7.95) < 0.011, `expected 7.95 GB, got ${ram.toFixed(2)}`);
+    assert(Math.abs(ram - 5.40) < 0.011, `expected 5.40 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // 6.55 before. Same story as manager.js, one module further down.
+  "prep.js (analyze) costs 5.00 GB": () => {
+    const ram = ramOf("prep");
+    assert(Math.abs(ram - 5.00) < 0.011, `expected 5.00 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // The analyze build is now CHEAPER than the formulas one, which it never was
+  // before - mathFormulas still holds getServer (2.00) and getPlayer (0.50)
+  // resident, because ns.formulas.* needs the objects in hand and is itself
+  // 0 GB. Moving those two would cost it the same 1.00 for ns.run and save
+  // 1.50; worth doing only alongside the twin merge, where one module holds
+  // both backends and the saving is counted once.
+  "the analyze build is no longer the expensive one": () => {
+    assert(ramOf("manager") < ramOf("manager-formulas"),
+      `analyze ${ramOf("manager").toFixed(2)} should now undercut formulas ${ramOf("manager-formulas").toFixed(2)}`);
   },
 
   // Unchanged: mathFormulas holds no *Analyze function to move, so it does not
