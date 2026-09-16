@@ -1,5 +1,5 @@
-import { loadScripts, readScript, scriptNames, assert } from "./harness.mjs";
-import { makeNs } from "./mockNs.mjs";
+import { loadScripts, readScript, scriptNames, scriptFiles, assert } from "./harness.mjs";
+import { makeNs, resolveBodyImports } from "./mockNs.mjs";
 
 /**
  * The RPC worker.
@@ -113,7 +113,7 @@ export const tests = {
     const ns = rpcNs({ pid: 31 });
     await rpc.rpc(ns, "return 1;");
     assert(ns._files[ns._ran[0]].includes("ns.args"), "the port must come from args");
-    // 1-4 are the shotgun reports, share gate, continuous reports and gang.
+    // 1-3 are the shotgun reports, share gate and continuous reports; 4 was gang's.
     assert(rpc.RPC_PORT_BASE > 4,
       `RPC_PORT_BASE ${rpc.RPC_PORT_BASE} can collide with an existing port`);
   },
@@ -196,13 +196,20 @@ export const tests = {
     // charged to a transient, so the exposure is a runtime ns.run -> 0, never a
     // manager that will not start.
     const { rpc } = await loadScripts();
+    //
+    // Two spellings, across the whole tree: a literal passed straight to rpc(),
+    // and an UPPER_CASE const holding one (gang.js names its bodies). A body in
+    // any other shape is one this test cannot see, so the counts are pinned.
     const bodies = [];
-    for (const name of scriptNames()) {
+    for (const rel of scriptFiles()) {
+      const name = rel.replace(/\.js$/, "");
       const src = readScript(name);
-      for (const m of src.matchAll(/\brpc\s*\(\s*ns\s*,\s*`([\s\S]*?)`/g)) {
-        bodies.push([name, m[1]]);
-      }
+      for (const m of src.matchAll(/\brpc\s*\(\s*ns\s*,\s*`([\s\S]*?)`/g)) bodies.push([name, m[1]]);
+      for (const m of src.matchAll(/\bconst\s+[A-Z_]+\s*=\s*`([\s\S]*?)`;/g)) bodies.push([name, m[1]]);
     }
+    const per = (n) => bodies.filter(([f]) => f === n).length;
+    assert(per("gang/gang") === 5, `gang.js should have 5 bodies (tick, war, ascend, equip, create), found ${per("gang/gang")}`);
+    assert(per("continuous/lib/math") === 1, `continuous/lib/math.js should have 1 body, found ${per("continuous/lib/math")}`);
     for (const [name, body] of bodies) {
       // A ${} interpolation cannot be evaluated here, so it is rejected
       // outright: a body assembled at runtime is one no check can read, and it
@@ -210,7 +217,7 @@ export const tests = {
       assert(!body.includes("${"),
         `${name}: an rpc body must be a plain template literal, not interpolated`);
       try {
-        await import("data:text/javascript," + encodeURIComponent(rpc.source(body)));
+        await import("data:text/javascript," + encodeURIComponent(resolveBodyImports(rpc.source(body))));
       } catch (e) {
         throw new Error(`${name}: rpc body does not parse - ${e.message}`);
       }

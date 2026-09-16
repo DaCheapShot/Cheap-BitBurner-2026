@@ -11,7 +11,7 @@ import {
 /**
  * The gang's decision layer: every formula the game uses, plus the planning
  * built on top of them. Pure arithmetic, no ns call - this file must stay 0 GB,
- * because all four transients import it.
+ * because every rpc body in gang.js imports it.
  *
  * The gain formulas are a line-for-line port of src/Gang/formulas/formulas.ts.
  * They are reproduced rather than called through ns.formulas.gang for two
@@ -194,7 +194,7 @@ export function netWantedGain(g, members, plan, byName) {
  *
  * Hacking tasks are filtered out by task.isCombat. This is a combat gang by
  * decision; a hacking gang would need a second earner filter and different
- * training floors, and tick.js refuses rather than silently mis-assigning.
+ * training floors, and gang.js's tick body refuses rather than silently mis-assigning.
  */
 export function planTasks(g, members, tasks, phase) {
   const byName = new Map(tasks.map((t) => [t.name, t]));
@@ -430,10 +430,10 @@ function ownedSet(m) {
  *
  * Left strictly alone for a hacking gang. The mirrored rule - combat gear last -
  * is the obvious next thought and is not what was asked for, and nothing writes
- * isHacking true today; see the note in tick.js.
+ * isHacking true today; see the tick body in gang.js.
  *
- * Exported so equip.js's zero-buy diagnostic re-derives the shortlist through
- * the same function the planner used. A copy of this gate in the transient
+ * Exported so the equip body's zero-buy diagnostic re-derives the shortlist through
+ * the same function the planner used. A copy of this gate in the body
  * would drift and name a cause that is not the real one, which is the specific
  * failure the reporting rules in CLAUDE.md exist to stop.
  */

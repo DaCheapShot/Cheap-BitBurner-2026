@@ -24,23 +24,11 @@ const NESTED = [
   // transients that act on them.
   "gang/config.js",
   "gang/math.js",
-  "gang/marker.js",
-  "gang/report.js",
-  // The gang entry points hold ns calls, but only inside main() - nothing runs
-  // at import time, so Node can load them and a test can drive gang.js's loop
-  // with a mock ns.
-  //
-  // All of them are listed, including the ones no test drives, because merely
-  // importing a module PARSES it. Nothing else in this repo parses the gang
-  // transients, and a `node --check` cannot be run on them: there is no
-  // package.json, so Node reads a bare .js as CommonJS and rejects `export`.
-  // Two runtime errors have already reached the live game past a clean check.
+  // The supervisor holds ns calls only inside main(), so Node can load it and a
+  // test can drive its loop with a mock ns. Importing it is also what PARSES it:
+  // with no package.json, `node --check` reads a bare .js as CommonJS and
+  // rejects `export`. Its rpc bodies are parsed by tests/rpc.test.mjs.
   "gang/gang.js",
-  "gang/tick.js",
-  "gang/ascend.js",
-  "gang/equip.js",
-  "gang/war.js",
-  "gang/create.js",
 ];
 
 /** Every .js under scripts/, as posix paths relative to it. */

@@ -1,129 +1,325 @@
-import {
-  GANG_TICK, GANG_ASCEND, GANG_EQUIP, GANG_WAR, GANG_MARKER,
-  TICK_EVERY, ASCEND_EVERY, EQUIP_EVERY, WAR_EVERY, TRANSIENT_TIMEOUT_MS,
-} from "./config.js";
-import { drainReports } from "./report.js";
+import { TICK_EVERY, ASCEND_EVERY, EQUIP_EVERY, WAR_EVERY, ASCEND_MULT_THRESHOLD } from "./config.js";
+import { rpc } from "scripts/rpc.js";
 
 /**
- * The gang supervisor: a cheap resident loop that runs expensive transients.
+ * The gang supervisor: a cheap resident loop whose gang API calls all run in
+ * rpc.js transients.
  *
  * WHY THIS SHAPE. ns.gang is priced off RamCostConstants.GangApiBase = 4, and
  * the whole surface this subsystem needs comes to about 37 GB. Held resident
- * that would not fit a fresh BitNode's 32 GB home beside boot.js (3.60),
- * cloud.js (5.75) and a continuous manager (9.40-13.35). So the API calls live
- * in four short-lived scripts and this one holds none of them: peak is ~15.5 GB
- * for a few hundred milliseconds instead of 37 GB forever.
+ * that would not fit a fresh BitNode's 32 GB home beside boot.js, cloud.js and
+ * the continuous manager. So every gang call lives in one of the four BODIES
+ * below, each run through rpc(), which bills the body to a throwaway script for
+ * as long as it runs. This file holds no gang call at all: 1.60 + ns.run 1.00.
  *
- * Each transient READS AND ACTS in the same process, so no decision is split
- * across a boundary. Two things do cross one: GANG_MARKER, which spares
- * ascend.js and equip.js a 2.00 GB getGangInformation each for three numbers,
- * and GANG_PORT, which carries one summary line per transient BACK here.
+ * It used to be four transient FILES (tick, war, ascend, equip) plus a port to
+ * report back on, a marker file to pass state between them, and a test that
+ * every path in every transient reported before returning. rpc() does all of
+ * that already: a body's return value comes back directly, and a body that
+ * throws comes back as a throw naming the error - never as silence, which is
+ * what the report-on-every-path rule existed to rule out.
  *
- * The port exists because ns.print writes to the CALLING script's own log
- * window, and a transient's window dies with the process a few hundred ms
- * later - so everything the four of them did was invisible, and this tail
- * showed a phase line and nothing else. Ports are 0 GB and global.
+ * Each body READS AND ACTS in one process, so no decision is split across a
+ * boundary. Every DECISION lives in gang/math.js, which the bodies import:
+ * bodies are the API calls around it, and this file formats what they return.
+ *
+ * AWAITED, ONE AT A TIME - that is the RAM argument. rpc() refuses a second call
+ * in flight anyway; fired together the bodies would stack to ~46 GB.
  *
  * THERE IS NO TICK TO DETECT. ns.gang.nextUpdate() (0 GB) resolves on the next
  * gang update and returns the ms of gang time processed - 2000 normally, up to
- * 5000 while bonus time drains (GangConstants.minCyclesToProcess and
- * maxCyclesToProcess, both defined as milliseconds over CONSTANTS.MilliPerCycle).
- * Watching stats change to infer a timer, which is how this is usually done,
- * measures the same thing worse and drifts.
+ * 5000 while bonus time drains. Cadences count updates, so they track bonus time.
  *
  * Usage:  run scripts/gang/gang.js
+ *         run scripts/gang/gang.js --create "Slum Snakes"   (found the gang first)
  *         boot.js starts it as a service once ns.gang.inGang() is true.
  *
- * RAM: 1.60 base + run 1.00 + ps 0.20 = 2.80 GB
- * (nextUpdate, inGang and getBonusTime are all 0 GB; config.js holds no ns call
- * and ns.read/ns.write are free.)
+ * RAM: 1.60 base + run 1.00 = 2.60 GB
+ * (nextUpdate, inGang and getBonusTime are 0 GB; config.js holds no ns call.)
  */
 
+// ------------------------------------------------------------------ bodies ---
+//
+// Plain template literals: rpc() rejects interpolation, and tests/rpc.test.mjs
+// parses every one. Each body is billed to its own transient, so the identifier
+// rules still bind INSIDE them - no bare `hack`, and respectForNextRecruit only
+// as a computed key - or the transient pays for the name.
+
 /**
- * Run a transient and wait for it to exit.
+ * Recruit, pick every member's task, hold wanted down. Returns the state the
+ * other bodies need, which is what the marker file used to carry.
  *
- * AWAITING IS THE WHOLE RAM ARGUMENT. Fired unawaited, the four transients
- * would stack to ~46 GB and the cheap ones would fail to start behind the
- * expensive one. Serialised, the peak is the single largest of them.
- *
- * Polls ns.ps by pid, like boot.js does, rather than ns.isRunning - ps is
- * needed anyway and isRunning would add 0.10 GB for the same answer.
+ * getTaskNames is free and getTaskStats is billed once however often it is
+ * called; a hardcoded task table is the kind of thing that drifts between fork
+ * versions without a symptom.
  */
-async function runOne(ns, file, tag, log) {
-  const pid = ns.run(file, 1);
-  if (pid === 0) {
-    // Not fatal, and expected early: on a 32 GB home carrying boot, cloud and a
-    // manager there may be no room for a 12 GB transient. The cheaper ones
-    // still land, and home grows. tick.js is deliberately among the cheapest so
-    // the core loop is the last thing to be squeezed out.
-    log(`WARN: could not start ${file} - not enough free RAM on home, or file missing`);
-    return false;
+const TICK = `
+import { MAX_MEMBERS, MEMBER_PREFIX } from "/scripts/gang/config.js";
+import { phaseFor, planTasks, wantedHeadroom } from "/scripts/gang/math.js";
+const info = ns.gang.getGangInformation();
+if (info.isHacking) return { refused: true };
+
+const names = ns.gang.getMemberNames();
+const used = new Set(names);
+let next = 0;
+let recruited = 0;
+while (names.length < MAX_MEMBERS) {
+  while (used.has(MEMBER_PREFIX + next)) next++;
+  const candidate = MEMBER_PREFIX + next;
+  if (!ns.gang.recruitMember(candidate)) break;
+  used.add(candidate);
+  names.push(candidate);
+  recruited++;
+}
+
+const members = names.map((n) => ns.gang.getMemberInformation(n));
+const tasks = ns.gang.getTaskNames().map((n) => ns.gang.getTaskStats(n));
+const phase = phaseFor({ members, territory: info.territory });
+const result = planTasks(info, members, tasks, phase);
+
+let moved = 0;
+for (const m of members) {
+  const want = result.plan.get(m.name);
+  if (want && want !== m.task) {
+    ns.gang.setMemberTask(m.name, want);
+    moved++;
   }
-  const deadline = Date.now() + TRANSIENT_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    await ns.sleep(50);
-    if (!ns.ps("home").some((p) => p.pid === pid)) {
-      drain(ns, tag, log);
-      return true;
+}
+
+const nextAt = info["respectForNextRecruit"];
+return {
+  phase, recruited, moved,
+  memberCount: members.length,
+  trainees: result.trainees, vigilantes: result.vigilantes, warSlots: result.warSlots,
+  respect: info.respect,
+  nextRecruitAt: Number.isFinite(nextAt) ? nextAt : -1,
+  wantedLevel: info.wantedLevel,
+  headroom: wantedHeadroom(info),
+  isHacking: false,
+};
+`;
+
+/**
+ * Engage territory warfare only when the WORST matchup is winnable - a clash is
+ * drawn against one rival at a time and a lost one kills a member. Rivals with
+ * no territory cannot be clashed with, including our own entry in the map.
+ */
+const WAR = `
+import { warDecision } from "/scripts/gang/math.js";
+const info = ns.gang.getGangInformation();
+const others = ns.gang.getAllGangInformation();
+const chances = [];
+for (const [name, other] of Object.entries(others)) {
+  if (name === info.faction) continue;
+  if (!other || (other.territory ?? 0) <= 0) continue;
+  chances.push(ns.gang.getChanceToWinClash(name));
+}
+const engage = warDecision(info.territoryWarfareEngaged, chances);
+const changed = engage !== info.territoryWarfareEngaged;
+if (changed) ns.gang.setTerritoryWarfare(engage);
+return {
+  engage, changed,
+  worst: chances.length ? Math.min(...chances) : 0,
+  rivals: chances.length,
+  territory: info.territory,
+  power: info.power,
+};
+`;
+
+/**
+ * Ascend members whose multiplier gain clears the threshold, unless it would
+ * cost the next recruit. Decrements its own running respect rather than
+ * re-reading the gang. getAscensionResult is null for a member who cannot.
+ */
+const ASCEND = `
+import { shouldAscend, ascensionFactor } from "/scripts/gang/math.js";
+import { ASCEND_MULT_THRESHOLD } from "/scripts/gang/config.js";
+const state = JSON.parse(args[0]);
+if (state.nextRecruitAt < 0) state.nextRecruitAt = Infinity;
+let respect = state.respect;
+const done = [];
+let best = 0;
+let blocked = 0;
+for (const name of ns.gang.getMemberNames()) {
+  const result = ns.gang.getAscensionResult(name);
+  if (!result) continue;
+  const factor = ascensionFactor(result);
+  if (factor > best) best = factor;
+  if (shouldAscend(result, { ...state, respect })) {
+    ns.gang.ascendMember(name);
+    respect = Math.max(1, respect - (result.respect ?? 0));
+    done.push({ name, factor });
+  } else if (factor >= ASCEND_MULT_THRESHOLD) {
+    blocked++;
+  }
+}
+return { done, best, blocked, respect };
+`;
+
+/**
+ * Buy gear, cheapest item first across the whole gang. getEquipmentStats is
+ * there for isHackingItem: hack-only gear is a separate tier, opened only when
+ * every member owns the combat list. A pass that buys nothing returns the
+ * numbers that say why, derived through the same functions the planner used.
+ */
+const EQUIP = `
+import { planPurchases, equipBudget, eligibleItems, considerItems } from "/scripts/gang/math.js";
+const state = JSON.parse(args[0]);
+const members = ns.gang.getMemberNames().map((n) => ns.gang.getMemberInformation(n));
+const items = ns.gang.getEquipmentNames().map((n) => ({
+  name: n,
+  cost: ns.gang.getEquipmentCost(n),
+  type: ns.gang.getEquipmentType(n),
+  stats: ns.gang.getEquipmentStats(n),
+}));
+const budget = equipBudget(ns.getServerMoneyAvailable("home"));
+const buys = planPurchases(members, items, budget, state.isHacking);
+const eligible = eligibleItems(items);
+const pool = considerItems(members, items, state.isHacking);
+let bought = 0;
+let spent = 0;
+for (const b of buys) {
+  if (!ns.gang.purchaseEquipment(b.member, b.item)) break;
+  bought++;
+  spent += b.cost;
+}
+return {
+  planned: buys.length, bought, spent, budget,
+  items: items.length, eligible: eligible.length,
+  cheapest: pool.length ? pool[0].cost : 0,
+  gated: eligible.length - pool.length,
+};
+`;
+
+const CREATE = `return ns.gang.createGang(args[0]);`;
+
+// ------------------------------------------------------------------ format ---
+
+const n2 = (ns, v) => ns.format.number(v, 2, 1000, true);
+
+function tickLine(ns, t) {
+  const next = t.nextRecruitAt < 0 ? "roster full" : `next recruit at ${n2(ns, t.nextRecruitAt)}`;
+  return `${t.phase}, ${t.memberCount} members${t.recruited ? ` (+${t.recruited})` : ""}, ` +
+    `${t.moved} reassigned | ${t.trainees} training, ${t.vigilantes} penance, ` +
+    `${t.warSlots} territory | respect ${n2(ns, t.respect)} (${next}) | ` +
+    `wanted ${ns.format.number(t.wantedLevel, 2)}, ${ns.format.percent(t.headroom, 1)} of achievable`;
+}
+
+function warLine(ns, w) {
+  // Every pass, not only on a change: "nothing changed" is the answer to "why
+  // are we not taking territory", and it is the answer most of the time.
+  return `${w.engage ? "ENGAGED" : "standing down"}${w.changed ? " (changed)" : ""} | ` +
+    `worst win chance ${ns.format.percent(w.worst, 1)} across ${w.rivals} rivals | ` +
+    `holding ${ns.format.percent(w.territory, 1)}, power ${n2(ns, w.power)}`;
+}
+
+function ascendLine(ns, a, state) {
+  if (a.done.length) {
+    const who = a.done.map((d) => `${d.name} x${d.factor.toFixed(2)}`).join(", ");
+    return `${a.done.length} ascended (${who}) | respect now ${n2(ns, a.respect)}`;
+  }
+  if (a.blocked) {
+    return `${a.blocked} ready at x${a.best.toFixed(2)} but HELD - ascending would drop respect ` +
+      `under the ${n2(ns, state.nextRecruitAt)} needed for the next recruit`;
+  }
+  return `none ready - best x${a.best.toFixed(2)}, need x${ASCEND_MULT_THRESHOLD.toFixed(2)}`;
+}
+
+function equipLine(ns, e, state) {
+  if (e.planned === 0) {
+    let why;
+    if (!e.eligible) why = "the game lists no item with a price";
+    else if (e.cheapest > e.budget) why = `cheapest is $${ns.format.number(e.cheapest, 2)}, over budget`;
+    else why = "the gang already owns every item it can afford";
+    if (e.gated > 0) {
+      why += `; ${e.gated} hacking-only item(s) held back until every member owns the combat list`;
     }
+    return `nothing bought in ${state.phase}: ${e.eligible}/${e.items} items eligible, ` +
+      `budget $${ns.format.number(e.budget, 2)} - ${why}`;
   }
-  log(`WARN: ${file} still running after ${ns.format.time(TRANSIENT_TIMEOUT_MS)} - moving on`);
-  return true;
+  if (e.bought === 0) return `refused all ${e.planned} planned buys - money moved since the plan`;
+  return `bought ${e.bought} of ${e.planned} planned for $${ns.format.number(e.spent, 2)} (${state.phase})`;
 }
 
-/**
- * Print what the transient just said, and say so when it said nothing.
- *
- * Every transient reports exactly one line on EVERY path it can take, so
- * silence here is not "nothing happened" - it means the script threw before it
- * got there. Without this, an exception in a transient looks identical to a
- * quiet pass, and the only trace is a log window that has already closed.
- */
-function drain(ns, tag, log) {
-  const lines = drainReports(ns);
-  if (lines.length === 0) {
-    log(`WARN: ${tag} ran but reported nothing - it threw before reporting; open its log`);
-    return;
-  }
-  for (const line of lines) log(line);
-}
+// -------------------------------------------------------------------- main ---
 
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-  //ns.ui.openTail();
+
+  const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
+
+  /**
+   * One body, and a failure that says so. Not fatal: early in a BitNode home
+   * may have no room for a 14 GB transient, and a throw here would stop the
+   * supervisor for boot to restart into the same wall a minute later.
+   */
+  const call = async (tag, body, ...args) => {
+    try {
+      return await rpc(ns, body, ...args);
+    } catch (e) {
+      log(`WARN: ${tag} failed - ${e.message ?? e}`);
+      return null;
+    }
+  };
+
+  const args = ns.args.map(String);
+  const cIdx = args.indexOf("--create");
+  if (cIdx >= 0 && !ns.gang.inGang()) {
+    // Irreversible for the BitNode and picks the faction, so it is only ever
+    // asked for by hand. createGang says no when karma or membership is short.
+    const faction = args[cIdx + 1] ?? "";
+    const made = faction && (await call("create", CREATE, faction));
+    ns.tprint(made
+      ? `gang founded with ${faction}.`
+      : `ERROR: could not found a gang with "${faction}". Needs karma <= -54000 and membership in it.`);
+  }
 
   if (!ns.gang.inGang()) {
-    ns.tprint("gang: not in a gang - run scripts/gang/create.js \"<faction>\" first.");
+    ns.tprint('gang: not in a gang - run scripts/gang/gang.js --create "<faction>" first.');
     return;
   }
 
-  const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
   log("gang supervisor up");
 
   let updates = 0;
+  let state = null;
   let lastPhase = "";
 
   while (true) {
-    // 0 GB, and the only clock this subsystem has or needs.
     await ns.gang.nextUpdate();
     updates++;
 
-    // Cadences count UPDATES, not seconds, so every one of them speeds up on
-    // its own while bonus time is draining.
-    //
-    // tick first, always: it is the one that writes GANG_MARKER, which the
-    // other three read. On the pass where several coincide, they get numbers
-    // from this pass rather than the previous one.
-    if (updates % TICK_EVERY === 0) await runOne(ns, GANG_TICK, "tick", log);
-    if (updates % WAR_EVERY === 0) await runOne(ns, GANG_WAR, "war", log);
-    if (updates % ASCEND_EVERY === 0) await runOne(ns, GANG_ASCEND, "ascend", log);
-    if (updates % EQUIP_EVERY === 0) await runOne(ns, GANG_EQUIP, "equip", log);
+    // tick first, always: it produces the state ascend and equip decide from,
+    // so on a pass where several coincide they get this pass's numbers.
+    if (updates % TICK_EVERY === 0) {
+      const t = await call("tick", TICK);
+      if (t?.refused) {
+        ns.tprint("ERROR: gang/gang.js manages COMBAT gangs and this is a hacking gang. Refusing.");
+        log("tick: REFUSED - hacking gang");
+      } else if (t) {
+        state = t;
+        log(`tick: ${tickLine(ns, t)}`);
+      }
+    }
+    if (updates % WAR_EVERY === 0) {
+      const w = await call("war", WAR);
+      if (w) log(`war: ${warLine(ns, w)}`);
+    }
+    // No tick yet means no respect guard to check against. Skipping is right;
+    // guessing at the guard is not.
+    if (updates % ASCEND_EVERY === 0) {
+      const a = state && (await call("ascend", ASCEND, JSON.stringify(state)));
+      log(`ascend: ${a ? ascendLine(ns, a, state) : state ? "skipped" : "no tick yet, skipping"}`);
+    }
+    if (updates % EQUIP_EVERY === 0) {
+      const e = state && (await call("equip", EQUIP, JSON.stringify(state)));
+      log(`equip: ${e ? equipLine(ns, e, state) : state ? "skipped" : "no tick yet, skipping"}`);
+    }
 
-    const phase = ns.read(GANG_MARKER).split("\n")[0];
-    if (phase && phase !== lastPhase) {
-      lastPhase = phase;
-      log(`PHASE -> ${phase}  (bonus time ${ns.format.time(ns.gang.getBonusTime())})`);
+    if (state && state.phase !== lastPhase) {
+      lastPhase = state.phase;
+      log(`PHASE -> ${state.phase}  (bonus time ${ns.format.time(ns.gang.getBonusTime())})`);
     }
   }
 }

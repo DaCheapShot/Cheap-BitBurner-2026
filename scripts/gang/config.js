@@ -2,10 +2,10 @@
  * Every tunable for the gang subsystem, in one place and at ZERO RAM cost.
  *
  * Same rule as scripts/config.js: no ns call may ever appear in this file. It is
- * imported by the resident scheduler AND by all four transients, so one billed
- * function here is charged five times over - and the transients are the things
- * that have to fit beside boot, cloud and a manager on the smallest home a
- * fresh BitNode hands you.
+ * imported by the resident supervisor AND by the rpc bodies it runs, so one
+ * billed function here is charged to every one of them - and those transients
+ * are the things that have to fit beside boot, cloud and a manager on the
+ * smallest home a fresh BitNode hands you.
  *
  * Names that LOOK like ns functions are safe only as strings and as
  * non-computed object keys. src/Script/RamCalculations.ts bills bare
@@ -17,32 +17,6 @@
 // ------------------------------------------------------------------ paths ---
 
 export const GANG_SERVICE = "/scripts/gang/gang.js";
-export const GANG_TICK = "/scripts/gang/tick.js";
-export const GANG_ASCEND = "/scripts/gang/ascend.js";
-export const GANG_EQUIP = "/scripts/gang/equip.js";
-export const GANG_WAR = "/scripts/gang/war.js";
-
-/**
- * Status marker, written by tick.js and read by the other transients.
- *
- * Flat lines, the repo's usual marker shape (see ROOT_MARKER, FORMULAS_MARKER):
- *   1 phase
- *   2 respect
- *   3 respectForNextRecruit
- *   4 member count
- *   5 territory
- *   6 timestamp
- *
- * It exists to keep ns.gang.getGangInformation (2.00 GB) out of ascend.js and
- * equip.js, which need only three numbers from it and would otherwise each pay
- * full price for the call. The numbers are at most one tick stale, which is
- * irrelevant to an ascension guard and a purchase budget.
- *
- * Written on home and read on home - the transients never leave it - so the
- * ns.read host-resolution trap that share.js documents does not apply. Do not
- * copy this pattern to anything that runs off home.
- */
-export const GANG_MARKER = "/data/gang.txt";
 
 // ---------------------------------------------------------------- cadence ---
 
@@ -60,9 +34,6 @@ export const TICK_EVERY = 5;
 export const WAR_EVERY = 10;
 export const ASCEND_EVERY = 15;
 export const EQUIP_EVERY = 15;
-
-/** How long to wait for a transient before giving up on it and moving on. */
-export const TRANSIENT_TIMEOUT_MS = 60 * 1000;
 
 // ----------------------------------------------------------------- phases ---
 
@@ -177,25 +148,6 @@ export const WAR_DISENGAGE_THRESHOLD = 0.55;
 /** Fraction of the gang put on Territory Warfare during the TERRITORY phase. */
 export const WAR_MEMBER_FRACTION = 0.5;
 
-// ---------------------------------------------------------------- reports ---
-
-/**
- * Where a transient tells gang.js what it did.
- *
- * A PORT, not the marker file and not ns.print. ns.print writes to the calling
- * script's own log window, and a transient's window dies with the process a few
- * hundred ms later - so everything the four of them did was invisible, and the
- * supervisor's tail showed a phase line and nothing else.
- *
- * 4 because 1 is the shotgun's report port, 2 is the share gate and 3 is the
- * continuous batcher's. Sharing any of them would be corruption, not noise:
- * gang.js DRAINS this one with read(), which removes the message, so it would
- * eat reports belonging to whichever batcher is running.
- *
- * Exactly one drainer for the same reason - gang.js, and nothing else.
- */
-export const GANG_PORT = 4;
-
 // ----------------------------------------------------------------- tasks ----
 
 export const TASK_UNASSIGNED = "Unassigned";
@@ -236,7 +188,7 @@ export const CHA_KEY = "cha";
  *
  * Spelled out as a constant for the same reason STAT_KEYS is: the bare
  * identifier is billed 0.10 GB wherever the game's parser sees it, so
- * `stats.hack` would tax math.js and all four transients. `stats[HACK_KEY]`
+ * `stats.hack` would tax math.js and every rpc body that imports it. `stats[HACK_KEY]`
  * is a Literal and costs nothing.
  */
 export const HACK_KEY = "hack";
