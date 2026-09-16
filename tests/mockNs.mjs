@@ -24,13 +24,20 @@ export function makeNs(o = {}) {
   let processes = [];
   let nextPid = 1;
 
+  // Resolvers waiting on nextWrite(). The real handle resolves on the NEXT
+  // write, not on data already queued, so a mock that resolved immediately
+  // would hide a caller that forgot to check empty() first.
+  let waiters = [];
+  const wake = () => { for (const r of waiters) r(); waiters = []; };
+
   const port = {
+    nextWrite: () => new Promise((r) => waiters.push(r)),
     empty: () => queue.length === 0,
     full: () => queue.length >= PORT_CAPACITY,
     read: () => (queue.length ? queue.shift() : "NULL PORT DATA"),
     peek: () => (queue.length ? queue[0] : "NULL PORT DATA"),
     clear: () => { queue = []; },
-    write: (v) => { queue.push(v); if (queue.length > PORT_CAPACITY) { queue.shift(); dropped++; } },
+    write: (v) => { queue.push(v); if (queue.length > PORT_CAPACITY) { queue.shift(); dropped++; } wake(); },
   };
 
   // Ports are keyed by NUMBER, because the real ones are. A getPortHandle that
@@ -42,13 +49,16 @@ export function makeNs(o = {}) {
     const key = Number(n);
     if (!ports.has(key)) {
       let q = [];
+      let w = [];
+      const wakeQ = () => { for (const r of w) r(); w = []; };
       ports.set(key, {
+        nextWrite: () => new Promise((r) => w.push(r)),
         empty: () => q.length === 0,
         full: () => q.length >= PORT_CAPACITY,
         read: () => (q.length ? q.shift() : "NULL PORT DATA"),
         peek: () => (q.length ? q[0] : "NULL PORT DATA"),
         clear: () => { q = []; },
-        write: (v) => { q.push(v); if (q.length > PORT_CAPACITY) q.shift(); },
+        write: (v) => { q.push(v); if (q.length > PORT_CAPACITY) q.shift(); wakeQ(); },
       });
     }
     return ports.get(key);
@@ -97,12 +107,21 @@ export function makeNs(o = {}) {
     print: (s) => ns._log.push(s),
     tprint: (s) => ns._log.push("[T] " + s),
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),
+    // asleep is the ONE function checkEnvFlags exempts from the concurrency
+    // check (NetscriptHelpers.tsx:405), which is why rpc.js races against it
+    // rather than against sleep.
+    asleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),
+    // Unique per process, and the reply port rpc.js keys on.
+    pid: o.pid ?? 1,
 
     read: (f) => files[f] ?? "",
     write: (f, data, mode) => { files[f] = mode === "a" ? (files[f] ?? "") + data : data; },
     // Files may be keyed either bare or host-prefixed; fileExists checks both since that's what callers use
     fileExists: (f, host = "home") => Boolean(files[`${host}:${f}`] ?? files[f]),
     getPortHandle: (n) => portFor(n),
+    // The generated transients rpc.js writes reply with writePort, not through
+    // a handle, so the mock needs both spellings to hit the same queue.
+    writePort: (n, v) => portFor(n).write(v),
 
     scan: (h) => (h === "home" ? [...Object.keys(hosts).filter((x) => x !== "home"), ...Object.keys(servers)] : []),
     hasRootAccess: (h) => srv(h).rooted !== false,
@@ -131,10 +150,20 @@ export function makeNs(o = {}) {
       processes.push({ filename, pid, args, threads, host });
       return pid;
     },
-    run: (file, threads, ...args) => {
+    // The second argument is a thread COUNT or a RunOptions object, as in the
+    // real API. Storing the object as `threads` gives a process an object for
+    // a thread count, which the share census then sums.
+    run: (file, threadOrOptions, ...args) => {
       const filename = file.replace(/^\/+/, "");
+      const opts = threadOrOptions && typeof threadOrOptions === "object"
+        ? threadOrOptions
+        : { threads: threadOrOptions };
       const pid = nextPid++;
-      processes.push({ filename, pid, args, threads, host: "home" });
+      processes.push({
+        filename, pid, args, host: "home",
+        threads: opts.threads ?? 1,
+        temporary: Boolean(opts.temporary),
+      });
       return pid;
     },
     // Host-aware, because the real one is. A ps that ignores its argument makes

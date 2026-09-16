@@ -208,6 +208,50 @@ nothing beyond one op and one port write. `share.js` follows the same rule and p
 breaking it: `ns.share` is 2.40 GB, so the worker costs **4.00 GB per thread** and one stray
 import of `ram.js` would add 0.35 GB to every one of tens of thousands of them.
 
+### Escaping the name tax: `rpc.js`
+
+The bill is on NAMES reachable through STATIC imports, and `RamCalculations.ts` walks only
+`ImportDeclaration` — so a script GENERATED at runtime is invisible to it. `rpc.js` writes one,
+runs it, and reads the value back off a port. The caller pays `ns.run` (1.00) and nothing else;
+the body's cost is charged to the transient, for as long as the transient lives.
+
+```js
+const c = await rpc(ns, `return { w: ns.weakenAnalyze(1) };`);
+const n = await rpc(ns, `return ns.getServerMaxMoney(args[0]);`, host);
+```
+
+Four things about it are load-bearing:
+
+- **The filename is a hash of the body.** `Script.ts:39` returns early from `set content` when the
+  code is unchanged, so an identical body is written once, never re-compiled and never re-priced.
+  The reply port arrives as ARGUMENT ZERO rather than being baked into the text — baked in, the
+  source would depend on the caller's pid and every restart would mint a new file, so the litter
+  would grow without bound.
+- **Each caller replies on `RPC_PORT_BASE + ns.pid`.** Ports 1–4 are taken, and a shared reply
+  port would let two resident callers read each other's answers — a wrong number, silently. Any
+  positive integer is a legal port (`NumNetscriptPorts` is `Number.MAX_SAFE_INTEGER`), so keying
+  by pid is free and cannot collide.
+- **A body may `import` the repo's 0 GB pure modules** (`config.js`, `verify.js`, `gang/math.js`);
+  `rpc.js` hoists the import lines out of `main`, where they would be a syntax error. That is what
+  keeps logic out of strings — a body stays a few `ns` calls around a real import.
+- **Every quiet failure is made loud.** `ns.run` returns a bare 0 for BOTH "no free RAM on home"
+  and "does not compile", so the throw names the file and both causes. The body's own throw is
+  caught inside the transient and returned as a value, because a transient that dies takes its log
+  window with it a few hundred ms later — the same trap `gang/report.js` exists to close. A
+  timed-out call clears its port first, so a late reply is never read as the next call's answer.
+  A second call while one is in flight throws: the game's own concurrency check does NOT catch
+  that, `nextWrite()` not being a blocking netscript call.
+
+**It only helps RESIDENT scripts.** `cloud.js`, `root.js`, `deploy.js` and the four `gang/`
+transients already hold their RAM for under a second, so routing them through here saves nothing
+and adds 1.00 GB each. Never for the workers — they are charged per thread and they ARE the call.
+
+**It is invisible to `ramOf()`**, which blanks string literals. `tests/rpc.test.mjs` extracts every
+body in `scripts/` and parses it, which recovers the syntax check but not the RAM accounting; a
+body's RAM is only ever charged to a transient, so the exposure is a runtime `ns.run` → 0, never a
+manager that will not start. Bodies must be plain template literals — an interpolated one is
+rejected, because no check can read it and it would mint a file per distinct value.
+
 ### Two math backends
 
 `mathAnalyze.js` and `mathFormulas.js` implement the same interface. They must never be
@@ -234,6 +278,7 @@ editor's RAM panel when one moves.
 | `calib.js` | reads `/data/calib.json` | 0 |
 | `verify.js` | landing analysis — the definition of "landed correctly" | 0.25 |
 | `ram.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
+| `rpc.js` | run a body in a throwaway script, get its value back | 1.00 |
 | `prepper.js` | prep as a module (manager runs it in-process) | 2.40 |
 | `mathAnalyze.js` | math interface via *Analyze + calibration cache | 2.55 |
 | `mathFormulas.js` | math interface via `ns.formulas` | 2.50 |

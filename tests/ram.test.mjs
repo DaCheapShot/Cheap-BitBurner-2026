@@ -415,4 +415,17 @@ export const tests = {
       }
     }
   },
+
+  // 1.60 base + ns.run 1.00, and that is the whole point: a caller pays for the
+  // generated script's ENTRY, never for what the body calls. write, read,
+  // getPortHandle, nextPortWrite, clear and asleep are all 0 GB in this fork.
+  //
+  // If this ever reads higher, something in rpc.js has been named after a
+  // billed function and every importer is paying for it.
+  "rpc.js costs 2.60 GB and imports nothing": () => {
+    const ram = ramOf("rpc");
+    assert(Math.abs(ram - 2.60) < 0.011, `expected 2.60 GB, got ${ram.toFixed(2)}`);
+    assert(!codeOnly(readScript("rpc")).includes('from "./'),
+      "rpc.js must import nothing - scripts/continuous/ imports it, and a dependency would cross that tree's self-containment rule for no RAM saving");
+  },
 };
