@@ -1,6 +1,8 @@
 import { loadScripts, assert } from "./harness.mjs";
 
-const TRANSIENT = ["scripts/root.js", "scripts/deploy.js"];
+// Scripts boot runs with runToCompletion - they must EXIT, or the poll loop
+// below spins for the full TRANSIENT_TIMEOUT_MS of real wall time.
+const TRANSIENT = ["scripts/root.js", "scripts/deploy.js", "scripts/contracts/contracts.js"];
 
 /**
  * Drive boot for a fixed number of ticks against a fake network.
@@ -387,5 +389,23 @@ export const tests = {
     const r = await runBoot({ inGang: true, args: ["--no-gang"], ticks: 3 });
     assert(!r.launched.includes("scripts/gang/gang.js"),
       `--no-gang should suppress it, launched: ${r.launched}`);
+  },
+
+  // The contract solver is a TRANSIENT, not a service - the opposite of the gang
+  // supervisor above. It does one sweep and exits, so boot runs it EVERY tick
+  // and nothing is held in between. A service would pin 4.10 GB forever to
+  // re-read a clock that only matters once every ten minutes.
+  "boot runs the contract solver every tick, and holds nothing between": async () => {
+    const r = await runBoot({ ticks: 4 });
+    const runs = r.launched.filter((f) => f === "scripts/contracts/contracts.js").length;
+    assert(runs >= 3, `expected a run per tick, got ${runs}: ${r.launched}`);
+    assert(!r.procs.some((p) => p.filename === "scripts/contracts/contracts.js"),
+      "it must not still be resident - that is the RAM this change exists to give back");
+  },
+
+  "--no-contracts leaves the contract solver alone": async () => {
+    const r = await runBoot({ args: ["--no-contracts"], ticks: 3 });
+    assert(!r.launched.includes("scripts/contracts/contracts.js"),
+      `--no-contracts should suppress it, launched: ${r.launched}`);
   },
 };

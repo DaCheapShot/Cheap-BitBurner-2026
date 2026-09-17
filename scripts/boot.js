@@ -4,6 +4,7 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
 // The gang supervisor's path. Same kind of import as the line above - that file
 // is constants only, no ns call anywhere in it, so this is 0 GB.
 import { GANG_SERVICE } from "./gang/config.js";
+import { CONTRACTS_SERVICE } from "./contracts/config.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -47,6 +48,7 @@ import { GANG_SERVICE } from "./gang/config.js";
  *         run scripts/boot.js --once              (one pass, then exit)
  *         run scripts/boot.js --no-cloud          (don't buy servers)
  *         run scripts/boot.js --no-gang           (don't supervise the gang)
+ *         run scripts/boot.js --no-contracts      (don't solve coding contracts)
  *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
  *         run scripts/boot.js --shotgun           (the volley batcher, not the stream)
  *         run scripts/boot.js --targets 5         (continuous only; shotgun ignores it)
@@ -300,6 +302,7 @@ export async function main(ns) {
   const once = args.includes("--once");
   const noCloud = args.includes("--no-cloud");
   const noGang = args.includes("--no-gang");
+  const noContracts = args.includes("--no-contracts");
   const noManager = args.includes("--no-manager");
   const noFormulas = args.includes("--no-formulas");
   // Continuous by default. It is the measured better earner - $947m/s average
@@ -435,6 +438,20 @@ export async function main(ns) {
     if (!noGang && ns.gang.inGang()) {
       killDuplicates(ns, GANG_SERVICE, log);
       ensureService(ns, GANG_SERVICE, [], log);
+    }
+    // The contract solver, and it is a TRANSIENT, not a service - one sweep per
+    // tick, holding nothing in between. As a resident it pinned 4.10 GB forever
+    // to re-read a clock that only matters once every ten minutes.
+    //
+    // It does its own gating and exits in about 300 ms while the gate is shut,
+    // so running it every tick costs almost nothing. It is last in the tick
+    // because runToCompletion BLOCKS until it exits.
+    //
+    // The isUp check is not about duplicates but about STACKING: a hand-run
+    // --dummy can still be going, and starting a second sweep on top of it would
+    // have both attempting the same contracts.
+    if (!noContracts && !isUp(ns, CONTRACTS_SERVICE)) {
+      await runToCompletion(ns, CONTRACTS_SERVICE, [], log);
     }
 
     firstPass = false;
