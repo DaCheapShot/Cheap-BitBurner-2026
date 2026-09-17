@@ -50,6 +50,7 @@ run scripts/boot.js --target omega-net  # pin the manager's target instead of au
 run scripts/boot.js --targets 5         # continuous only; the shotgun ignores it
 run scripts/boot.js --once --no-cloud
 run scripts/boot.js --no-formulas       # force the *Analyze math path
+run scripts/boot.js --no-contracts      # do not solve coding contracts
 ```
 
 **Boot chooses between TWO batchers**, and the choice is a flag, not a marker - retype it if
@@ -76,6 +77,9 @@ run scripts/sharemode.js off            # every share thread exits within 10s
 run scripts/sharemode.js 0.5            # retune live, no restart
 run scripts/gang/gang.js --create "Slum Snakes"  # found the gang, once, by hand
 run scripts/gang/gang.js                # the gang supervisor (boot starts it too)
+run scripts/contracts/contracts.js      # one contract sweep (boot runs it every tick)
+run scripts/contracts/contracts.js --dummy   # mint one contract of every type and solve it
+run scripts/contracts/contracts.js --forget  # clear the skip list, after fixing a solver
 run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
 node tests/run.mjs                      # run the test suite
 ```
@@ -338,6 +342,12 @@ editor's RAM panel when one moves.
 | ↳ war body | transient: clash engage/disengage | 11.60 |
 | ↳ ascend body | transient: ascension decisions | 8.60 |
 | ↳ equip body | transient: equipment buying | 14.70 |
+| `contracts/config.js` | contract tunables, the gate, paths | 0 |
+| `contracts/solvers.js` | all 30 contract solvers, pure | 0 |
+| `contracts/contracts.js` | entry: ONE sweep then exits; boot runs it per tick | 4.10 |
+| ↳ find body | transient: every .cct with its type and data | 12.00 |
+| ↳ submit body | transient: `attempt` and nothing else | 11.60 |
+| ↳ dummy body | transient: `--dummy` self-test minting | 3.60 |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
@@ -748,6 +758,145 @@ gang the supervisor exits at once and `ensureService` would relaunch it every ti
 same trap `CLOUD_DONE_MARKER` closes for cloud. `--no-gang` opts out. A bare `gang` identifier
 costs nothing: `findFunc` matches a key only when its value is a function or a number, so it
 descends into the namespace and finds no leaf of that name.
+
+### The contract solver (`scripts/contracts/`)
+
+Self-contained like `gang/`: it imports only `scripts/rpc.js` from outside, and `scripts/`
+reads exactly one 0 GB path constant out of it (`boot.js` imports `CONTRACTS_SERVICE`).
+
+**The gate is about REPUTATION, and the reason is not obvious from the API.** The reward
+*faction* is chosen when a contract is ATTEMPTED, not when it is generated.
+`ContractGenerator.getRandomReward` stores a bare type (`{ type: 0|1|2|3 }`) and `Contract.ts`
+says so out loud — *"the reward is actually processed outside of this file"*.
+`PlayerObjectGeneralMethods.gainCodingContractReward` resolves it on attempt: both
+`FactionReputation` and `FactionReputationAll` filter `Player.factions` by `offerHackingWork`
+and **recurse into `Money` when that list is empty**; `CompanyReputation` needs `Player.jobs`
+and otherwise coin-flips into those two, which fall back the same way. Three of the four
+reward types pay rep, so solving before a faction is joined converts all of them to cash.
+Contracts never expire, so the wait costs nothing WITHIN an aug cycle - they simply pile up.
+
+**Across an install they are destroyed.** `Prestige.ts` calls `prestigeAllServers()` on both
+`prestigeAugmentation` and `prestigeSourceFile`, and `initForeignServers` then builds fresh
+ones - so every unsolved contract on the network goes with them, and a backlog at install
+time is lost reputation. This is the second reason the per-tick cadence beats the ten-minute
+one it replaced: nothing is ever more than a minute old, so there is no backlog to lose. A
+hand-run `run scripts/contracts/contracts.js` before installing is still free insurance.
+
+Hence **both halves of the gate**: 10 minutes past `max(lastAugReset, lastNodeReset)` *and*
+at least one joined faction. The clock alone is not enough — ten minutes into a BitNode the
+faction list is usually still empty. The `max()` is not decoration either: entering a BitNode
+sets `lastNodeReset` and an install sets `lastAugReset`, and reading only one lets a fresh
+node inherit an old timestamp and sweep immediately.
+
+**It is a TRANSIENT, not a service, and that is the opposite of `gang/`.**
+`boot.js` runs it once per tick with `runToCompletion`, the way it runs `root.js` and
+`deploy.js`, so **nothing is held between sweeps**. It was a resident service first and that
+was the wrong trade: 4.10 GB pinned forever to re-read a clock that only matters once every
+ten minutes. A shut gate now costs 4.10 GB for about 300 ms and zero in between.
+
+**So the gate lives in `contracts.js`, not in the FIND body.** A shut gate is the common case
+for the first ten minutes and must not cost a 12.00 GB transient once a minute to discover.
+`getResetInfo` (1.00) and `getPlayer` (0.50) resident here is what makes a per-minute cadence
+affordable — it is why the entry is 4.10 and not 2.60.
+
+**Everything that must outlive a run is a file**, because a transient forgets and its
+`ns.print` log window dies with it:
+
+- `/data/contracts-refused.txt` — the skip list. This **had** to become a file. An in-memory
+  set was fine for a service; at once a minute a deterministic wrong answer spends all ten of
+  a contract's tries inside ten minutes, and "Array Jumping Game" allows exactly **one**, so
+  it would be destroyed on the very next run. `--forget` clears it, which is what to run after
+  fixing a solver — entries are otherwise skipped for the life of the BitNode.
+- `/data/contracts-gate.txt` — the last gate message, so it is said **once** rather than every
+  tick. Clearing it when the gate opens is load-bearing: an install shuts the gate again, and
+  without the clear the reason would never be repeated.
+
+**A supervisor plus rpc bodies, because `ns.codingcontract` is priced off
+`CodingContractBase = 10`.** `attempt` is 10, `getContractType` and `getData` 5 each,
+`getContract` 15. Reading and attempting in one process is ~22 GB with the network walk,
+which will not start on a fresh BitNode's 32 GB home beside `boot.js`, `cloud.js` and a
+continuous manager. Split across FIND (13.50) and SUBMIT (11.60) the peak is 13.50, and
+`contracts.js` holds no contract call at all (1.60 + `run` = 2.60). The solving happens
+*between* the two, resident, because it is pure arithmetic — `solvers.js` is 0 GB.
+
+**`ns.getPlayer()` cannot answer the clock.** It carries `totalPlaytime`, not
+`playtimeSinceLastAug`, so the gate reads `ns.getResetInfo()` (1.00 GB) for the timestamps
+and `getPlayer` (0.50) for the faction list. Both live in the FIND body, so the resident
+process pays for neither.
+
+**Square Root's data is a `bigint`, and `JSON.stringify` throws on one.** `SquareRoot.ts`'s
+`getData` returns `BigInt`, and `rpc.js` returns every value through `JSON.stringify` — so
+an unconverted Square Root contract does not merely fail itself, it takes the whole sweep
+down and every other contract on the network goes unsolved with it. The FIND body stringifies
+before returning, the solver takes and returns a decimal string, and `attempt` accepts that
+because `convertAnswer` is `BigInt(ans)`. `tests/contracts.test.mjs` pins the collateral
+damage, not just the conversion.
+
+**A contract that vanishes between the read and the attempt is not an error.** `attempt()`
+THROWS with "Cannot find contract" when the file is gone, and the SUBMIT body catches it PER
+JOB - per batch, one throw would lose every other answer in the same call. Two sweeps
+overlapping is the ordinary cause - a hand-run beside boot's own tick. It is counted separately from a wrong answer: nothing is broken, so it neither goes
+in the skip list nor shouts at the terminal.
+
+**Two lines reach the TERMINAL, and only two:** a solved contract with its reward, and a wrong
+answer. Both are rare - a handful per ten minutes at most - while the sweep summary is mostly
+"0 solved" and would be spam. The reward string is reprinted verbatim from `attempt()`, which
+returns `gainCodingContractReward`'s own text, so money in it comes from the game's
+`formatMoney` and reads the same as the UI.
+
+**A wrong answer is never retried.** The solvers are deterministic, so a second attempt
+spends another try on the same wrong answer until
+`NetscriptFunctions/CodingContract.ts` removes the contract at `getMaxNumTries()` — and
+"Array Jumping Game" allows exactly **one** try. A refusal goes in an in-memory skip set. For
+the same reason a type with no solver, or a solver that threw, is reported as unsolved and
+never attempted: `solve()` returns `null` rather than a guess.
+
+**`solvers.js` is a transcription, not a re-derivation.** The game checks the answer against
+ITS algorithm, not against the problem statement, and four types diverge from what the
+statement implies: "Largest Rectangle" accepts any rectangle of the optimal *area*, "Shortest
+Path" any path of the optimal *length*, "Compression III" any encoding no longer than its
+own, and "Array Jumping Game II" answers **0**, not Infinity, when the end is unreachable.
+`tests/contracts.test.mjs` uses the examples printed in the game's own descriptions so the
+fixtures check the transcription rather than a second copy of the same reasoning.
+
+**One contract name is not ASCII, and the key is written as `è` for two reasons.**
+`Encryption II: Vigenère Cipher` is the only type in `CodingContractName` carrying a
+non-ASCII character. The first version folded it to `Vigenere`, so `SOLVERS[type]` missed,
+`solve()` answered `null`, and the contract read as permanently unsolved **with no error
+anywhere** - the log simply listed it under "unsolved" forever. A live `--dummy` run scored
+29 of 30 and is what found it.
+
+The suite did not, and that is the more useful half of the story: `tests/contracts.test.mjs`
+carried the SAME fold in its own type list, so "every contract type this fork defines has a
+solver" compared a typo against itself and passed. The fixture now builds the name from an
+escape, and asserts the folded spelling is **not** a key as well - "add both spellings" would
+satisfy the first assert while leaving unanswered which one the game actually sends. Planting
+the fold back now reddens three tests.
+
+Writing it as an escape rather than a literal also keeps `solvers.js` **pure ASCII**, so
+neither hop into the game can re-encode it. CLAUDE.md already names the filesync extension as
+the least reliable link here, and `ns.scp` is the second.
+
+**It is also where the identifier tax is most likely to land.** Thirty algorithms want to
+call things `window` (25.00 GB), `run` (1.00 — RLE run lengths), `attempt` (10.00) and
+`getData` (5.00). The `BANNED` guard in `tests/ram.test.mjs` covers six names; what actually
+protects this file is the pin holding `ramOf("contracts/solvers")` at exactly `BASE`, which
+covers every name in the cost table. It has already caught one: a local named `scan` in
+`contracts.js` cost 0.20 GB and pushed the entry to 2.80.
+
+**`--dummy` is the real verification.** `ns.codingcontract.createDummyContract` (2.00 GB)
+mints one contract of every type `getContractTypes()` reports — asked, not hardcoded, so a
+fork that adds a type is caught by the self-test instead of silently skipped by it. Dummy
+contracts carry a **null reward** (`generateDummyContract` passes `null`), so nothing is
+spent and a wrong solver destroys only a dummy. `--dummy` ignores the gate, since the point
+is to run it before the gate ever opens.
+
+**`runToCompletion`, not `ensureService`, and the `inGang()` trap does not apply.** That trap
+is about a *service* that exits immediately and gets relaunched forever; this is a transient
+that is *supposed* to exit, so there is nothing to gate on. boot checks `isUp` first anyway —
+not for duplicates but for **stacking**: a hand-run `--dummy` can still be going, and a second
+sweep on top of it would have both attempting the same contracts. It runs last in the tick
+because `runToCompletion` blocks. `--no-contracts` opts out.
 
 ### Invariants that look arbitrary but aren't
 

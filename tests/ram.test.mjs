@@ -42,9 +42,18 @@ const COST = {
   // nextUpdate is RamCostConstants.CycleTiming, which is 0.
   inGang: 0, nextUpdate: 0, getBonusTime: 0, getTaskNames: 0,
   getEquipmentNames: 0, renameMember: 0,
-  // Names nothing here CALLS, listed because the game charges for the NAME.
-  // attempt is ns.codingcontract.attempt; probe is this fork's ns.dnet.probe.
-  attempt: 10, probe: 0.2, disableLog: 0,
+  // ns.codingcontract, priced off RamCostConstants.CodingContractBase = 10.
+  // Every one of these is a NAME to avoid in scripts/contracts/solvers.js,
+  // which has to stay at exactly BASE - `getData` alone would be 5.00 GB.
+  attempt: 10, getContract: 15, getContractType: 5, getData: 5,
+  getDescription: 5, getNumTriesRemaining: 2, createDummyContract: 2,
+  getContractTypes: 0,
+  // The clock the contract gate reads. lastAugReset / lastNodeReset are the
+  // only route to it: ns.getPlayer() carries totalPlaytime, not
+  // playtimeSinceLastAug.
+  getResetInfo: 1,
+  // probe is this fork's ns.dnet.probe.
+  probe: 0.2, disableLog: 0,
   // Not functions. RamCalculations.ts resolves a ref named `window` or
   // `document` to RamCostConstants.Dom and adds it, whatever the ref really is.
   window: 25, document: 25,
@@ -329,6 +338,42 @@ export const tests = {
     }
   },
 
+  // ns.codingcontract is priced off CodingContractBase = 10, and reading plus
+  // attempting in one process is ~22 GB with the network walk - more than a
+  // fresh BitNode's 32 GB home has free beside boot, cloud and the continuous
+  // manager. So contracts.js holds no contract call at all: the FIND body
+  // (scan + ls + getContractType + getData) and the SUBMIT body (attempt) are
+  // billed to their own transients, and the solving in between is pure.
+  //
+  // 2.60 -> 4.10: the GATE moved out of the find body and into this file, which
+  // is the whole reason the subsystem can run once a MINUTE. boot runs it as a
+  // transient now, so a shut gate has to be answered without paying for a
+  // 12.00 GB body to discover it - getResetInfo (1.00) and getPlayer (0.50)
+  // here make the gated run 4.10 GB for about 300 ms, against 4.10 GB held
+  // forever as a service. Nothing is held between sweeps.
+  "contracts.js holds no contract API: 4.10 GB": () => {
+    const ram = ramOf("contracts/contracts");
+    assert(Math.abs(ram - 4.10) < 0.011,
+      `expected 4.10 GB (1.60 + run 1.00 + getResetInfo 1.00 + getPlayer 0.50), got ${ram.toFixed(2)}`);
+  },
+
+  // solvers.js is 30 transcribed algorithms and the single most likely place in
+  // this repo for the identifier tax to land: a sliding-`window` counter is
+  // 25.00 GB, the `run` lengths in RLE are 1.00, `attempt` is 10.00 and
+  // `getData` is 5.00. The BANNED guard below covers six names; this covers
+  // every name in the cost table, which is why it is the real check.
+  //
+  // config.js is imported by the FIND body as well as by boot.js, so one billed
+  // identifier in it would be charged to boot - which is pinned at 3.50.
+  "the contract subsystem's shared modules are free to import": () => {
+    for (const mod of ["contracts/config", "contracts/solvers"]) {
+      const ram = ramOf(mod);
+      assert(Math.abs(ram - BASE) < 0.011,
+        `${mod}.js costs ${(ram - BASE).toFixed(2)} GB to import; it must be 0 - boot.js and ` +
+          `the contract rpc bodies both reach it`);
+    }
+  },
+
   // The check is ns.gang.inGang(), which is 0 GB, and findFunc resolves a bare
   // `gang` to nothing (it matches a key only when the value is a function or a
   // number, and the namespace is an object). So supervising a gang must cost
@@ -376,7 +421,7 @@ export const tests = {
     for (const entry of ["boot", "manager", "capacity", "cloud", "deploy",
                          "root", "sharemode", "connectme", "prep",
                          "continuous/manager", "continuous/servers",
-                         "gang/gang"]) {
+                         "gang/gang", "contracts/contracts"]) {
       for (const mod of closure(entry)) seen.add(mod);
     }
 
@@ -411,7 +456,7 @@ export const tests = {
     for (const e of ["boot", "manager", "capacity", "cloud", "deploy",
                      "root", "sharemode", "connectme", "prep",
                      "continuous/manager", "continuous/servers",
-                     "gang/gang"]) {
+                     "gang/gang", "contracts/contracts"]) {
       for (const mod of closure(e)) entries.add(mod);
     }
 

@@ -29,6 +29,11 @@ const NESTED = [
   // with no package.json, `node --check` reads a bare .js as CommonJS and
   // rejects `export`. Its rpc bodies are parsed by tests/rpc.test.mjs.
   "gang/gang.js",
+  // The contract subsystem. solvers.js is pure and is where every answer is
+  // computed, so it is testable directly - the same split as gang/math.js.
+  "contracts/config.js",
+  "contracts/solvers.js",
+  "contracts/contracts.js",
 ];
 
 /** Every .js under scripts/, as posix paths relative to it. */
