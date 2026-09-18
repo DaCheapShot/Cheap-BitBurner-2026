@@ -6,7 +6,7 @@ import {
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTarget, repTargets, planAugBuys,
-  canDonate, donationPerRep,
+  canDonate, donationPerRep, bestCrime,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 
@@ -40,9 +40,10 @@ import { rpc } from "scripts/rpc.js";
  * augs are all bought, so it is not worked for rep it cannot spend) and plans
  * a batch (planAugBuys). The batch is bought only when it reaches
  * MIN_AUG_BATCH with the queue and cash covers all of it; whatever is left then
- * goes on home RAM, which an install keeps and money it does not. Installing
- * stays manual. What each faction sells and each aug's prerequisites are fixed
- * for the node, so they are read once and kept here.
+ * goes on home RAM, which an install keeps and money it does not. Once
+ * MIN_AUG_BATCH are queued the queue is INSTALLED (AUTO_INSTALL, live) and the
+ * game restarts boot.js. What each faction sells and each aug's prerequisites
+ * are fixed for the node, so they are read once and kept here.
  *
  * FAVOR BUYS REP - AT PURCHASE TIME ONLY. A faction at getFavorToDonate() favor
  * (150) is not worked; the work moves on down WORK_ORDER. When a batch is
@@ -174,6 +175,26 @@ const FACTION = `return ns.singularity.workForFaction(args[0], args[1], args[2])
 const COMPANY = `return ns.singularity.workForCompany(args[0], args[1]);`;
 
 /**
+ * The idle fallback's two reads, 5.00 GB each so split. What a crime pays and
+ * how long it takes moves only with the multipliers, which move at an install -
+ * read once per process. The odds move with every stat point - read each time.
+ * ns.enums is 0 GB.
+ */
+const CRIME_STATS = `
+const out = {};
+for (const c of Object.values(ns.enums.CrimeType)) {
+  const s = ns.singularity.getCrimeStats(c);
+  out[c] = { money: s.money, time: s.time };
+}
+return out;
+`;
+const CRIME_CHANCE = `
+const out = {};
+for (const c of Object.values(ns.enums.CrimeType)) out[c] = ns.singularity.getCrimeChance(c);
+return out;
+`;
+
+/**
  * Hire or promote: applyForJob hands out the highest position the player
  * qualifies for, and touches nothing but Player.jobs - so it is safe mid-shift
  * and is not an action body. Returns the new job title, or null for "no".
@@ -248,6 +269,33 @@ return { favor, need: ns.getFavorToDonate() };
  */
 const BN_MULTS = `return ns.getBitNodeMultipliers().FactionWorkRepGain;`;
 
+/**
+ * Before an install: the AUTO_INSTALL flag, read here so it is live, and one
+ * contract sweep - an install destroys every unsolved contract on the network
+ * (Prestige.ts prestigeAllServers), and boot's own sweep can be a minute old.
+ * -1 when the flag is off, else the sweep's pid; 0 means it could not start,
+ * which is not worth holding the install for. It waits for the sweep so the
+ * install cannot kill it mid-attempt; one past rpc's 10 s times out here and
+ * the install waits for the next pass. Split from INSTALL: together 7.70.
+ */
+const SWEEP = `
+import { AUTO_INSTALL } from "/scripts/sing/config.js";
+import { CONTRACTS_SERVICE } from "/scripts/contracts/config.js";
+if (!AUTO_INSTALL) return -1;
+const pid = ns.run(CONTRACTS_SERVICE);
+while (pid && ns.isRunning(pid)) await ns.sleep(200);
+return pid;
+`;
+
+/**
+ * Kills every script - this transient and sing.js with it - and 500 ms after
+ * the reset runs boot.js with no arguments and one thread (Singularity.ts
+ * runAfterReset). The callback is skipped only when home lacks the RAM, and
+ * every script has just been killed, so boot's 3.50 GB always fits. Any reply
+ * at all means no install; false is the game's "nothing queued".
+ */
+const INSTALL = `return ns.singularity.installAugmentations("/scripts/boot.js");`;
+
 /** [[faction, $], ...] - returns the factions the game accepted. */
 const DONATE = `
 const done = [];
@@ -274,7 +322,7 @@ function upgradeLine(ns, u) {
 }
 
 function augsWaitLine(ns, plan, queued, cash) {
-  if (queued >= MIN_AUG_BATCH) return `${queued} queued - install when ready; nothing more affordable now`;
+  if (queued >= MIN_AUG_BATCH) return `${queued} queued; nothing more affordable now`;
   return `waiting: best batch is ${plan.batch} of ${MIN_AUG_BATCH} (${queued} queued), ` +
     `${plan.eligible} unlocked by rep or favor, cash ${money$(ns, cash)}`;
 }
@@ -300,6 +348,7 @@ function joinLine(invites, joined) {
 
 function describe(ns, a, r) {
   if (a.kind === "gym") return `gym ${a.stat} at ${a.gym}`;
+  if (a.kind === "crime" && a.money) return `crime ${a.crime} for money - no faction or company work left`;
   if (a.kind === "crime") {
     return `crime ${a.crime}, karma ${ns.format.number(r.player.karma, 2)} of ` +
       `${ns.format.number(GANG_KARMA_TARGET, 2)}`;
@@ -378,6 +427,7 @@ export async function main(ns) {
   const favor = {};
   let favorNeed = 0;
   let bnRepMult = null;
+  let crimeStats = null;
 
   /**
    * How the batch may buy rep, or null. The price needs the node's rep
@@ -393,8 +443,30 @@ export async function main(ns) {
   };
 
   /**
-   * Refresh the rep targets and buy a batch if one is due. Every read is its
-   * own body - see the aug bodies above for why.
+   * Install the queue, restarting through boot.js. Returns only when it did
+   * NOT install - AUTO_INSTALL off, or a body that failed and warned. Home RAM
+   * first, with everything: the install resets money and keeps home RAM.
+   */
+  const install = async (queued) => {
+    const swept = await call("sweep", SWEEP);
+    if (swept === null) return;
+    if (swept < 0) {
+      log(`install: AUTO_INSTALL is off - ${queued} queued, install by hand`);
+      return;
+    }
+    const u = await call("upgrade", UPGRADE, 1);
+    if (u) log(`upgrade: ${upgradeLine(ns, u)}`);
+    const line = `installing ${queued} augs${swept ? "" : " (the contract sweep could not start)"}, ` +
+      "boot.js restarts with its defaults";
+    log(`install: ${line}`);
+    ns.tprint(`sing: ${line}`);
+    if ((await call("install", INSTALL)) === false) log("WARN: install: the game reports nothing queued");
+  };
+
+  /**
+   * Refresh the rep targets, buy a batch if one is due, and install once
+   * MIN_AUG_BATCH are queued. Every read is its own body - see the aug bodies
+   * above for why.
    */
   const augsPass = async (r) => {
     const owned = await call("owned", OWNED);
@@ -425,6 +497,7 @@ export async function main(ns) {
     });
     if (!plan.buys.length) {
       log(`augs: ${augsWaitLine(ns, plan, owned.queued, cash)}`);
+      if (owned.queued >= MIN_AUG_BATCH) await install(owned.queued);
       return;
     }
     // The rep first, then the augs it unlocks. A refused donation stops the
@@ -445,14 +518,17 @@ export async function main(ns) {
       }
     }
     const bought = (await call("buy", BUY, JSON.stringify(plan.buys.map((b) => [b.faction, b.name])))) ?? [];
+    const queued = owned.queued + bought.length;
     const line = `bought ${bought.length} of ${plan.buys.length} planned (${bought.join(", ")}) - ` +
-      `${owned.queued + bought.length} queued, install when ready`;
+      `${queued} queued`;
     log(`augs: ${line}`);
     if (bought.length) ns.tprint(`sing: ${line}`);
     // Now, not at the next pass: a faction whose last aug was just bought must
     // not be worked for three ticks toward a target that no longer exists.
     targets = repTargets(augsOf, [...owned.all, ...bought], info);
-    // What is left would be reset by the install; home RAM survives it.
+    if (queued >= MIN_AUG_BATCH) await install(queued);
+    // Still here, so not installed. What is left would be reset by the install
+    // when it comes; home RAM survives it.
     if (bought.length) {
       const u = await call("upgrade", UPGRADE, 1);
       if (u) log(`upgrade: ${upgradeLine(ns, u)}`);
@@ -510,7 +586,16 @@ export async function main(ns) {
     if (city) log(`travel: ${flew ? "flew" : "could not fly"} to ${city}`);
     if (r && !flew) {
       const st = { ...r, targets, favor, favorNeed };
-      const action = chooseAction(r.player, st);
+      let action = chooseAction(r.player, st);
+      // Nothing to work - the first stretch after an install, before any
+      // invite. Money beats idling: it is what TOR, the programs, the Tian Di
+      // Hui trip and home RAM all wait on.
+      if (action.kind === "idle") {
+        crimeStats ??= await call("crime stats", CRIME_STATS);
+        const chances = crimeStats && await call("crime chance", CRIME_CHANCE);
+        const crime = chances && bestCrime(crimeStats, chances);
+        if (crime) action = { kind: "crime", crime, money: true };
+      }
       const what = describe(ns, action, st);
       // Hired first, promoted every PROMOTE_EVERY ticks after - each rung raises
       // the company rep rate. Not hired means nothing to work at yet.

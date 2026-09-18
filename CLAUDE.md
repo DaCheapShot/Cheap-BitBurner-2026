@@ -353,7 +353,7 @@ editor's RAM panel when one moves.
 | `sing/config.js` | singularity tunables, `SING_SERVICE`, `JOIN_DENY` | 0 |
 | `sing/plan.js` | `chooseAction` + `sameAsCurrent` — every decision, pure | 0 |
 | `sing/sing.js` | entry: resident supervisor; every singularity call is an rpc body | 2.60 |
-| ↳ twenty bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, buy, favor, donate, bitnode mults | 2.70–6.60 |
+| ↳ twenty-four bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, buy, favor, donate, bitnode mults, sweep, install, crime stats, crime chance | 2.70–6.60 |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
@@ -907,7 +907,8 @@ because `runToCompletion` blocks. `--no-contracts` opts out.
 ### The singularity subsystem (`scripts/sing/`)
 
 BitNode 4 automation: home RAM, TOR and darkweb programs, faction invites, the Tian Di Hui trip,
-and the player's own work (company and faction rep; gym and Homicide only for an opted-in gang). Self-contained
+and the player's own work (company and faction rep; gym and Homicide only for an opted-in gang;
+a money crime when there is nothing else). Self-contained
 like `gang/`: it imports only `scripts/rpc.js` and re-exports one 0 GB constant from
 `scripts/config.js` (`SHARE_HOLD_MARKER`), and `boot.js` reads one path constant out of it.
 
@@ -920,7 +921,7 @@ split. Splitting *below* 6.60 lowers nothing and costs a round trip, which is wh
 and READ stay whole - READ sits exactly ON the ceiling since `getCompanyRep` joined it, so the
 next read it needs is a second body, not a bigger one. `tests/ram.test.mjs` prices every body
 through `bodiesOf()` - the only place a body is priced before the game does it - and pins all
-twenty.
+twenty-four.
 
 The split also retired two calls outright: `gymWorkout`, `commitCrime` and `workForFaction` all
 take `focus` as an argument, so `setFocus` is never needed, and starting work finishes the
@@ -979,6 +980,15 @@ position the player qualifies for and touches only `Player.jobs`, so APPLY runs 
 hacking factions run HIGHEST first (Daedalus, BitRunners, The Black Hand, NiteSec, CyberSec): the
 higher shops largely cover the lower ones' augs, and each lower target drops as those are bought.
 
+**Nothing to work means a money crime, not idle.** After an install no faction is joined and the
+company step waits on hacking 225, so the first stretch of every node had nothing to do - while TOR,
+the programs, the Tian Di Hui trip and home RAM all wait on money. `bestCrime` takes the highest
+`chance x money / time`, both read from the game (`getCrimeStats`, once per process - money already
+carries the multipliers - and `getCrimeChance`, every idle tick, since odds move with every stat
+point), so no crime table is transcribed. Crime was chosen over the university: the batcher already
+out-earns a class in hacking exp, and crime also trains the combat stats. Only a failed read leaves
+it truly idle.
+
 **The only trip is Tian Di Hui's**, whose invite needs the player standing in Chongqing, New Tokyo
 or Ishima. Out from Sector-12 once hacking is 50 with $1m *plus both fares* in hand; back once
 joined, because the gym and Sector-12's own invite are Sector-12-only. Leaving only from home and
@@ -1018,8 +1028,7 @@ the batch; then NeuroFlux levels fill, each x1.14 dearer in money AND rep. It re
 when queued + batch reaches `MIN_AUG_BATCH` (10) and cash covers all of it. 1.9 is the ceiling -
 Source-File 11 only lowers it - so the plan over-states and can never buy a batch it cannot finish.
 Whatever is left then goes on home RAM (UPGRADE at fraction 1): an install resets money and keeps
-home RAM. Shadows of Anarchy is never bought from - its augs price off their own ladder. Installing
-is still manual. Each read is its own body: together they would be 14.10 GB. What each faction sells
+home RAM. Shadows of Anarchy is never bought from - its augs price off their own ladder. Each read is its own body: together they would be 14.10 GB. What each faction sells
 and each aug's prerequisites are fixed for the node and kept in memory; prices and the owned list
 are re-read every pass. READ now runs FIRST in the tick, so the batch gets the cash before the
 normal 25% home upgrade can take it.
@@ -1043,6 +1052,20 @@ what `initBitNodeMultipliers` installs. It needs Source-File 5; without it the b
 nothing is donated, rather than donated at a guessed price.
 Favor is its own FAVOR body (READ is full) and is read once per faction per process - an install
 kills the process anyway.
+
+**Once `MIN_AUG_BATCH` are queued, the queue is installed** - right after the batch that reached it,
+or on the next pass if something stopped it. `installAugmentations("/scripts/boot.js")` kills every
+script, sing included, and 500 ms after the reset runs boot with **no arguments and one thread**
+(`Singularity.ts` `runAfterReset`) - so boot's defaults are what comes back up, and any flag typed by
+hand is gone. The callback is skipped only when home lacks the RAM, which cannot happen: every
+script was just killed. Boot's first pass ignores the cloud marker and re-roots and redeploys, the
+same path as a hand `run scripts/boot.js` after a hand install. Before it: the SWEEP body runs one
+contract sweep and waits it out (an install destroys every unsolved contract), then UPGRADE at
+fraction 1 takes the cash the install would reset. SWEEP is split from INSTALL - together 7.70 - and
+its body imports `CONTRACTS_SERVICE` from `contracts/config.js`, the one cross-subtree import in
+sing/, 0 GB and billed to the transient. `AUTO_INSTALL` is read inside SWEEP, so it is LIVE like
+`GRIND_GANG_KARMA`: off, the queue waits for a hand install. A sweep over rpc's 10 s times out, and
+the install waits for the next pass rather than kill the sweep mid-attempt.
 
 ### Invariants that look arbitrary but aren't
 

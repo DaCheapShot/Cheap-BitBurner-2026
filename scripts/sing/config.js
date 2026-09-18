@@ -154,9 +154,19 @@ export const FACTION_REP_TARGET = 1e6;
  * affordable and rep-unlocked, plus NeuroFlux levels to fill, reaches
  * MIN_AUG_BATCH counting those already queued - and only when cash covers the
  * whole batch. An install resets money but keeps home RAM, so whatever the
- * batch leaves is spent on home RAM in the same pass. Installing stays manual.
+ * batch leaves is spent on home RAM in the same pass - and then, with
+ * AUTO_INSTALL on, the queue is installed.
  */
 export const MIN_AUG_BATCH = 10;
+/**
+ * Install as soon as MIN_AUG_BATCH augs are queued, and come back up through
+ * boot.js - the game runs installAugmentations' callback script with NO
+ * arguments, so any boot flag typed by hand is lost at the install.
+ *
+ * LIVE, like GRIND_GANG_KARMA: read inside the SWEEP body, so turning it off
+ * stops the next install with no restart. Off, the queue waits for a hand install.
+ */
+export const AUTO_INSTALL = true;
 export const NFG = "NeuroFlux Governor";
 /**
  * Each queued aug multiplies every later price by this

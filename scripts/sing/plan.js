@@ -248,9 +248,34 @@ export function chooseAction(player, state) {
   }
   if (donatable) return donatable;
 
-  // 4. Nothing. No body runs and nothing is stopped - whatever the player
-  //    started by hand is left alone.
+  // 4. Nothing to work. sing.js turns this into a money crime (bestCrime) -
+  //    the usual state for the first stretch after an install, before any
+  //    invite - and only when that cannot be read is it truly idle.
   return { kind: "idle" };
+}
+
+/**
+ * The crime paying the most per second at the player's own odds, or null.
+ * Failure pays nothing and still takes the full time, so the rate is
+ * chance x money / time. Both inputs come from the game (getCrimeStats money
+ * already carries the player's and the node's multipliers), so no crime table
+ * is transcribed here.
+ *
+ * ponytail: no hysteresis. A switch restarts the crime and forfeits its
+ * progress - up to Heist's 600 s - but chance only rises, so each pair
+ * crosses once. Add a margin if a live log shows it flapping.
+ *
+ * @param stats   {crime: {money, time}}   getCrimeStats, time in ms
+ * @param chances {crime: 0..1}            getCrimeChance
+ */
+export function bestCrime(stats, chances) {
+  let best = null;
+  let rate = 0;
+  for (const [crime, c] of Object.entries(stats)) {
+    const r = (chances[crime] ?? 0) * c.money / c.time;
+    if (r > rate) [best, rate] = [crime, r];
+  }
+  return best;
 }
 
 /**

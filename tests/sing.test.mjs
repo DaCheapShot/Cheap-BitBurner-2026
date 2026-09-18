@@ -106,6 +106,12 @@ async function driveSing(mods, {
     // The game's own pricing: every queued aug multiplies the rest by 1.9.
     getAugmentationPrice: (n) => (aug(n)?.price ?? 0) * 1.9 ** queued.length,
     purchaseAugmentation: rec("purchaseAugmentation", (f, n) => { queued.push(n); return true; }),
+    // The game kills every script here; the fake records and returns, so the
+    // loop carries on to the STOP sentinel.
+    // Shoplift pays more per second at these odds than Homicide does at its own.
+    getCrimeStats: (c) => ({ Shoplift: { money: 15e3, time: 2e3 }, Homicide: { money: 45e3, time: 3e3 } })[c],
+    getCrimeChance: (c) => ({ Shoplift: 0.9, Homicide: 0.3 })[c],
+    installAugmentations: rec("installAugmentations", () => (queued.length ? undefined : false)),
     ...api,
   };
   const ns = makeNs({
@@ -113,12 +119,15 @@ async function driveSing(mods, {
     servers: { home: { moneyAvailable: 1e9 } },
     extra: {
       singularity,
+      enums: { CrimeType: { shoplift: "Shoplift", homicide: "Homicide" } },
       gang: { inGang: () => inGang },
       getPlayer: () => p,
       getResetInfo: () => ({ currentNode: 4, ownedSF }),
       getFavorToDonate: () => 150,
       getBitNodeMultipliers: () => ({ FactionWorkRepGain: 0.75 }),
       hasTorRouter: rec("hasTorRouter", () => tor),
+      // The pre-install contract sweep: started, and finished by the next look.
+      isRunning: rec("isRunning", () => false),
       sleep: async () => {
         if (++sleeps >= ticks) throw new Error("STOP");
         await new Promise((r) => setTimeout(r, 1));
@@ -679,6 +688,54 @@ export const tests = {
     assert(r.ns._log.some((l) => l.includes("[T] sing: bought 11")), "a batch is announced on the terminal");
     const after = r.ns._log.findIndex((l) => l.includes("augs: bought"));
     assert(r.ns._log.slice(after).some((l) => l.includes("upgrade: bought")), "leftover goes on home RAM");
+  },
+
+  // Phase 4. An install destroys every unsolved contract, so one sweep runs
+  // first and is waited out; home RAM takes the cash the install would reset;
+  // and the callback is boot.js, which the game runs with no arguments.
+  "a queue of ten or more is installed: sweep, home RAM, then install through boot": async () => {
+    const mods = await loadScripts();
+    const { CONTRACTS_SERVICE } = mods["contracts/config"];
+    const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
+    const r = await driveSing(mods, {
+      ticks: 1, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
+    });
+    const ran = r.ns.ps("home");
+    assert(ran.some((q) => `/${q.filename}` === CONTRACTS_SERVICE), `a contract sweep ran first: ${ran.map((q) => q.filename)}`);
+    assert(r.count("isRunning") >= 1, "and was waited out");
+    const i = r.calls.findIndex((c) => c.startsWith("installAugmentations:"));
+    assert(r.calls[i] === "installAugmentations:/scripts/boot.js", `callback must be boot.js, got ${r.calls[i]}`);
+    assert(r.calls.slice(0, i).filter((c) => c.startsWith("upgradeHomeRam:")).length >= 1, "home RAM before the install");
+    assert(r.ns._log.some((l) => l.includes("[T] sing: installing 11 augs")), "announced on the terminal");
+    assert(!r.ns._log.some((l) => l.includes("WARN")), `a body failed: ${r.ns._log.filter((l) => l.includes("WARN"))}`);
+  },
+
+  "bestCrime ranks by chance x money / time, and none at zero odds": async () => {
+    const { bestCrime } = (await loadScripts())["sing/plan"];
+    const stats = { Shoplift: { money: 15e3, time: 2e3 }, Heist: { money: 120e6, time: 600e3 } };
+    assert(bestCrime(stats, { Shoplift: 1, Heist: 0.01 }) === "Shoplift", "1% Heist is $2k/s, Shoplift $7.5k/s");
+    assert(bestCrime(stats, { Shoplift: 1, Heist: 0.5 }) === "Heist", "50% Heist is $100k/s");
+    assert(bestCrime(stats, { Shoplift: 0, Heist: 0 }) === null, "no odds, no crime");
+  },
+
+  // A fresh install: no faction, no company step open. Crime for money rather
+  // than nothing, and the best one, started once and left running.
+  "nothing to work: the best-paying crime, started once": async () => {
+    const mods = await loadScripts();
+    const r = await driveSing(mods, { ticks: 4 });
+    const crimes = r.calls.filter((c) => c.startsWith("commitCrime:"));
+    assert(JSON.stringify(crimes) === '["commitCrime:Shoplift,true"]', `one Shoplift, got ${crimes}`);
+    assert(r.ns._log.some((l) => l.includes("crime Shoplift for money")), `why: ${r.ns._log.filter((l) => l.includes("work:"))}`);
+    assert(!r.ns._log.some((l) => l.includes("WARN")), `a body failed: ${r.ns._log.filter((l) => l.includes("WARN"))}`);
+  },
+
+  "under ten queued: no sweep, no install": async () => {
+    const mods = await loadScripts();
+    const five = Array.from({ length: 5 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: 1e4 }));
+    const r = await driveSing(mods, {
+      ticks: 1, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: five },
+    });
+    assert(r.count("installAugmentations") === 0 && r.count("isRunning") === 0, "five queued is not an install");
   },
 
   "under ten: nothing bought, and the log says why": async () => {
