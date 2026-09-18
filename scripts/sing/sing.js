@@ -2,7 +2,7 @@ import {
   SING_TICK_MS, UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
   PROG_BUDGET_FRACTION, JOIN_DENY,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
-  WORK_ORDER, MIN_AUG_BATCH, NFG, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
+  WORK_ORDER, MIN_AUG_BATCH, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTarget, repTargets, planAugBuys,
@@ -216,11 +216,15 @@ const TRAVEL = `return ns.singularity.travelToCity(args[0]);`;
 /**
  * getOwnedAugmentations(true) lists queued augs too - NeuroFlux once per queued
  * level - so the difference from the installed list is the queue length the
- * price multiplier counts.
+ * price multiplier counts. `pill` is the Red Pill bought but not installed: an
+ * install that failed must be retried on the next pass, and a queue of one is
+ * under MIN_AUG_BATCH.
  */
 const OWNED = `
+import { RED_PILL } from "/scripts/sing/config.js";
 const all = ns.singularity.getOwnedAugmentations(true);
-return { all, queued: all.length - ns.singularity.getOwnedAugmentations(false).length };
+const installed = ns.singularity.getOwnedAugmentations(false);
+return { all, queued: all.length - installed.length, pill: all.includes(RED_PILL) && !installed.includes(RED_PILL) };
 `;
 
 const FAC_AUGS = `
@@ -264,6 +268,12 @@ const favor = {};
 for (const f of args) favor[f] = ns.singularity.getFactionFavor(f);
 return { favor, need: ns.getFavorToDonate() };
 `;
+
+/**
+ * The favor an install would add (addRepToFavor(favor, rep) - favor). Its own
+ * body, not FAVOR's: FAVOR is read once per process, and this moves with rep.
+ */
+const FAVOR_GAIN = `return ns.singularity.getFactionFavorGain(args[0]);`;
 
 /**
  * The node's FactionWorkRepGain, which prices a donation (donation.ts). Fixed
@@ -527,6 +537,23 @@ export async function main(ns) {
   };
 
   /**
+   * Would an install now carry RED_PILL_FACTION to the donate bar? Then the
+   * batch is bought at any size and installed - past the bar the rest of the
+   * Red Pill's rep is bought with money instead of worked for. Asked only while
+   * it can matter: joined, below the bar, and the Red Pill not yet bought.
+   */
+  const crossesFavorBar = async (r, owned) => {
+    const f = RED_PILL_FACTION;
+    if (!r.player.factions.includes(f) || owned.all.includes(RED_PILL)) return false;
+    if (!favorNeed || !(f in favor) || favor[f] >= favorNeed) return false;
+    const gain = await call("favor gain", FAVOR_GAIN, f);
+    if (gain === null || favor[f] + gain < favorNeed) return false;
+    log(`augs: installing now carries ${f} to ${n2(ns, favor[f] + gain)} favor (donates at ` +
+      `${n2(ns, favorNeed)}) - buying what fits and installing, for the ${RED_PILL}`);
+    return true;
+  };
+
+  /**
    * Refresh the rep targets, buy a batch if one is due, and install once
    * MIN_AUG_BATCH are queued. Every read is its own body - see the aug bodies
    * above for why.
@@ -555,12 +582,13 @@ export async function main(ns) {
     }
     const cash = r.player.money;
     const donate = await donateTerms(r);
+    const force = await crossesFavorBar(r, owned);
     const plan = planAugBuys({
-      augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash, donate,
+      augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash, donate, force,
     });
     if (!plan.buys.length) {
       log(`augs: ${augsWaitLine(ns, plan, owned.queued, cash)}`);
-      if (owned.queued >= MIN_AUG_BATCH) await install(owned.queued);
+      if (owned.queued >= MIN_AUG_BATCH || owned.pill || (force && owned.queued)) await install(owned.queued);
       return;
     }
     // The rep first, then the augs it unlocks. A refused donation stops the
@@ -589,7 +617,7 @@ export async function main(ns) {
     // Now, not at the next pass: a faction whose last aug was just bought must
     // not be worked for three ticks toward a target that no longer exists.
     targets = repTargets(augsOf, [...owned.all, ...bought], info);
-    if (queued >= MIN_AUG_BATCH) await install(queued);
+    if (queued >= MIN_AUG_BATCH || force || owned.pill || bought.includes(RED_PILL)) await install(queued);
     // Still here, so not installed. What is left would be reset by the install
     // when it comes; home RAM survives it.
     if (bought.length) {

@@ -184,6 +184,22 @@ export const NFG_LEVEL_MULT = 1.14;
  */
 export const AUG_SKIP_FACTIONS = ["Shadows of Anarchy"];
 
+/**
+ * The user's shortcut to the end of the node. THE RED PILL is bought the moment
+ * it is in reach - by rep, or by donation once its faction is at the favor bar -
+ * and installed at once, MIN_AUG_BATCH or not: it puts w0r1d_d43m0n on the
+ * network (Prestige.ts), and every aug cycle spent without it is a cycle the
+ * node could already be ending.
+ *
+ * Getting there: the Red Pill wants 2.5m Daedalus rep, but ~462k lifetime rep
+ * is already 150 favor at an install (addRepToFavor), and past that bar rep is
+ * BOUGHT with money. So once installing would carry RED_PILL_FACTION over the
+ * donate bar (getFactionFavorGain), sing buys whatever fits and installs,
+ * MIN_AUG_BATCH or not - the rest of the 2.5m is then a donation, not a grind.
+ */
+export const RED_PILL = "The Red Pill";
+export const RED_PILL_FACTION = "Daedalus";
+
 // ----------------------------------------------------------------- donate ---
 
 /**

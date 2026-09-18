@@ -48,7 +48,7 @@ function state(over = {}) {
 async function driveSing(mods, {
   ticks = 4, work = null, hasTor = false, invites = [], p = player(),
   ownedSF = new Map(), inGang = false, api = {}, run = undefined, companyRep = 0,
-  rep = {}, files = {}, favor = {}, extra = {},
+  rep = {}, files = {}, favor = {}, favorGain = {}, extra = {},
   // {faction: [{name, rep, price, prereqs?}]} - what the fake sells. Tian Di Hui
   // sells the implant by default, so its rep target is real rather than 1e6.
   augs = { "Tian Di Hui": [{ name: "Neuroreceptor Management Implant", rep: 75e3, price: 5e8 }] },
@@ -74,6 +74,7 @@ async function driveSing(mods, {
     joinFaction: rec("joinFaction", (f) => { p.factions.push(f); return true; }),
     getFactionRep: (f) => rep[f] ?? 0,
     getFactionFavor: (f) => favor[f] ?? 0,
+    getFactionFavorGain: (f) => favorGain[f] ?? 0,
     // donation.ts: $ / 1e6 * faction_rep * FactionWorkRepGain (BN4 0.75).
     donateToFaction: rec("donateToFaction", (f, amt) => {
       rep[f] = (rep[f] ?? 0) + (amt / 1e6) * p.mults.faction_rep * 0.75;
@@ -711,6 +712,50 @@ export const tests = {
     assert(r.calls.slice(0, i).filter((c) => c.startsWith("upgradeHomeRam:")).length >= 1, "home RAM before the install");
     assert(r.ns._log.some((l) => l.includes("[T] sing: installing 11 augs")), "announced on the terminal");
     assert(!r.ns._log.some((l) => l.includes("WARN")), `a body failed: ${r.ns._log.filter((l) => l.includes("WARN"))}`);
+  },
+
+  // The user's rule: the Red Pill ends the node's aug cycles, so it is bought
+  // and installed the moment it is in reach - a queue of one, not ten.
+  "the Red Pill in reach is bought and installed at once, batch of one": async () => {
+    const mods = await loadScripts();
+    const r = await driveSing(mods, {
+      ticks: 1, p: player({ factions: ["Daedalus"] }), rep: { Daedalus: 3e6 },
+      augs: { Daedalus: [{ name: "The Red Pill", rep: 2.5e6, price: 0 }] },
+    });
+    assert(r.count("purchaseAugmentation") === 1, `the pill alone: ${r.calls.filter((c) => c.startsWith("purchase"))}`);
+    assert(r.count("installAugmentations") === 1, "and installed");
+  },
+
+  // Past the favor bar the pill's rep is BOUGHT - and before anything else: it
+  // costs $0, so dearest-first would plan it last and let a dear aug take the
+  // cash its donation needed.
+  "the Red Pill's donation comes before a dearer aug that would take its cash": async () => {
+    const mods = await loadScripts();
+    const lift = (2.5e6 - 1e6 + 1) * 1e6 / 0.75;
+    const r = await driveSing(mods, {
+      ticks: 1, p: player({ factions: ["Daedalus", "CyberSec"], money: lift + 1e9 }),
+      rep: { Daedalus: 1e6, CyberSec: 1e9 }, favor: { Daedalus: 150 },
+      augs: { Daedalus: [{ name: "The Red Pill", rep: 2.5e6, price: 0 }], CyberSec: [{ name: "Dear", rep: 1, price: 1.5e12 }] },
+    });
+    const buys = r.calls.filter((c) => c.startsWith("purchaseAugmentation:"));
+    assert(JSON.stringify(buys) === '["purchaseAugmentation:Daedalus,The Red Pill"]', `pill, not Dear: ${buys}`);
+    assert(r.count("donateToFaction") === 1 && r.count("installAugmentations") === 1, "donated, bought, installed");
+  },
+
+  // Once installing would carry Daedalus to the donate bar, buy what fits and
+  // install: the rest of the pill's 2.5m rep is then a donation, not a grind.
+  "an install that crosses Daedalus's favor bar happens at any batch size": async () => {
+    const mods = await loadScripts();
+    const two = [{ name: "a", rep: 1e3, price: 1e4 }, { name: "b", rep: 1e3, price: 1e4 },
+      { name: "The Red Pill", rep: 2.5e6, price: 0 }];
+    const go = (favorGain) => driveSing(mods, {
+      ticks: 1, p: player({ factions: ["Daedalus"] }), rep: { Daedalus: 5e5 }, favorGain, augs: { Daedalus: two },
+    });
+    const crossed = await go({ Daedalus: 151 });
+    assert(crossed.count("purchaseAugmentation") === 2 && crossed.count("installAugmentations") === 1,
+      `two bought and installed: ${crossed.calls.filter((c) => /purchase|install/.test(c))}`);
+    const short = await go({ Daedalus: 149 });
+    assert(short.count("purchaseAugmentation") === 0 && short.count("installAugmentations") === 0, "149 is not the bar");
   },
 
   "bestCrime ranks by chance x money / time, and none at zero odds": async () => {

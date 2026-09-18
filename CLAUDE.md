@@ -358,7 +358,7 @@ editor's RAM panel when one moves.
 | `sing/config.js` | singularity tunables, `SING_SERVICE`, `JOIN_DENY` | 0 |
 | `sing/plan.js` | `chooseAction` + `sameAsCurrent` — every decision, pure | 0 |
 | `sing/sing.js` | entry: resident supervisor; every singularity call is an rpc body | 2.60 |
-| ↳ twenty-five bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, buy, favor, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors | 2.70–6.60 |
+| ↳ twenty-six bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors | 2.35–6.60 |
 | `sing/backdoor.js` | one fire-and-forget backdoor; many run at once | 5.60 each |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
@@ -927,7 +927,7 @@ split. Splitting *below* 6.60 lowers nothing and costs a round trip, which is wh
 and READ stay whole - READ sits exactly ON the ceiling since `getCompanyRep` joined it, so the
 next read it needs is a second body, not a bigger one. `tests/ram.test.mjs` prices every body
 through `bodiesOf()` - the only place a body is priced before the game does it - and pins all
-twenty-five.
+twenty-six.
 
 The split also retired two calls outright: `gymWorkout`, `commitCrime` and `workForFaction` all
 take `focus` as an argument, so `setFocus` is never needed, and starting work finishes the
@@ -1094,6 +1094,16 @@ its body imports `CONTRACTS_SERVICE` from `contracts/config.js`, the one cross-s
 sing/, 0 GB and billed to the transient. `AUTO_INSTALL` is read inside SWEEP, so it is LIVE like
 `GRIND_GANG_KARMA`: off, the queue waits for a hand install. A sweep over rpc's 10 s times out, and
 the install waits for the next pass rather than kill the sweep mid-attempt.
+
+**Two installs skip `MIN_AUG_BATCH`, both the user's rule, both aimed at ending the node.** The
+Red Pill (`RED_PILL`: 2.5m Daedalus rep, `moneyCost: 0`) is bought the pass it is in reach - by rep
+or by donation - and installed as a queue of one; `owned.pill` retries an install that failed. Its
+donation is reserved BEFORE the dearest-first loop, because at $0 it would otherwise be planned last
+and a dear aug could take the cash its rep needed. And while `RED_PILL_FACTION` is below the donate
+bar, the FAVOR_GAIN body (`getFactionFavorGain`, 2.35) asks whether an install now would carry it
+over; if so, whatever fits is bought and installed at any size. ~462k lifetime rep is 150 favor,
+so that install turns the remaining ~2m of the pill's rep from a grind into a donation. Nothing here
+touches `w0r1d_d43m0n` - destroying the node stays the user's call.
 
 ### Invariants that look arbitrary but aren't
 

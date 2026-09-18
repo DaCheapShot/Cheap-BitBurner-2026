@@ -3,7 +3,7 @@ import {
   WORK_ORDER, WORK_TYPE_ORDER, FACTION_REP_TARGET,
   TDH_FACTION, TDH_CITY, TDH_HACKING, TDH_MONEY, HOME_CITY, TRAVEL_COST,
   MIN_AUG_BATCH, NFG, AUG_PRICE_MULT, NFG_LEVEL_MULT, AUG_SKIP_FACTIONS,
-  DONATE_MONEY_PER_REP,
+  DONATE_MONEY_PER_REP, RED_PILL,
 } from "./config.js";
 
 /**
@@ -72,6 +72,13 @@ export function repTargets(augsOf, owned, info) {
  * so float rounding in the game's $/1e6 * mult cannot leave it a hair short.
  * NeuroFlux is never donated for; it fills on whatever rep the batch reaches.
  *
+ * Two things lift the MIN_AUG_BATCH rule, both the user's: `force` (the
+ * install that crosses the donate-favor bar, see sing.js), and THE RED PILL in
+ * the batch - it ends the node's aug cycles, so it is bought and installed the
+ * moment it is in reach. Its rep is reserved before anything else: it costs no
+ * money (Augmentations.ts moneyCost 0), so dearest-first would plan it last and
+ * leave its donation only what the other augs had not taken.
+ *
  * @param o.augsOf   {faction: aug names}
  * @param o.owned    installed and queued aug names
  * @param o.queued   how many are queued (not yet installed)
@@ -80,10 +87,11 @@ export function repTargets(augsOf, owned, info) {
  * @param o.rep      {faction: rep} for joined factions - only these can sell
  * @param o.cash     money on hand
  * @param o.donate   { perRep, can(faction) } - or null, and nothing is donated
+ * @param o.force    buy what fits even under MIN_AUG_BATCH
  * @returns {{ buys: {faction, name, cost}[], donations: {faction, amount, rep}[],
  *             batch: number, total: number, eligible: number }}
  */
-export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, donate = null }) {
+export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, donate = null, force = false }) {
   // Who sells each aug, among joined factions we may buy from.
   const sellers = {};
   for (const [faction, augs] of Object.entries(augsOf)) {
@@ -110,6 +118,16 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, d
   const buys = [];
   const donated = {};
   let total = 0;
+  const pill = eligible.find((c) => c.name === RED_PILL);
+  if (pill) {
+    const f = cheapest(pill);
+    const d = lift(f, pill.need);
+    if (d && d <= cash) {
+      donated[f] = d;
+      reach[f] = pill.need + 1;
+      total = d;
+    }
+  }
   for (const c of eligible) {
     if (!(prereqs[c.name] ?? []).every((p) => have.has(p))) continue;
     const f = cheapest(c);
@@ -138,7 +156,7 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, d
   const batch = queued + buys.length;
   const donations = Object.entries(donated)
     .map(([faction, amount]) => ({ faction, amount, rep: amount / donate.perRep }));
-  const go = batch >= MIN_AUG_BATCH;
+  const go = batch >= MIN_AUG_BATCH || force || buys.some((b) => b.name === RED_PILL);
   return { buys: go ? buys : [], donations: go ? donations : [], batch, total, eligible: eligible.length };
 }
 
