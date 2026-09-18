@@ -39,6 +39,8 @@ const NESTED = [
   "sing/config.js",
   "sing/plan.js",
   "sing/sing.js",
+  // The fire-and-forget backdoor, a real file rather than a body: ns only in main().
+  "sing/backdoor.js",
 ];
 
 /** Every .js under scripts/, as posix paths relative to it. */

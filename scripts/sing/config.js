@@ -211,8 +211,13 @@ export const DONATE_MONEY_PER_REP = 1e6;
  * four connectme.js --factions reports). Most of WORK_ORDER's hacking factions.
  * Lowest required hacking first, which is the order they come in reach.
  *
+ * These are backdoored FIRST. Every other server on the network follows in the
+ * same pass - it earns nothing (no invite, and installBackdoor grants no
+ * Intelligence exp in this fork), but it is the user's call: a backdoored host
+ * is one `connect` from anywhere.
+ *
  * w0r1d_d43m0n is deliberately absent - its backdoor ENDS the BitNode, and that
- * stays the user's call. The BACKDOOR body refuses it as well. fulcrumassets is
+ * stays the user's call. backdoor.js refuses it as well. fulcrumassets is
  * absent because Fulcrum also wants employment and company rep.
  *
  * LIVE: read inside the BACKDOORS body.
@@ -220,12 +225,17 @@ export const DONATE_MONEY_PER_REP = 1e6;
 export const BACKDOOR_HOSTS = ["CSEC", "avmnite-02h", "I.I.I.I", "run4theh111z"];
 /** Ticks between backdoor checks - every 2 minutes at the 20 s tick. */
 export const BACKDOOR_EVERY = 6;
+/** The fire-and-forget backdoor script sing.js starts, one per server. */
+export const BACKDOOR_SCRIPT = "/scripts/sing/backdoor.js";
+/** What one copy holds: 1.60 + connect 2.00 + installBackdoor 2.00. Pinned by tests/ram.test.mjs. */
+export const BACKDOOR_GB = 5.60;
 /**
- * installBackdoor takes hackTime / 4 (Singularity.ts) and the supervisor's loop
- * waits it out, so a backdoor slower than this is left for a later pass - hack
- * time falls as hacking level rises. Frozen: read by sing.js.
+ * Home RAM left free when launching backdoors: sing's own largest body (CRIME,
+ * READ and the aug reads, 6.60), so the supervisor keeps running beside them.
+ * A 32 GB home often has less than 12.20 free, so there the backdoors wait for
+ * the first home upgrades.
  */
-export const BACKDOOR_MAX_MS = 120000;
+export const BACKDOOR_KEEP_GB = 6.60;
 
 // ----------------------------------------------------------------- travel ---
 

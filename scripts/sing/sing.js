@@ -2,13 +2,13 @@ import {
   SING_TICK_MS, UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
   PROG_BUDGET_FRACTION, JOIN_DENY,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
-  WORK_ORDER, MIN_AUG_BATCH, NFG, BACKDOOR_EVERY, BACKDOOR_MAX_MS,
+  WORK_ORDER, MIN_AUG_BATCH, NFG, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTarget, repTargets, planAugBuys,
   canDonate, donationPerRep, bestCrime,
 } from "./plan.js";
-import { rpcWithin, RPC_TIMEOUT_MS } from "scripts/rpc.js";
+import { rpc } from "scripts/rpc.js";
 
 /**
  * The singularity supervisor: a cheap resident loop whose singularity calls all
@@ -52,11 +52,11 @@ import { rpcWithin, RPC_TIMEOUT_MS } from "scripts/rpc.js";
  * money is never donated without a batch bought behind it. Favor moves only at
  * an install, so each faction's is read once per process.
  *
- * BACKDOORS FOR INVITES. Every BACKDOOR_EVERY ticks, every faction server that
- * is rooted and in hacking range is backdoored, and the invites arrive through
- * the JOIN pass. installBackdoor takes hackTime / 4 - far past rpc's 10 s - so that
- * one call gets a timeout of its own and the loop waits it out; a server slower
- * than BACKDOOR_MAX_MS waits for a later pass instead.
+ * BACKDOORS. Every BACKDOOR_EVERY ticks, every server that is rooted and in
+ * hacking range gets a backdoor.js started for it - the faction servers first,
+ * whose invites arrive through the JOIN pass, then the rest of the network - as
+ * many at once as home RAM holds beside BACKDOOR_KEEP_GB. Nothing waits for them:
+ * installBackdoor takes hackTime / 4, and the next pass sees the result.
  *
  * ALWAYS ON. boot starts this unconditionally, because singularity has no 0 GB
  * availability check to gate on. Without Source-File 4 outside BN4 every body
@@ -303,47 +303,38 @@ return pid;
 const INSTALL = `return ns.singularity.installAugmentations("/scripts/boot.js");`;
 
 /**
- * What is left to backdoor: every BACKDOOR_HOSTS entry on the network without
- * a backdoor, with its route from home. The BFS is connectme.js's, copied
+ * What is left to backdoor, with each server's route from home, which servers
+ * already have a backdoor.js running (so a pass never starts a second), and
+ * home's free RAM (so a pass starts only what fits). Order is priority: the
+ * BACKDOOR_HOSTS first - their invites are the point - then every other server
+ * on the network. Skipped: home, anything the player bought (cloud and hacknet
+ * servers are direct-connect already, and installBackdoor throws on hacknet),
+ * and w0r1d_d43m0n, whose backdoor ends the BitNode. The BFS is connectme.js's, copied
  * rather than imported - importing it would bill connectme's getServer and
  * tprint to this body. The network is a tree rooted at home, so the parent map
  * gives THE route.
  */
 const BACKDOORS = `
-import { BACKDOOR_HOSTS } from "/scripts/sing/config.js";
+import { BACKDOOR_HOSTS, BACKDOOR_SCRIPT } from "/scripts/sing/config.js";
 const parent = { home: null };
 const queue = ["home"];
 for (let i = 0; i < queue.length; i++) {
   for (const n of ns.scan(queue[i])) if (!(n in parent)) { parent[n] = queue[i]; queue.push(n); }
 }
+const first = BACKDOOR_HOSTS.filter((h) => h in parent);
+const rest = queue.filter((h) => h !== "home" && h !== "w0r1d_d43m0n" && !BACKDOOR_HOSTS.includes(h));
 const left = [];
-for (const host of BACKDOOR_HOSTS) {
-  if (!(host in parent)) continue;
+for (const host of [...first, ...rest]) {
   const s = ns.getServer(host);
-  if (s.backdoorInstalled) continue;
+  if (s.backdoorInstalled || s.purchasedByPlayer) continue;
   const route = [];
   for (let h = host; h !== null; h = parent[h]) route.unshift(h);
-  left.push({ host, route, root: s.hasAdminRights, need: s.requiredHackingSkill, ms: ns.getHackTime(host) / 4 });
+  left.push({ host, route, faction: BACKDOOR_HOSTS.includes(host), root: s.hasAdminRights, need: s.requiredHackingSkill });
 }
-return { level: ns.getHackingLevel(), left };
-`;
-
-/**
- * Walk the route hop by hop from home - always legal, since each hop is the
- * last one's neighbour - and backdoor the end of it. installBackdoor acts on
- * the TERMINAL's current server, so this moves the player's terminal; the
- * finally puts it back on home even when a hop or the backdoor throws.
- * w0r1d_d43m0n is refused here too: its backdoor ends the BitNode.
- */
-const BACKDOOR = `
-if (args.includes("w0r1d_d43m0n")) throw new Error("refusing w0r1d_d43m0n - its backdoor ends the BitNode");
-try {
-  for (const h of args) if (!ns.singularity.connect(h)) return false;
-  await ns.singularity.installBackdoor();
-  return true;
-} finally {
-  ns.singularity.connect("home");
-}
+// ps reports paths without the leading slash; the target is a copy's last argument.
+const busy = ns.ps("home").filter((p) => "/" + p.filename === BACKDOOR_SCRIPT).map((p) => String(p.args.at(-1)));
+const free = ns.getServerMaxRam("home") - ns.getServerUsedRam("home");
+return { level: ns.getHackingLevel(), left, busy, free };
 `;
 
 /** [[faction, $], ...] - returns the factions the game accepted. */
@@ -396,13 +387,23 @@ function joinLine(invites, joined) {
   return `the game refused ${invites.filter((f) => !denied.includes(f)).join(", ")}`;
 }
 
-/** Why each server not backdoored this pass is still waiting. */
-function backdoorWaitLine(ns, level, waiting) {
-  return waiting.map((b) => {
-    if (!b.root) return `${b.host} not rooted`;
-    if (b.need > level) return `${b.host} needs hacking ${b.need} (have ${level})`;
-    return `${b.host} takes ${ns.format.time(b.ms)} (over ${ns.format.time(BACKDOOR_MAX_MS)})`;
-  }).join(", ");
+/**
+ * Why each server not in reach is still waiting - the faction servers by name,
+ * the rest of the network as counts, or the line would run to sixty hosts.
+ */
+function backdoorWaitLine(level, waiting) {
+  const why = (b) => (!b.root ? "not rooted" : `needs hacking ${b.need} (have ${level})`);
+  const named = waiting.filter((b) => b.faction).map((b) => `${b.host} ${why(b)}`);
+  const others = waiting.filter((b) => !b.faction);
+  if (others.length) {
+    const count = {};
+    for (const b of others) {
+      const k = b.root ? "short on hacking" : "not rooted";
+      count[k] = (count[k] ?? 0) + 1;
+    }
+    named.push(`${others.length} other server(s): ${Object.entries(count).map(([k, n]) => `${n} ${k}`).join(", ")}`);
+  }
+  return named.join(", ");
 }
 
 function describe(ns, a, r) {
@@ -449,9 +450,9 @@ export async function main(ns) {
    * that body's next success, so a recurrence is reported again.
    */
   const warned = {};
-  const callWithin = async (ms, tag, body, ...args) => {
+  const call = async (tag, body, ...args) => {
     try {
-      const v = await rpcWithin(ns, ms, body, ...args);
+      const v = await rpc(ns, body, ...args);
       delete warned[tag];
       return v;
     } catch (e) {
@@ -471,7 +472,6 @@ export async function main(ns) {
       return null;
     }
   };
-  const call = (tag, body, ...args) => callWithin(RPC_TIMEOUT_MS, tag, body, ...args);
 
   log("singularity supervisor up");
 
@@ -599,27 +599,41 @@ export async function main(ns) {
   };
 
   /**
-   * Backdoor every faction server in reach, one after another - the terminal
-   * is one slot, so they cannot overlap. The loop waits all of them out, which
-   * BACKDOOR_MAX_MS bounds per server; late in a node each is seconds.
+   * Start a backdoor.js for every server in reach that has none running, in
+   * priority order, while home has room beside BACKDOOR_KEEP_GB - and wait for
+   * none of them. A copy that fails leaves its server unbackdoored, so the next
+   * pass simply tries again. Only faction servers reach the terminal.
    */
   const backdoorPass = async () => {
     const b = await call("backdoors", BACKDOORS);
     if (!b) return;
     if (!b.left.length) {
       backdoorsDone = true;
-      log("backdoor: every faction server backdoored");
+      log("backdoor: every server on the network backdoored");
       return;
     }
-    const ready = (x) => x.root && x.need <= b.level && x.ms <= BACKDOOR_MAX_MS;
-    for (const next of b.left.filter(ready)) {
-      const ok = await callWithin(next.ms + RPC_TIMEOUT_MS, "backdoor", BACKDOOR, ...next.route);
-      const line = ok ? `installed on ${next.host}` : ok === false ? `could not reach ${next.host}` : null;
-      if (line) log(`backdoor: ${line}`);
-      if (ok) ns.tprint(`sing: backdoor ${line}`);
+    const ready = (x) => x.root && x.need <= b.level;
+    const todo = b.left.filter((x) => ready(x) && !b.busy.includes(x.host));
+    let room = Math.floor((b.free - BACKDOOR_KEEP_GB) / BACKDOOR_GB);
+    const started = [];
+    for (const x of todo) {
+      if (room <= 0 || !ns.run(BACKDOOR_SCRIPT, 1, ...x.route)) break;
+      room--;
+      started.push(x);
+    }
+    const named = started.filter((x) => x.faction).map((x) => x.host);
+    if (named.length) ns.tprint(`sing: backdooring ${named.join(", ")}`);
+    const parts = [];
+    if (started.length) parts.push(`started ${started.length} (${started.map((x) => x.host).join(", ")})`);
+    if (b.busy.length) parts.push(`${b.busy.length} already running`);
+    const blocked = todo.length - started.length;
+    if (blocked) {
+      parts.push(`${blocked} in reach with no home RAM for them (${ns.format.ram(b.free)} free, ` +
+        `${ns.format.ram(BACKDOOR_GB)} each, keeping ${ns.format.ram(BACKDOOR_KEEP_GB)})`);
     }
     const waiting = b.left.filter((x) => !ready(x));
-    if (waiting.length) log(`backdoor: waiting - ${backdoorWaitLine(ns, b.level, waiting)}`);
+    if (waiting.length) parts.push(`waiting - ${backdoorWaitLine(b.level, waiting)}`);
+    log(`backdoor: ${parts.join("; ")}`);
   };
 
   /** Write the share hold only on a change, and say so - it moves RAM network-wide. */
@@ -703,8 +717,6 @@ export async function main(ns) {
       holdShare(started ? action.kind === "faction" : r.work?.type === "FACTION");
     }
 
-    // Last: the backdoor can hold the loop for BACKDOOR_MAX_MS, and this tick's
-    // work is already chosen and running by now.
     if (!backdoorsDone && tick % BACKDOOR_EVERY === 0) await backdoorPass();
 
     tick++;

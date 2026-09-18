@@ -114,8 +114,6 @@ async function driveSing(mods, {
     getCrimeStats: (c) => ({ Shoplift: { money: 15e3, time: 2e3 }, Homicide: { money: 45e3, time: 3e3 } })[c],
     getCrimeChance: (c) => ({ Shoplift: 0.9, Homicide: 0.3 })[c],
     installAugmentations: rec("installAugmentations", () => (queued.length ? undefined : false)),
-    connect: rec("connect", () => true),
-    installBackdoor: rec("installBackdoor", async () => {}),
     ...api,
   };
   const ns = makeNs({
@@ -788,53 +786,76 @@ export const tests = {
 
   // ------------------------------------------------------------ backdoor ----
 
-  // installBackdoor acts on the TERMINAL's server, so the route is walked hop by
-  // hop from home, and the terminal is put back on home after. Every ready
-  // server in one pass - one at a time was hours of waiting late in a node - and
-  // every server left behind says why.
-  "every ready faction server is backdoored along its route, and the terminal comes home": async () => {
+  // Fire-and-forget: one backdoor.js per server in reach, faction servers first,
+  // each given its route from home - and a running copy is never doubled by the
+  // next pass. The mock's processes never exit, so pass two sees all of them.
+  "every server in reach gets a backdoor.js, faction servers first, never twice": async () => {
     const mods = await loadScripts();
+    const { BACKDOOR_EVERY } = mods["sing/config"];
     const r = await driveSing(mods, {
-      ticks: 1,
+      ticks: BACKDOOR_EVERY + 1,
       servers: {
-        CSEC: { hasAdminRights: true, requiredHackingSkill: 50, hackTime: 40e3 },
-        // Ready too: the same pass does it, straight after CSEC.
-        "avmnite-02h": { hasAdminRights: true, requiredHackingSkill: 200, hackTime: 4e3 },
+        CSEC: { hasAdminRights: true, requiredHackingSkill: 50 },
+        "avmnite-02h": { hasAdminRights: true, requiredHackingSkill: 200 },
         "I.I.I.I": { hasAdminRights: true, requiredHackingSkill: 1e9 },
-        run4theh111z: { hasAdminRights: true, requiredHackingSkill: 1, hackTime: 1e9 },
+        run4theh111z: { hasAdminRights: false, requiredHackingSkill: 1 },
+        n00dles: { hasAdminRights: true, requiredHackingSkill: 1 },
+        // Bought servers are direct-connect already, and hacknet ones throw.
+        "cloud-0": { hasAdminRights: true, requiredHackingSkill: 1, purchasedByPlayer: true },
       },
       extra: {
-        scan: (h) => ({ home: ["n00dles"], n00dles: ["home", "CSEC", "avmnite-02h", "I.I.I.I", "run4theh111z"] })[h] ?? [],
+        scan: (h) => ({
+          home: ["n00dles", "cloud-0"],
+          n00dles: ["home", "CSEC", "avmnite-02h", "I.I.I.I", "run4theh111z"],
+        })[h] ?? [],
       },
     });
-    const seq = r.calls.filter((c) => /^(connect|installBackdoor):/.test(c));
-    assert(JSON.stringify(seq) === JSON.stringify(
-      ["connect:home", "connect:n00dles", "connect:CSEC", "installBackdoor:", "connect:home",
-        "connect:home", "connect:n00dles", "connect:avmnite-02h", "installBackdoor:", "connect:home"]),
-    `wrong route or no return home: ${seq}`);
+    const copies = r.ns.ps("home").filter((p) => p.filename === "scripts/sing/backdoor.js").map((p) => p.args);
+    assert(JSON.stringify(copies) === JSON.stringify([
+      ["home", "n00dles", "CSEC"], ["home", "n00dles", "avmnite-02h"], ["home", "n00dles"]]),
+    `wrong routes, order or a duplicate: ${JSON.stringify(copies)}`);
     const log = r.ns._log.join(" | ");
-    for (const done of ["installed on CSEC", "installed on avmnite-02h"]) {
-      assert(log.includes(done), `missing "${done}": ${log}`);
-    }
-    for (const why of ["I.I.I.I needs hacking", "run4theh111z takes"]) {
+    assert(log.includes("[T] sing: backdooring CSEC, avmnite-02h"), `faction servers must reach the terminal: ${log}`);
+    assert(log.includes("3 already running"), `pass two must see the running copies: ${log}`);
+    for (const why of ["I.I.I.I needs hacking", "run4theh111z not rooted"]) {
       assert(log.includes(why), `missing wait reason "${why}": ${log}`);
     }
   },
 
-  "the BACKDOOR body refuses w0r1d_d43m0n and always leaves the terminal on home": async () => {
-    const AsyncFunction = (async () => {}).constructor;
-    const run = new AsyncFunction("ns", "args", bodies().BACKDOOR);
+  "backdoors start only while home keeps BACKDOOR_KEEP_GB free": async () => {
+    const mods = await loadScripts();
+    const { BACKDOOR_GB, BACKDOOR_KEEP_GB } = mods["sing/config"];
+    const r = await driveSing(mods, {
+      ticks: 1,
+      servers: {
+        CSEC: { hasAdminRights: true, requiredHackingSkill: 1 },
+        "avmnite-02h": { hasAdminRights: true, requiredHackingSkill: 1 },
+      },
+      // Room for exactly one copy beside the keep.
+      extra: { getServerMaxRam: () => 100, getServerUsedRam: () => 100 - BACKDOOR_KEEP_GB - BACKDOOR_GB - 1 },
+    });
+    const copies = r.ns.ps("home").filter((p) => p.filename === "scripts/sing/backdoor.js");
+    assert(copies.length === 1 && copies[0].args.at(-1) === "CSEC", `expected CSEC alone: ${JSON.stringify(copies)}`);
+    assert(r.ns._log.some((l) => l.includes("1 in reach with no home RAM")), `the RAM wait must be said: ${r.ns._log}`);
+  },
+
+  "backdoor.js refuses w0r1d_d43m0n and always leaves the terminal on home": async () => {
+    const { main } = (await loadScripts())["sing/backdoor"];
     const hops = [];
-    const ns = { singularity: {
+    const fake = (args) => ({ args, singularity: {
       connect: (h) => { hops.push(h); return h !== "n00dles"; },
       installBackdoor: async () => { hops.push("BACKDOOR"); },
-    } };
+    } });
     let msg = "";
-    await run(ns, ["home", "The-Cave", "w0r1d_d43m0n"]).catch((e) => { msg = e.message; });
+    await main(fake(["home", "The-Cave", "w0r1d_d43m0n"])).catch((e) => { msg = e.message; });
     assert(msg.includes("w0r1d_d43m0n") && hops.length === 0, `w0r1d_d43m0n was not refused: ${hops}`);
-    assert(await run(ns, ["home", "n00dles", "CSEC"]) === false, "a failed hop must return false");
+    await main(fake(["home", "n00dles", "CSEC"]));
     assert(JSON.stringify(hops) === JSON.stringify(["home", "n00dles", "home"]),
       `a failed hop must not backdoor, and must end on home: ${hops}`);
+    hops.length = 0;
+    await main(fake(["home", "foodnstuff"]));
+    assert(JSON.stringify(hops) === JSON.stringify(["home", "foodnstuff", "BACKDOOR", "home"]),
+      `the happy path: ${hops}`);
   },
 
   // Always on means it runs where singularity does not exist. Exiting would have

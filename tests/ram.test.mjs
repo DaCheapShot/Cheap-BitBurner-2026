@@ -389,6 +389,15 @@ export const tests = {
   // The singularity surface phase 1 needs is 30.30 GB held together, against a
   // fresh BN4 home's 32 shared with boot and the batcher. So sing.js holds no
   // singularity call at all: 1.60 + ns.run 1.00, exactly gang.js's shape.
+  // backdoor.js is started once per server and many run at once, so what one
+  // copy costs is what sing.js budgets launches by - BACKDOOR_GB must match.
+  "sing's backdoor.js is 5.60 GB, and BACKDOOR_GB says so": async () => {
+    const ram = ramOf("sing/backdoor");
+    assert(Math.abs(ram - 5.60) < 0.011, `expected 5.60 GB (1.60 + connect + installBackdoor), got ${ram.toFixed(2)}`);
+    const { BACKDOOR_GB } = (await loadScripts())["sing/config"];
+    assert(Math.abs(BACKDOOR_GB - ram) < 0.011, `BACKDOOR_GB ${BACKDOOR_GB} but backdoor.js costs ${ram.toFixed(2)}`);
+  },
+
   "sing.js holds no singularity API: 2.60 GB": () => {
     const ram = ramOf("sing/sing");
     assert(Math.abs(ram - 2.60) < 0.011, `expected 2.60 GB (1.60 + run 1.00), got ${ram.toFixed(2)}`);
@@ -430,9 +439,9 @@ export const tests = {
       SWEEP: 2.70, INSTALL: 6.60,
       // The idle money crime: getCrimeStats and getCrimeChance, 5.00 each.
       CRIME_STATS: 6.60, CRIME_CHANCE: 6.60,
-      // Backdoors: the route read (scan + getServer + two 0.05 reads) is split
-      // from connect + installBackdoor, which together would be 7.90.
-      BACKDOORS: 3.90, BACKDOOR: 5.60,
+      // The backdoor read: scan + getServer + ps + three 0.05 reads. The install
+      // itself is backdoor.js, a real file - it is fire-and-forget, see below.
+      BACKDOORS: 4.15,
     };
     const got = bodiesOf("sing/sing");
     assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),

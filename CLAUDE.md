@@ -250,7 +250,7 @@ const c = await rpc(ns, `return { w: ns.weakenAnalyze(1) };`);
 const n = await rpc(ns, `return ns.getServerMaxMoney(args[0]);`, host);
 ```
 
-Five things about it are load-bearing:
+Four things about it are load-bearing:
 
 - **The filename is a hash of the body.** `Script.ts:39` returns early from `set content` when the
   code is unchanged, so an identical body is written once, never re-compiled and never re-priced.
@@ -276,10 +276,6 @@ Five things about it are load-bearing:
   state is shared by gang, sing and contracts. As a boolean it refused any overlap between
   processes, and sing's pre-install SWEEP - which awaits `contracts.js`, itself a caller - could
   never sweep. Test mocks load one module for one process, which is why nothing caught it.
-- **`rpcWithin(ns, ms, body, ...args)` is `rpc` with its own timeout**, for a body that
-  legitimately awaits past 10 s (sing's BACKDOOR). The caller blocks for all of it - a transient
-  left in the background would hold RAM beside the caller's next body, and one that returned
-  early would take its pending await down with it.
 
 **It only helps RESIDENT scripts.** `cloud.js`, `root.js` and `deploy.js` already hold their
 RAM for under a second, so routing them through here saves nothing
@@ -362,7 +358,8 @@ editor's RAM panel when one moves.
 | `sing/config.js` | singularity tunables, `SING_SERVICE`, `JOIN_DENY` | 0 |
 | `sing/plan.js` | `chooseAction` + `sameAsCurrent` — every decision, pure | 0 |
 | `sing/sing.js` | entry: resident supervisor; every singularity call is an rpc body | 2.60 |
-| ↳ twenty-six bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, buy, favor, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors, backdoor | 2.70–6.60 |
+| ↳ twenty-five bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, buy, favor, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors | 2.70–6.60 |
+| `sing/backdoor.js` | one fire-and-forget backdoor; many run at once | 5.60 each |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
@@ -930,7 +927,7 @@ split. Splitting *below* 6.60 lowers nothing and costs a round trip, which is wh
 and READ stay whole - READ sits exactly ON the ceiling since `getCompanyRep` joined it, so the
 next read it needs is a second body, not a bigger one. `tests/ram.test.mjs` prices every body
 through `bodiesOf()` - the only place a body is priced before the game does it - and pins all
-twenty-six.
+twenty-five.
 
 The split also retired two calls outright: `gymWorkout`, `commitCrime` and `workForFaction` all
 take `focus` as an argument, so `setFocus` is never needed, and starting work finishes the
@@ -1005,19 +1002,27 @@ returning only from Chongqing means a trip made by hand is never undone. Chongqi
 arrives while waiting and is declined by `JOIN_DENY`. A flight skips that tick's work: READ's
 player still stands in the old city.
 
-**Backdoors earn the hacking factions' invites.** CyberSec, NiteSec, The Black Hand and BitRunners
-invite on a backdoor alone (`BACKDOOR_HOSTS`, the four `connectme.js --factions` reports). Every
-`BACKDOOR_EVERY` ticks the BACKDOORS body (3.90) BFSes from home - `connectme.js`'s walk, copied
-because importing it bills its `getServer` and `tprint` - and returns each unbackdoored one with its
-route, root, level requirement and `hackTime / 4`; the invite then arrives through the JOIN pass.
-BACKDOOR (5.60: `connect` + `installBackdoor`, 7.90 with the read) walks the route **hop by hop
-from home**, always legal and never needing a trim, because `installBackdoor` acts on the TERMINAL's
-current server (`Singularity.ts`). It moves the player's terminal, and a `finally` puts it back on
-home even when a hop fails. It refuses `w0r1d_d43m0n` itself - that backdoor ends the node and is the
-user's call. **The install takes `hackTime / 4`, far past rpc's 10 s**, so it goes through
-`rpcWithin` and the loop waits it out: every ready server per pass, one after another (the
-terminal is one slot), run LAST in the tick so the work is already chosen, and a server slower than `BACKDOOR_MAX_MS` waits for hacking level to shrink it.
-Backdoors vanish at an install, which kills the process, so once none is left the pass stops.
+**Backdoors: the four faction servers first, then the whole network.** CyberSec, NiteSec, The Black
+Hand and BitRunners invite on a backdoor alone (`BACKDOOR_HOSTS`, the four `connectme.js --factions`
+reports), so they lead; every other server follows, at the user's request - it earns nothing else,
+not even Intelligence (`installBackdoor` never calls `gainIntelligenceExp`; a *manual hack* does).
+Every `BACKDOOR_EVERY` ticks the BACKDOORS body (4.15) BFSes from home - `connectme.js`'s walk,
+copied because importing it bills its `getServer` and `tprint` - and returns what is left in that
+order with each route, plus the targets of the `backdoor.js` copies already running (`ps`) and
+home's free RAM. Skipped: home, anything `purchasedByPlayer` (direct-connect already; hacknet throws)
+and `w0r1d_d43m0n`, whose backdoor ends the node and is the user's call - `backdoor.js` refuses it too.
+
+**The install is a real file, fire-and-forget, and many run at once.** `installBackdoor` takes
+`hackTime / 4`, far past rpc's 10 s, and a transient that returned early would take its pending
+backdoor down with it - so `sing.js` `ns.run`s `scripts/sing/backdoor.js` (5.60, `BACKDOOR_GB`) per
+server and waits for none. Parallel is safe because `installBackdoor` reads
+`Player.getCurrentServer()` once, AT THE CALL (`Singularity.ts`), then only awaits a timer, and a
+copy's connect hops and that call run with no `await` between them - nothing can move the terminal
+in the middle. It walks the route hop by hop from home and a `finally` puts the terminal back on
+home. Copies start while home keeps `BACKDOOR_KEEP_GB` (6.60, sing's largest body) free - which on a
+32 GB home usually means none until the first upgrade. This is the one place sing holds RAM outside
+the max-over-bodies rule, bounded by that keep. A failed copy leaves its server unbackdoored and the
+next pass retries; once nothing is left the pass stops for the life of the process.
 
 **Share follows faction work.** The share bonus is in the three faction formulas in
 `src/PersonObjects/formulas/reputation.ts` and nowhere else - company work never reads it - so
