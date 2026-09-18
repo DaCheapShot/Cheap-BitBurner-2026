@@ -13,7 +13,7 @@ const COST = {
   getServerGrowth: 0.1, getServerMaxRam: 0.05, getServerUsedRam: 0.05,
   fileExists: 0.1, isRunning: 0.1, ps: 0.2, ls: 0.2,
   getScriptRam: 0.1, getHackTime: 0.05, getGrowTime: 0.05, getWeakenTime: 0.05,
-  getPlayer: 0.5, nuke: 0.05, brutessh: 0.05, ftpcrack: 0.05,
+  getPlayer: 0.5, getFavorToDonate: 0.1, getBitNodeMultipliers: 4, nuke: 0.05, brutessh: 0.05, ftpcrack: 0.05,
   relaysmtp: 0.05, httpworm: 0.05, sqlinject: 0.05,
   share: 2.4, getSharePower: 0.2,
   // The fork's ns.cloud namespace, which replaces vanilla's top-level purchased
@@ -423,6 +423,8 @@ export const tests = {
       COMPANY: 4.60, APPLY: 4.60, TRAVEL: 3.60,
       // The aug reads, one call each: together they would be 14.10.
       OWNED: 6.60, FAC_AUGS: 6.60, PREREQ: 6.60, AUG_INFO: 6.60, BUY: 6.60,
+      // Favor split from READ (full); DONATE is donateToFaction alone.
+      FAVOR: 2.70, DONATE: 6.60, BN_MULTS: 5.60,
     };
     const got = bodiesOf("sing/sing");
     assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),

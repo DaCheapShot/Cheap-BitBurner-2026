@@ -6,6 +6,7 @@ import {
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTarget, repTargets, planAugBuys,
+  planDonations, canDonate,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 
@@ -42,6 +43,12 @@ import { rpc } from "scripts/rpc.js";
  * goes on home RAM, which an install keeps and money it does not. Installing
  * stays manual. What each faction sells and each aug's prerequisites are fixed
  * for the node, so they are read once and kept here.
+ *
+ * FAVOR BUYS REP. A faction at getFavorToDonate() favor (150) is donated to its
+ * rep target rather than worked for it, and the work moves on down WORK_ORDER.
+ * Donations run in the AUGS pass only when no batch was bought and rep - not
+ * cash - is what the batch lacks. Favor moves only at an install, so each
+ * faction's is read once per process; an install restarts this process anyway.
  *
  * ALWAYS ON. boot starts this unconditionally, because singularity has no 0 GB
  * availability check to gate on. Without Source-File 4 outside BN4 every body
@@ -219,6 +226,34 @@ for (const [f, a] of JSON.parse(args[0])) {
 return bought;
 `;
 
+/**
+ * Favor per faction, and the bar to donate. getFavorToDonate is a plain ns call
+ * (0.10) - it folds in the node's FavorToDonateToFaction, so 150 is never
+ * hardcoded here. Split from READ, which is already on the 6.60 ceiling.
+ */
+const FAVOR = `
+const favor = {};
+for (const f of args) favor[f] = ns.singularity.getFactionFavor(f);
+return { favor, need: ns.getFavorToDonate() };
+`;
+
+/**
+ * The node's FactionWorkRepGain, which prices a donation (donation.ts). Fixed
+ * for the BitNode, so read once per process. Called with no arguments the game
+ * defaults to (bitNodeN, SF level + 1) - exactly what initBitNodeMultipliers
+ * installs as the live multipliers. Needs Source-File 5; without it this throws,
+ * warns once, and nothing is donated rather than donated at a guessed price.
+ * Its own body: 4.00 GB on top of FAVOR would be 6.70, over the ceiling.
+ */
+const BN_MULTS = `return ns.getBitNodeMultipliers().FactionWorkRepGain;`;
+
+/** [[faction, $], ...] - returns the factions the game accepted. */
+const DONATE = `
+const done = [];
+for (const [f, amt] of JSON.parse(args[0])) if (ns.singularity.donateToFaction(f, amt)) done.push(f);
+return done;
+`;
+
 // ------------------------------------------------------------------ format ---
 
 const money$ = (ns, v) => `$${ns.format.number(v, 2)}`;
@@ -258,7 +293,7 @@ function joinLine(invites, joined) {
   return `the game refused ${invites.filter((f) => !denied.includes(f)).join(", ")}`;
 }
 
-function describe(ns, a, r, targets) {
+function describe(ns, a, r) {
   if (a.kind === "gym") return `gym ${a.stat} at ${a.gym}`;
   if (a.kind === "crime") {
     return `crime ${a.crime}, karma ${ns.format.number(r.player.karma, 2)} of ` +
@@ -266,7 +301,8 @@ function describe(ns, a, r, targets) {
   }
   if (a.kind === "faction") {
     return `faction ${a.faction} (${a.type}), rep ${n2(ns, r.rep[a.faction] ?? 0)} of ` +
-      `${n2(ns, repTarget(a.faction, targets))}`;
+      `${n2(ns, repTarget(a.faction, r.targets))}` +
+      (canDonate(a.faction, r) ? " - donatable, worked only for want of anything else" : "");
   }
   if (a.kind === "company") {
     return `company ${a.company} (${a.field}), company rep ${n2(ns, r.companyRep?.[a.company] ?? 0)}`;
@@ -333,6 +369,35 @@ export async function main(ns) {
   const augsOf = {};
   const prereqs = {};
   let targets = {};
+  // Favor moves only at an install, which kills this process - read once.
+  const favor = {};
+  let favorNeed = 0;
+  let bnRepMult = null;
+
+  /**
+   * Buy rep for the factions that sell it, when rep is what the batch lacks.
+   * With queued + rep-unlocked augs already at MIN_AUG_BATCH the batch is
+   * waiting on CASH, and a donation would only push it further away.
+   */
+  const donatePass = async (r, plan, queued) => {
+    if (!Object.values(favor).some((f) => favorNeed > 0 && f >= favorNeed)) return;
+    bnRepMult ??= await call("bitnode mults", BN_MULTS);
+    if (!bnRepMult) return;
+    const d = planDonations({
+      targets, rep: r.rep, favor, favorNeed, workTypes: r.workTypes,
+      cash: r.player.money, repMult: r.player.mults.faction_rep, bnRepMult,
+    });
+    if (!d.length) return;
+    if (queued + plan.eligible >= MIN_AUG_BATCH) {
+      log(`donate: holding - ${queued + plan.eligible} augs unlocked, cash is what the batch lacks`);
+      return;
+    }
+    const done = (await call("donate", DONATE, JSON.stringify(d.map((x) => [x.faction, x.amount])))) ?? [];
+    const got = d.filter((x) => done.includes(x.faction));
+    log(`donate: ${got.length
+      ? got.map((x) => `${money$(ns, x.amount)} to ${x.faction} (+${n2(ns, x.rep)} rep)`).join(", ")
+      : `the game refused ${d.map((x) => x.faction).join(", ")}`}`);
+  };
 
   /**
    * Refresh the rep targets and buy a batch if one is due. Every read is its
@@ -352,10 +417,19 @@ export async function main(ns) {
     if (!info) return;
 
     targets = repTargets(augsOf, owned.all, info);
+    const noFavor = r.player.factions.filter((f) => !(f in favor));
+    if (noFavor.length) {
+      const v = await call("favor", FAVOR, ...noFavor);
+      if (v) {
+        Object.assign(favor, v.favor);
+        favorNeed = v.need;
+      }
+    }
     const cash = r.player.money;
     const plan = planAugBuys({ augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash });
     if (!plan.buys.length) {
       log(`augs: ${augsWaitLine(ns, plan, owned.queued, cash)}`);
+      await donatePass(r, plan, owned.queued);
       return;
     }
     const bought = (await call("buy", BUY, JSON.stringify(plan.buys.map((b) => [b.faction, b.name])))) ?? [];
@@ -420,8 +494,9 @@ export async function main(ns) {
     const flew = city ? await call("travel", TRAVEL, city) : false;
     if (city) log(`travel: ${flew ? "flew" : "could not fly"} to ${city}`);
     if (r && !flew) {
-      const action = chooseAction(r.player, { ...r, targets });
-      const what = describe(ns, action, r, targets);
+      const st = { ...r, targets, favor, favorNeed };
+      const action = chooseAction(r.player, st);
+      const what = describe(ns, action, st);
       // Hired first, promoted every PROMOTE_EVERY ticks after - each rung raises
       // the company rep rate. Not hired means nothing to work at yet.
       let hired = action.kind !== "company" || action.employed;

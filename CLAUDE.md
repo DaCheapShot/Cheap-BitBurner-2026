@@ -353,7 +353,7 @@ editor's RAM panel when one moves.
 | `sing/config.js` | singularity tunables, `SING_SERVICE`, `JOIN_DENY` | 0 |
 | `sing/plan.js` | `chooseAction` + `sameAsCurrent` — every decision, pure | 0 |
 | `sing/sing.js` | entry: resident supervisor; every singularity call is an rpc body | 2.60 |
-| ↳ seventeen bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, buy | 3.60–6.60 |
+| ↳ twenty bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, buy, favor, donate, bitnode mults | 2.70–6.60 |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
@@ -920,7 +920,7 @@ split. Splitting *below* 6.60 lowers nothing and costs a round trip, which is wh
 and READ stay whole - READ sits exactly ON the ceiling since `getCompanyRep` joined it, so the
 next read it needs is a second body, not a bigger one. `tests/ram.test.mjs` prices every body
 through `bodiesOf()` - the only place a body is priced before the game does it - and pins all
-seventeen.
+twenty.
 
 The split also retired two calls outright: `gymWorkout`, `commitCrime` and `workForFaction` all
 take `focus` as an argument, so `setFocus` is never needed, and starting work finishes the
@@ -975,7 +975,9 @@ is skipped below hacking 225 (intern `reqdHacking` 1 + Bachman's `jobStatReqOffs
 than applied for every tick. Promotion is re-applying: `applyForJob` hands out the highest
 position the player qualifies for and touches only `Player.jobs`, so APPLY runs every
 `PROMOTE_EVERY` ticks mid-shift and is not an action body. Neither `applyToCompany` nor
-`workForCompany` checks the city, so Bachman being in Aevum does not matter.
+`workForCompany` checks the city, so Bachman being in Aevum does not matter. After Bachman the
+hacking factions run HIGHEST first (Daedalus, BitRunners, The Black Hand, NiteSec, CyberSec): the
+higher shops largely cover the lower ones' augs, and each lower target drops as those are bought.
 
 **The only trip is Tian Di Hui's**, whose invite needs the player standing in Chongqing, New Tokyo
 or Ishima. Out from Sector-12 once hacking is 50 with $1m *plus both fares* in hand; back once
@@ -1021,6 +1023,22 @@ is still manual. Each read is its own body: together they would be 14.10 GB. Wha
 and each aug's prerequisites are fixed for the node and kept in memory; prices and the owned list
 are re-read every pass. READ now runs FIRST in the tick, so the batch gets the cash before the
 normal 25% home upgrade can take it.
+
+**A faction at 150 favor is BOUGHT to its target, not worked.** Favor moves only at an install
+(`Faction.prestigeAugmentation`: `addRepToFavor(favor, rep)`, where 150 favor is ~462k lifetime rep),
+and at `getFavorToDonate()` the faction sells rep: `$ / 1e6 * mults.faction_rep * FactionWorkRepGain`
+(`donation.ts`). The live bug: Bachman worked toward 375k with 150 favor already banked. `chooseAction`
+skips a donatable faction - `canDonate`: favor at the bar AND a non-empty work-type list, which is
+exactly the set `donateToFaction` accepts - and works it only when nothing else is left. The AUGS
+pass donates, cheapest-to-finish first, up to `DONATE_BUDGET_FRACTION` of cash, and **only when no
+batch was bought and rep is what the batch lacks**: once queued + rep-unlocked augs reach
+`MIN_AUG_BATCH` the batch is waiting on cash, and a donation would push it further off. One rep over
+the target, so float rounding cannot leave it a hair short. `FactionWorkRepGain` (BN4 0.75) is read
+once per process by the BN_MULTS body - `getBitNodeMultipliers()` with no arguments defaults to exactly
+what `initBitNodeMultipliers` installs. It needs Source-File 5; without it the body warns once and
+nothing is donated, rather than donated at a guessed price.
+Favor is its own FAVOR body (READ is full) and is read once per faction per process - an install
+kills the process anyway.
 
 ### Invariants that look arbitrary but aren't
 

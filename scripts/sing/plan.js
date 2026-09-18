@@ -3,6 +3,7 @@ import {
   WORK_ORDER, WORK_TYPE_ORDER, FACTION_REP_TARGET,
   TDH_FACTION, TDH_CITY, TDH_HACKING, TDH_MONEY, HOME_CITY, TRAVEL_COST,
   MIN_AUG_BATCH, NFG, AUG_PRICE_MULT, NFG_LEVEL_MULT, AUG_SKIP_FACTIONS,
+  DONATE_BUDGET_FRACTION, DONATE_MONEY_PER_REP,
 } from "./config.js";
 
 /**
@@ -114,6 +115,50 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash })
 }
 
 /**
+ * Can this faction take a donation? Favor at the bar (getFavorToDonate), and
+ * a faction that offers work - donateToFaction refuses the gang's faction and
+ * any faction without work, and getFactionWorkTypes returns [] for exactly
+ * those, so the same read decides it without naming the gang.
+ *
+ * @param state  { favor: {faction: n}, favorNeed: n, workTypes: {faction: string[]} }
+ */
+export function canDonate(faction, state) {
+  return state.favorNeed > 0 && (state.favor?.[faction] ?? 0) >= state.favorNeed &&
+    (state.workTypes?.[faction] ?? []).length > 0;
+}
+
+/**
+ * The donations to make now: every faction that can take one and is short of
+ * its rep target, cheapest to finish first, within DONATE_BUDGET_FRACTION of
+ * cash. One rep over the target, so float rounding in the game's
+ * $/1e6 * mult cannot leave it a hair short of the aug it was bought for.
+ * A faction with no target yet (augs unread) gets nothing: unknown is not a
+ * reason to spend.
+ *
+ * @param o.targets   {faction: rep} from repTargets
+ * @param o.rep       {faction: rep} joined factions
+ * @param o.repMult    getPlayer().mults.faction_rep
+ * @param o.bnRepMult  getBitNodeMultipliers().FactionWorkRepGain
+ * @returns {{faction, amount, rep}[]}
+ */
+export function planDonations({ targets, rep, favor, favorNeed, workTypes, cash, repMult, bnRepMult }) {
+  const perRep = DONATE_MONEY_PER_REP / (repMult * bnRepMult);
+  const want = Object.keys(rep)
+    .filter((f) => canDonate(f, { favor, favorNeed, workTypes }) && (targets[f] ?? 0) > rep[f])
+    .map((f) => ({ faction: f, need: targets[f] - rep[f] + 1 }))
+    .sort((a, b) => a.need - b.need);
+  let budget = cash * DONATE_BUDGET_FRACTION;
+  const out = [];
+  for (const w of want) {
+    const amount = Math.min(w.need * perRep, budget);
+    if (amount <= 0) break;
+    out.push({ faction: w.faction, amount, rep: amount / perRep });
+    budget -= amount;
+  }
+  return out;
+}
+
+/**
  * WORK_ORDER's steps that can apply now, then every joined faction it does not
  * list. A faction step needs the faction joined; a company step needs nothing
  * here - chooseAction decides whether it is still worth working.
@@ -149,7 +194,8 @@ export function chooseTravel(player) {
  * @param player  the round-tripped ns.getPlayer() object
  * @param state   { hasSF2, inGang, grindKarma, rep: {faction: n},
  *                  workTypes: {faction: string[]}, companyRep: {company: n},
- *                  targets: {faction: rep} from repTargets }
+ *                  targets: {faction: rep} from repTargets,
+ *                  favor: {faction: n}, favorNeed: n }
  * @returns       { kind: "gym"|"crime"|"faction"|"company"|"idle", ... }
  */
 export function chooseAction(player, state) {
@@ -171,7 +217,10 @@ export function chooseAction(player, state) {
     return { kind: "crime", crime: CRIME_TYPE };
   }
 
-  // 3. Rep, down WORK_ORDER.
+  // 3. Rep, down WORK_ORDER. A faction that takes donations is bought to its
+  //    target, not worked - unless nothing else is left, when working it (at
+  //    its favor's 1 + favor/100) still beats idling.
+  let donatable = null;
   for (const step of steps(player)) {
     if (step.company) {
       const c = step.company;
@@ -190,9 +239,12 @@ export function chooseAction(player, state) {
     const types = state.workTypes[step.faction] ?? [];
     const type = WORK_TYPE_ORDER.find((t) => types.includes(t));
     if (type && (state.rep[step.faction] ?? 0) < repTarget(step.faction, state.targets)) {
-      return { kind: "faction", faction: step.faction, type };
+      const a = { kind: "faction", faction: step.faction, type };
+      if (!canDonate(step.faction, state)) return a;
+      donatable ??= a;
     }
   }
+  if (donatable) return donatable;
 
   // 4. Nothing. No body runs and nothing is stopped - whatever the player
   //    started by hand is left alone.

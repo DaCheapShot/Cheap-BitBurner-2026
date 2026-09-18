@@ -18,7 +18,10 @@ const SF4_ERROR = "commitCrime: This singularity function requires Source-File 4
 const strong = { strength: 100, defense: 100, dexterity: 100, agility: 100, hacking: 10, charisma: 1 };
 
 function player(over = {}) {
-  return { skills: { ...strong }, city: "Sector-12", karma: 0, factions: [], jobs: {}, money: 1e9, ...over };
+  return {
+    skills: { ...strong }, city: "Sector-12", karma: 0, factions: [], jobs: {}, money: 1e9,
+    mults: { faction_rep: 1 }, ...over,
+  };
 }
 
 /**
@@ -45,7 +48,7 @@ function state(over = {}) {
 async function driveSing(mods, {
   ticks = 4, work = null, hasTor = false, invites = [], p = player(),
   ownedSF = new Map(), inGang = false, api = {}, run = undefined, companyRep = 0,
-  rep = {}, files = {},
+  rep = {}, files = {}, favor = {}, extra = {},
   // {faction: [{name, rep, price, prereqs?}]} - what the fake sells. Tian Di Hui
   // sells the implant by default, so its rep target is real rather than 1e6.
   augs = { "Tian Di Hui": [{ name: "Neuroreceptor Management Implant", rep: 75e3, price: 5e8 }] },
@@ -68,6 +71,12 @@ async function driveSing(mods, {
     checkFactionInvitations: () => (typeof invites === "function" ? invites() : invites),
     joinFaction: rec("joinFaction", (f) => { p.factions.push(f); return true; }),
     getFactionRep: (f) => rep[f] ?? 0,
+    getFactionFavor: (f) => favor[f] ?? 0,
+    // donation.ts: $ / 1e6 * faction_rep * FactionWorkRepGain (BN4 0.75).
+    donateToFaction: rec("donateToFaction", (f, amt) => {
+      rep[f] = (rep[f] ?? 0) + (amt / 1e6) * p.mults.faction_rep * 0.75;
+      return true;
+    }),
     getFactionWorkTypes: () => ["hacking", "field"],
     getCompanyRep: () => companyRep,
     getCurrentWork: () => current,
@@ -107,12 +116,15 @@ async function driveSing(mods, {
       gang: { inGang: () => inGang },
       getPlayer: () => p,
       getResetInfo: () => ({ currentNode: 4, ownedSF }),
+      getFavorToDonate: () => 150,
+      getBitNodeMultipliers: () => ({ FactionWorkRepGain: 0.75 }),
       hasTorRouter: rec("hasTorRouter", () => tor),
       sleep: async () => {
         if (++sleeps >= ticks) throw new Error("STOP");
         await new Promise((r) => setTimeout(r, 1));
       },
       ...(run ? { run } : {}),
+      ...extra,
     },
   });
   try {
@@ -175,13 +187,19 @@ export const tests = {
     assert(!ok(player({ karma: GANG_KARMA_TARGET - 1 }), state(on)), "karma already there");
   },
 
+  // Hacking factions highest first: the higher shops largely cover the lower
+  // ones' augs, so rep earned there buys CyberSec's too.
   "faction work follows the order list and the preferred work type": async () => {
-    const { chooseAction } = (await loadScripts())["sing/plan"];
-    const a = chooseAction(player({ factions: ["Sector-12", "NiteSec", "CyberSec"] }), state({
-      workTypes: { "Sector-12": ["hacking"], NiteSec: ["hacking"], CyberSec: ["security", "hacking"] },
+    const mods = await loadScripts();
+    const { chooseAction } = mods["sing/plan"];
+    const a = chooseAction(player({ factions: ["Sector-12", "CyberSec", "NiteSec"] }), state({
+      workTypes: { "Sector-12": ["hacking"], CyberSec: ["hacking"], NiteSec: ["security", "hacking"] },
     }));
-    assert(a.kind === "faction" && a.faction === "CyberSec" && a.type === "hacking",
-      `CyberSec is the first joined faction in WORK_ORDER, got ${JSON.stringify(a)}`);
+    assert(a.kind === "faction" && a.faction === "NiteSec" && a.type === "hacking",
+      `NiteSec is the first joined faction in WORK_ORDER, got ${JSON.stringify(a)}`);
+    const HACKERS = ["Daedalus", "BitRunners", "The Black Hand", "NiteSec", "CyberSec"];
+    const order = mods["sing/config"].WORK_ORDER.map((st) => st.faction).filter((f) => HACKERS.includes(f));
+    assert(JSON.stringify(order) === JSON.stringify(HACKERS), `highest first, got ${order}`);
   },
 
   // A faction is worked to the rep its unbought augs need, and not past it -
@@ -197,6 +215,96 @@ export const tests = {
     assert(after.faction === "CyberSec", `at its target it should move on, got ${JSON.stringify(after)}`);
     const bought = chooseAction(p, state({ workTypes, targets: { ...targets, "Tian Di Hui": 0 } }));
     assert(bought.faction === "CyberSec", `every aug bought - target 0 - skip it, got ${JSON.stringify(bought)}`);
+  },
+
+  // ---------------------------------------------------------- donation ----
+
+  "canDonate: favor at the bar, and a faction that offers work": async () => {
+    const { canDonate } = (await loadScripts())["sing/plan"];
+    const st = { favor: { A: 150, B: 149, G: 500 }, favorNeed: 150, workTypes: { A: ["hacking"], B: ["hacking"], G: [] } };
+    assert(canDonate("A", st), "150 of 150");
+    assert(!canDonate("B", st), "149 is short");
+    assert(!canDonate("G", st), "the gang's faction offers no work, and donateToFaction refuses it");
+    assert(!canDonate("A", { ...st, favorNeed: 0 }), "favor not read yet is not a yes");
+  },
+
+  // The live case: Bachman worked for 375k rep with 150 favor already banked.
+  "a faction that takes donations is bought, not worked - unless nothing else is left": async () => {
+    const { chooseAction } = (await loadScripts())["sing/plan"];
+    const p = player({ factions: ["Bachman & Associates", "CyberSec"] });
+    const st = state({
+      workTypes: { "Bachman & Associates": ["hacking"], CyberSec: ["hacking"] },
+      targets: { "Bachman & Associates": 375e3, CyberSec: 10e3 },
+      favor: { "Bachman & Associates": 150 }, favorNeed: 150,
+    });
+    assert(chooseAction(p, st).faction === "CyberSec", "work moves on past the donatable faction");
+    const alone = chooseAction(p, { ...st, targets: { ...st.targets, CyberSec: 0 } });
+    assert(alone.faction === "Bachman & Associates", `nothing else: work it rather than idle, got ${JSON.stringify(alone)}`);
+  },
+
+  "planDonations: cheapest to finish first, within the budget, one rep over": async () => {
+    const mods = await loadScripts();
+    const { planDonations } = mods["sing/plan"];
+    const { DONATE_BUDGET_FRACTION } = mods["sing/config"];
+    const perRep = 1e6 / (2 * 0.75);
+    const base = {
+      targets: { A: 100e3, B: 10e3, C: 50e3, D: 50e3 }, rep: { A: 0, B: 0, C: 60e3, D: 0, E: 0 },
+      favor: { A: 200, B: 150, C: 150, D: 10, E: 150 }, favorNeed: 150,
+      workTypes: { A: ["hacking"], B: ["hacking"], C: ["hacking"], D: ["hacking"], E: ["hacking"] },
+      repMult: 2, bnRepMult: 0.75,
+    };
+    const rich = planDonations({ ...base, cash: 1e15 });
+    assert(JSON.stringify(rich.map((d) => d.faction)) === '["B","A"]',
+      `B (10k short) then A; C is past its target, D lacks favor, E has no target: ${JSON.stringify(rich)}`);
+    assert(Math.abs(rich[0].amount - 10001 * perRep) < 1, `B: 10001 rep at ${perRep}/rep, got ${rich[0].amount}`);
+    const poor = planDonations({ ...base, cash: 12001 * perRep / DONATE_BUDGET_FRACTION });
+    assert(poor.length === 2 && Math.abs(poor[1].amount - 2000 * perRep) < 1,
+      `the budget finishes B and puts the last 2000 rep's worth into A: ${JSON.stringify(poor)}`);
+  },
+
+  // End to end: the donation lands in the aug pass and the work goes elsewhere.
+  "a favored faction is donated to its target and never worked": async () => {
+    const mods = await loadScripts();
+    const r = await driveSing(mods, {
+      ticks: 1, p: player({ factions: ["Bachman & Associates", "CyberSec"], money: 1e13 }),
+      favor: { "Bachman & Associates": 150 },
+      augs: { ...SELLS, "Bachman & Associates": [{ name: "SmartJaw", rep: 375e3, price: 1e15 }] },
+    });
+    const d = r.calls.filter((c) => c.startsWith("donateToFaction:"));
+    assert(d.length === 1 && d[0].startsWith("donateToFaction:Bachman & Associates,"), `one donation: ${d}`);
+    const amt = Number(d[0].split(",")[1]);
+    assert(Math.abs(amt - 375001 / 0.75 * 1e6) < 1, `375001 rep at 1.33m per rep, got ${amt}`);
+    assert(!r.calls.some((c) => c.startsWith("workForFaction:Bachman")), "not worked");
+    assert(r.calls.some((c) => c.startsWith("workForFaction:CyberSec")), "the work moved on");
+    assert(r.ns._log.some((l) => l.includes("donate: $")), `logged: ${r.ns._log}`);
+  },
+
+  // The price comes from the game, never a guess: without SF5 the read throws,
+  // and nothing is donated.
+  "no Source-File 5, no donation - and one warning": async () => {
+    const mods = await loadScripts();
+    const r = await driveSing(mods, {
+      ticks: 7, p: player({ factions: ["Bachman & Associates", "CyberSec"], money: 1e13 }),
+      favor: { "Bachman & Associates": 150 },
+      augs: { ...SELLS, "Bachman & Associates": [{ name: "SmartJaw", rep: 375e3, price: 1e15 }] },
+      extra: { getBitNodeMultipliers: () => { throw new Error("Requires Source-File 5 to run."); } },
+    });
+    assert(r.count("donateToFaction") === 0, "no multiplier, no donation");
+    assert(r.ns._log.filter((l) => l.includes("WARN: bitnode mults failed")).length === 1, `warned once: ${r.ns._log}`);
+  },
+
+  // Ten augs already unlocked: the batch lacks CASH, and a donation would only
+  // push it further away.
+  "no donation while the batch is waiting on cash, not rep": async () => {
+    const mods = await loadScripts();
+    const ten = Array.from({ length: 10 }, (_, i) => ({ name: `aug${i}`, rep: 1, price: 1e15 }));
+    const r = await driveSing(mods, {
+      ticks: 1, p: player({ factions: ["Bachman & Associates", "CyberSec"], money: 1e13 }),
+      rep: { CyberSec: 1e3 }, favor: { "Bachman & Associates": 150 },
+      augs: { CyberSec: ten, "Bachman & Associates": [{ name: "SmartJaw", rep: 375e3, price: 1e15 }] },
+    });
+    assert(r.count("donateToFaction") === 0, "saved for the batch");
+    assert(r.ns._log.some((l) => l.includes("donate: holding - 10 augs unlocked")), `why: ${r.ns._log}`);
   },
 
   // ------------------------------------------------------------ augs ----

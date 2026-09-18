@@ -118,16 +118,20 @@ export const GANG_KARMA_TARGET = -54000;
  *   so Bachman being in Aevum does not matter. The company's name is also its
  *   faction's, which is how the step learns the faction's augs are all owned
  *   and skips the company too.
+ * - Then the hacking factions, HIGHEST first: each one's shop largely covers
+ *   the lower ones' augs, so rep earned high up buys what CyberSec sells too,
+ *   and the lower factions' targets drop as those augs are bought. An aug is
+ *   bought from whichever joined faction has the most rep (planAugBuys).
  */
 export const WORK_ORDER = [
   { faction: "Tian Di Hui" },
   { company: "Bachman & Associates", field: "Software", rep: 400e3, hacking: 225 },
   { faction: "Bachman & Associates" },
-  { faction: "CyberSec" },
-  { faction: "NiteSec" },
-  { faction: "The Black Hand" },
-  { faction: "BitRunners" },
   { faction: "Daedalus" },
+  { faction: "BitRunners" },
+  { faction: "The Black Hand" },
+  { faction: "NiteSec" },
+  { faction: "CyberSec" },
 ];
 /**
  * Re-apply to an employer every this many ticks while working there. It is the
@@ -169,6 +173,27 @@ export const NFG_LEVEL_MULT = 1.14;
  * for them (AugmentationHelpers.ts getAugCost).
  */
 export const AUG_SKIP_FACTIONS = ["Shadows of Anarchy"];
+
+// ----------------------------------------------------------------- donate ---
+
+/**
+ * A faction whose favor has reached getFavorToDonate() (150 in BN4) sells rep
+ * for money, so it is DONATED to its rep target rather than worked for it - the
+ * work moves on down WORK_ORDER. Favor only changes at an install
+ * (Faction.prestigeAugmentation), so what is read once per cycle holds for it.
+ *
+ * Donations spend at most this fraction of cash per AUGS pass, and only while
+ * rep is what the batch lacks: once queued + rep-unlocked augs reach
+ * MIN_AUG_BATCH, cash is the constraint and it is saved for the batch.
+ */
+export const DONATE_BUDGET_FRACTION = 0.5;
+/**
+ * rep = $ / DonateMoneyToRepDivisor * mults.faction_rep * FactionWorkRepGain
+ * (src/Faction/formulas/donation.ts). The divisor is CONSTANTS' 1e6.
+ */
+export const DONATE_MONEY_PER_REP = 1e6;
+// FactionWorkRepGain (BN4: 0.75) is read from the game by the BN_MULTS body,
+// not configured - see sing.js.
 
 // ----------------------------------------------------------------- travel ---
 
