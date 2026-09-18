@@ -430,6 +430,9 @@ export const tests = {
       SWEEP: 2.70, INSTALL: 6.60,
       // The idle money crime: getCrimeStats and getCrimeChance, 5.00 each.
       CRIME_STATS: 6.60, CRIME_CHANCE: 6.60,
+      // Backdoors: the route read (scan + getServer + two 0.05 reads) is split
+      // from connect + installBackdoor, which together would be 7.90.
+      BACKDOORS: 3.90, BACKDOOR: 5.60,
     };
     const got = bodiesOf("sing/sing");
     assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),

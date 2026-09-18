@@ -53,6 +53,8 @@ async function driveSing(mods, {
   // sells the implant by default, so its rep target is real rather than 1e6.
   augs = { "Tian Di Hui": [{ name: "Neuroreceptor Management Implant", rep: 75e3, price: 5e8 }] },
   installed = [],
+  // Extra getServer records by host - the backdoor pass reads them.
+  servers = {},
 } = {}) {
   const calls = [];
   let current = work;
@@ -112,11 +114,13 @@ async function driveSing(mods, {
     getCrimeStats: (c) => ({ Shoplift: { money: 15e3, time: 2e3 }, Homicide: { money: 45e3, time: 3e3 } })[c],
     getCrimeChance: (c) => ({ Shoplift: 0.9, Homicide: 0.3 })[c],
     installAugmentations: rec("installAugmentations", () => (queued.length ? undefined : false)),
+    connect: rec("connect", () => true),
+    installBackdoor: rec("installBackdoor", async () => {}),
     ...api,
   };
   const ns = makeNs({
     files: { ...files },
-    servers: { home: { moneyAvailable: 1e9 } },
+    servers: { home: { moneyAvailable: 1e9 }, ...servers },
     extra: {
       singularity,
       enums: { CrimeType: { shoplift: "Shoplift", homicide: "Homicide" } },
@@ -124,6 +128,7 @@ async function driveSing(mods, {
       getPlayer: () => p,
       getResetInfo: () => ({ currentNode: 4, ownedSF }),
       getFavorToDonate: () => 150,
+      getServer: (h) => ({ hostname: h, ...servers[h] }),
       getBitNodeMultipliers: () => ({ FactionWorkRepGain: 0.75 }),
       hasTorRouter: rec("hasTorRouter", () => tor),
       // The pre-install contract sweep: started, and finished by the next look.
@@ -781,6 +786,53 @@ export const tests = {
     assert(effectiveShareFraction("off", "") === 0, "the marker still decides when not held");
   },
 
+  // ------------------------------------------------------------ backdoor ----
+
+  // installBackdoor acts on the TERMINAL's server, so the route is walked hop by
+  // hop from home, and the terminal is put back on home after. One per pass, and
+  // every server left behind says why.
+  "a ready faction server is backdoored along its route, and the terminal comes home": async () => {
+    const mods = await loadScripts();
+    const r = await driveSing(mods, {
+      ticks: 1,
+      servers: {
+        CSEC: { hasAdminRights: true, requiredHackingSkill: 50, hackTime: 40e3 },
+        // Ready too, and queued behind CSEC: one backdoor per pass.
+        "avmnite-02h": { hasAdminRights: true, requiredHackingSkill: 200, hackTime: 4e3 },
+        "I.I.I.I": { hasAdminRights: true, requiredHackingSkill: 1e9 },
+        run4theh111z: { hasAdminRights: true, requiredHackingSkill: 1, hackTime: 1e9 },
+      },
+      extra: {
+        scan: (h) => ({ home: ["n00dles"], n00dles: ["home", "CSEC", "avmnite-02h", "I.I.I.I", "run4theh111z"] })[h] ?? [],
+      },
+    });
+    const seq = r.calls.filter((c) => /^(connect|installBackdoor):/.test(c));
+    assert(JSON.stringify(seq) === JSON.stringify(
+      ["connect:home", "connect:n00dles", "connect:CSEC", "installBackdoor:", "connect:home"]),
+    `wrong route or no return home: ${seq}`);
+    const log = r.ns._log.join(" | ");
+    assert(log.includes("installed on CSEC"), `no success line: ${log}`);
+    for (const why of ["avmnite-02h next pass", "I.I.I.I needs hacking", "run4theh111z takes"]) {
+      assert(log.includes(why), `missing wait reason "${why}": ${log}`);
+    }
+  },
+
+  "the BACKDOOR body refuses w0r1d_d43m0n and always leaves the terminal on home": async () => {
+    const AsyncFunction = (async () => {}).constructor;
+    const run = new AsyncFunction("ns", "args", bodies().BACKDOOR);
+    const hops = [];
+    const ns = { singularity: {
+      connect: (h) => { hops.push(h); return h !== "n00dles"; },
+      installBackdoor: async () => { hops.push("BACKDOOR"); },
+    } };
+    let msg = "";
+    await run(ns, ["home", "The-Cave", "w0r1d_d43m0n"]).catch((e) => { msg = e.message; });
+    assert(msg.includes("w0r1d_d43m0n") && hops.length === 0, `w0r1d_d43m0n was not refused: ${hops}`);
+    assert(await run(ns, ["home", "n00dles", "CSEC"]) === false, "a failed hop must return false");
+    assert(JSON.stringify(hops) === JSON.stringify(["home", "n00dles", "home"]),
+      `a failed hop must not backdoor, and must end on home: ${hops}`);
+  },
+
   // Always on means it runs where singularity does not exist. Exiting would have
   // boot relaunch it every tick forever; it must park instead, and stop calling.
   "no Source-File 4 parks without exiting and calls nothing more": async () => {
@@ -804,7 +856,7 @@ export const tests = {
     const r = await driveSing(mods, { ticks: 6, run: () => 0 });
     const warns = r.ns._log.filter((l) => l.includes("WARN"));
     const tags = warns.map((l) => l.match(/WARN: (\w+) failed/)[1]).sort();
-    assert(JSON.stringify(tags) === JSON.stringify(["invites", "read", "tor", "upgrade"]),
+    assert(JSON.stringify(tags) === JSON.stringify(["backdoors", "invites", "read", "tor", "upgrade"]),
       `each failing body should warn exactly once, got ${tags}`);
     assert(!r.ns._log.some((l) => l.includes("Parked")), "a RAM failure must never park the subsystem");
   },

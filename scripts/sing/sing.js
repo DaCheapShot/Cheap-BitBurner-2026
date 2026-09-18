@@ -2,13 +2,13 @@ import {
   SING_TICK_MS, UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
   PROG_BUDGET_FRACTION, JOIN_DENY,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
-  WORK_ORDER, MIN_AUG_BATCH, NFG,
+  WORK_ORDER, MIN_AUG_BATCH, NFG, BACKDOOR_EVERY, BACKDOOR_MAX_MS,
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTarget, repTargets, planAugBuys,
   canDonate, donationPerRep, bestCrime,
 } from "./plan.js";
-import { rpc } from "scripts/rpc.js";
+import { rpcWithin, RPC_TIMEOUT_MS } from "scripts/rpc.js";
 
 /**
  * The singularity supervisor: a cheap resident loop whose singularity calls all
@@ -51,6 +51,12 @@ import { rpc } from "scripts/rpc.js";
  * that reaches it, and the donations are made immediately before the buys - so
  * money is never donated without a batch bought behind it. Favor moves only at
  * an install, so each faction's is read once per process.
+ *
+ * BACKDOORS FOR INVITES. Every BACKDOOR_EVERY ticks, one faction server that is
+ * rooted and in hacking range is backdoored, and its invite arrives through the
+ * JOIN pass. installBackdoor takes hackTime / 4 - far past rpc's 10 s - so that
+ * one call gets a timeout of its own and the loop waits it out; a server slower
+ * than BACKDOOR_MAX_MS waits for a later pass instead.
  *
  * ALWAYS ON. boot starts this unconditionally, because singularity has no 0 GB
  * availability check to gate on. Without Source-File 4 outside BN4 every body
@@ -296,6 +302,50 @@ return pid;
  */
 const INSTALL = `return ns.singularity.installAugmentations("/scripts/boot.js");`;
 
+/**
+ * What is left to backdoor: every BACKDOOR_HOSTS entry on the network without
+ * a backdoor, with its route from home. The BFS is connectme.js's, copied
+ * rather than imported - importing it would bill connectme's getServer and
+ * tprint to this body. The network is a tree rooted at home, so the parent map
+ * gives THE route.
+ */
+const BACKDOORS = `
+import { BACKDOOR_HOSTS } from "/scripts/sing/config.js";
+const parent = { home: null };
+const queue = ["home"];
+for (let i = 0; i < queue.length; i++) {
+  for (const n of ns.scan(queue[i])) if (!(n in parent)) { parent[n] = queue[i]; queue.push(n); }
+}
+const left = [];
+for (const host of BACKDOOR_HOSTS) {
+  if (!(host in parent)) continue;
+  const s = ns.getServer(host);
+  if (s.backdoorInstalled) continue;
+  const route = [];
+  for (let h = host; h !== null; h = parent[h]) route.unshift(h);
+  left.push({ host, route, root: s.hasAdminRights, need: s.requiredHackingSkill, ms: ns.getHackTime(host) / 4 });
+}
+return { level: ns.getHackingLevel(), left };
+`;
+
+/**
+ * Walk the route hop by hop from home - always legal, since each hop is the
+ * last one's neighbour - and backdoor the end of it. installBackdoor acts on
+ * the TERMINAL's current server, so this moves the player's terminal; the
+ * finally puts it back on home even when a hop or the backdoor throws.
+ * w0r1d_d43m0n is refused here too: its backdoor ends the BitNode.
+ */
+const BACKDOOR = `
+if (args.includes("w0r1d_d43m0n")) throw new Error("refusing w0r1d_d43m0n - its backdoor ends the BitNode");
+try {
+  for (const h of args) if (!ns.singularity.connect(h)) return false;
+  await ns.singularity.installBackdoor();
+  return true;
+} finally {
+  ns.singularity.connect("home");
+}
+`;
+
 /** [[faction, $], ...] - returns the factions the game accepted. */
 const DONATE = `
 const done = [];
@@ -346,6 +396,16 @@ function joinLine(invites, joined) {
   return `the game refused ${invites.filter((f) => !denied.includes(f)).join(", ")}`;
 }
 
+/** Why each server not backdoored this pass is still waiting. */
+function backdoorWaitLine(ns, level, waiting) {
+  return waiting.map((b) => {
+    if (!b.root) return `${b.host} not rooted`;
+    if (b.need > level) return `${b.host} needs hacking ${b.need} (have ${level})`;
+    if (b.ms <= BACKDOOR_MAX_MS) return `${b.host} next pass`;
+    return `${b.host} takes ${ns.format.time(b.ms)} (over ${ns.format.time(BACKDOOR_MAX_MS)})`;
+  }).join(", ");
+}
+
 function describe(ns, a, r) {
   if (a.kind === "gym") return `gym ${a.stat} at ${a.gym}`;
   if (a.kind === "crime" && a.money) return `crime ${a.crime} for money - no faction or company work left`;
@@ -390,9 +450,9 @@ export async function main(ns) {
    * that body's next success, so a recurrence is reported again.
    */
   const warned = {};
-  const call = async (tag, body, ...args) => {
+  const callWithin = async (ms, tag, body, ...args) => {
     try {
-      const v = await rpc(ns, body, ...args);
+      const v = await rpcWithin(ns, ms, body, ...args);
       delete warned[tag];
       return v;
     } catch (e) {
@@ -412,6 +472,7 @@ export async function main(ns) {
       return null;
     }
   };
+  const call = (tag, body, ...args) => callWithin(RPC_TIMEOUT_MS, tag, body, ...args);
 
   log("singularity supervisor up");
 
@@ -428,6 +489,9 @@ export async function main(ns) {
   let favorNeed = 0;
   let bnRepMult = null;
   let crimeStats = null;
+  // Backdoors vanish at an install, which kills this process - so once none is
+  // left, none is left for the life of the process.
+  let backdoorsDone = false;
 
   /**
    * How the batch may buy rep, or null. The price needs the node's rep
@@ -535,6 +599,29 @@ export async function main(ns) {
     }
   };
 
+  /**
+   * Backdoor at most one faction server - the loop waits the whole install out,
+   * and one per pass keeps that wait to a single server's.
+   */
+  const backdoorPass = async () => {
+    const b = await call("backdoors", BACKDOORS);
+    if (!b) return;
+    if (!b.left.length) {
+      backdoorsDone = true;
+      log("backdoor: every faction server backdoored");
+      return;
+    }
+    const next = b.left.find((x) => x.root && x.need <= b.level && x.ms <= BACKDOOR_MAX_MS);
+    const waiting = b.left.filter((x) => x !== next);
+    if (next) {
+      const ok = await callWithin(next.ms + RPC_TIMEOUT_MS, "backdoor", BACKDOOR, ...next.route);
+      const line = ok ? `installed on ${next.host}` : ok === false ? `could not reach ${next.host}` : null;
+      if (line) log(`backdoor: ${line}`);
+      if (ok) ns.tprint(`sing: backdoor ${line}`);
+    }
+    if (waiting.length) log(`backdoor: waiting - ${backdoorWaitLine(ns, b.level, waiting)}`);
+  };
+
   /** Write the share hold only on a change, and say so - it moves RAM network-wide. */
   const holdShare = (factionWork) => {
     const want = factionWork ? "" : "hold";
@@ -615,6 +702,10 @@ export async function main(ns) {
       }
       holdShare(started ? action.kind === "faction" : r.work?.type === "FACTION");
     }
+
+    // Last: the backdoor can hold the loop for BACKDOOR_MAX_MS, and this tick's
+    // work is already chosen and running by now.
+    if (!backdoorsDone && tick % BACKDOOR_EVERY === 0) await backdoorPass();
 
     tick++;
     await ns.sleep(SING_TICK_MS);

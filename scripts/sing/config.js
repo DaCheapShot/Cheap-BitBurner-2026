@@ -203,6 +203,30 @@ export const DONATE_MONEY_PER_REP = 1e6;
 // FactionWorkRepGain (BN4: 0.75) is read from the game by the BN_MULTS body,
 // not configured - see sing.js.
 
+// --------------------------------------------------------------- backdoor ---
+
+/**
+ * The servers whose backdoor ALONE earns a faction invite - CyberSec, NiteSec,
+ * The Black Hand, BitRunners (haveBackdooredServer in FactionInfo.tsx; the same
+ * four connectme.js --factions reports). Most of WORK_ORDER's hacking factions.
+ * Lowest required hacking first, which is the order they come in reach.
+ *
+ * w0r1d_d43m0n is deliberately absent - its backdoor ENDS the BitNode, and that
+ * stays the user's call. The BACKDOOR body refuses it as well. fulcrumassets is
+ * absent because Fulcrum also wants employment and company rep.
+ *
+ * LIVE: read inside the BACKDOORS body.
+ */
+export const BACKDOOR_HOSTS = ["CSEC", "avmnite-02h", "I.I.I.I", "run4theh111z"];
+/** Ticks between backdoor checks - every 2 minutes at the 20 s tick. */
+export const BACKDOOR_EVERY = 6;
+/**
+ * installBackdoor takes hackTime / 4 (Singularity.ts) and the supervisor's loop
+ * waits it out, so a backdoor slower than this is left for a later pass - hack
+ * time falls as hacking level rises. Frozen: read by sing.js.
+ */
+export const BACKDOOR_MAX_MS = 120000;
+
 // ----------------------------------------------------------------- travel ---
 
 /**

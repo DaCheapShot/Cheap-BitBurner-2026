@@ -114,7 +114,18 @@ export async function main(ns) {
  * @param {...(string|number|boolean)} args passed through as `args` in the body
  * @returns {Promise<any>} whatever the body returned, via JSON
  */
-export async function rpc(ns, body, ...args) {
+export function rpc(ns, body, ...args) {
+  return rpcWithin(ns, RPC_TIMEOUT_MS, body, ...args);
+}
+
+/**
+ * rpc() with its own timeout, for a body that legitimately awaits longer than
+ * RPC_TIMEOUT_MS - sing's BACKDOOR waits out installBackdoor's hackTime / 4. The
+ * caller blocks for all of it, and that is the point: a transient left running
+ * in the background would hold its RAM beside the caller's next body, and one
+ * that returned early would take its pending backdoor down with it.
+ */
+export async function rpcWithin(ns, ms, body, ...args) {
   // Concurrent calls from one process would share a reply port and swap
   // answers. The game's own concurrency check does not catch this, because
   // nextWrite() is not a blocking netscript call - so the guard has to be here.
@@ -138,9 +149,9 @@ export async function rpc(ns, body, ...args) {
       throw new Error(`rpc: ns.run returned 0 for ${file} - no free RAM on home, or the body does not compile`);
     }
 
-    await Promise.race([handle.nextWrite(), ns.asleep(RPC_TIMEOUT_MS)]);
+    await Promise.race([handle.nextWrite(), ns.asleep(ms)]);
     if (handle.empty()) {
-      throw new Error(`rpc: ${file} (pid ${pid}) wrote nothing within ${RPC_TIMEOUT_MS}ms`);
+      throw new Error(`rpc: ${file} (pid ${pid}) wrote nothing within ${ms}ms`);
     }
 
     const out = JSON.parse(handle.read());

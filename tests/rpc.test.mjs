@@ -155,6 +155,16 @@ export const tests = {
     assert(msg.includes("wrote nothing"), `expected a timeout, got: ${msg}`);
   },
 
+  // sing's BACKDOOR waits out installBackdoor's hackTime / 4, far past 10 s.
+  "rpcWithin waits its own timeout, and rpc keeps the default": async () => {
+    const { rpc } = await loadScripts();
+    const msgOf = (p) => p.then(() => "", (e) => e.message);
+    const own = await msgOf(rpc.rpcWithin(rpcNs({ neverReplies: true }), 123456, "return 1;"));
+    assert(own.includes("within 123456ms"), `the caller's timeout was not used: ${own}`);
+    const dflt = await msgOf(rpc.rpc(rpcNs({ neverReplies: true }), "return 1;"));
+    assert(dflt.includes(`within ${rpc.RPC_TIMEOUT_MS}ms`), `rpc lost its default: ${dflt}`);
+  },
+
   "a late reply from a timed-out call is not read as the next call's answer": async () => {
     const { rpc } = await loadScripts();
     const ns = rpcNs();
@@ -225,10 +235,10 @@ export const tests = {
     const per = (n) => bodies.filter(([f]) => f === n).length;
     assert(per("gang/gang") === 5, `gang.js should have 5 bodies (tick, war, ascend, equip, create), found ${per("gang/gang")}`);
     assert(per("continuous/lib/math") === 1, `continuous/lib/math.js should have 1 body, found ${per("continuous/lib/math")}`);
-    assert(per("sing/sing") === 24,
-      `sing.js should have 24 bodies (upgrade, tor, progs, invites, join, read, gym, crime, faction, ` +
+    assert(per("sing/sing") === 26,
+      `sing.js should have 26 bodies (upgrade, tor, progs, invites, join, read, gym, crime, faction, ` +
         `crime stats, crime chance, company, apply, travel, owned, faction augs, prereq, aug info, buy, favor, bitnode mults, sweep, ` +
-        `install, donate), found ${per("sing/sing")}`);
+        `install, backdoors, backdoor, donate), found ${per("sing/sing")}`);
     assert(per("contracts/contracts") === 3, `contracts.js should have 3 bodies (find, submit, dummy), found ${per("contracts/contracts")}`);
     for (const [name, body] of bodies) {
       // A ${} interpolation cannot be evaluated here, so it is rejected
