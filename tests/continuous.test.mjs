@@ -4284,6 +4284,26 @@ export const tests = {
       "the fraction should reach the port the workers peek");
   },
 
+  // sing/sing.js holds share off while the player is not doing faction work -
+  // the only work the bonus multiplies. The hold must reach the fleet exactly as
+  // "off" does, while the user's own fraction in the marker survives untouched.
+  "a sing hold turns share off without touching the marker": async () => {
+    const { ns, pool, mods } = await makePool({ home: 1024 });
+    const { serviceShare } = mods["lib/share"];
+    const { SHARE_PORT, SHARE_MARKER, SHARE_HOLD_MARKER } = mods["config"];
+    ns._files[SHARE_MARKER] = "0.25";
+    ns._files["/scripts/share.js"] = "x";
+
+    ns._files[SHARE_HOLD_MARKER] = "hold";
+    assert(serviceShare(ns, pool, () => {}) === null, "a hold with nothing running should launch nothing");
+    assert(Number(ns.getPortHandle(SHARE_PORT).peek()) === 0, "the hold must reach the port as 0");
+    assert(ns._files[SHARE_MARKER] === "0.25", "the user's fraction must survive the hold");
+
+    ns._files[SHARE_HOLD_MARKER] = "";
+    serviceShare(ns, pool, () => {});
+    assert(Number(ns.getPortHandle(SHARE_PORT).peek()) === 0.25, "releasing the hold restores the fraction");
+  },
+
   // A host bought by cloud.js while the batcher runs is admitted by
   // ServerPool.sync and gets the batch workers - but scripts/deploy.js only
   // runs when root.js roots something NEW, and a purchased server arrives

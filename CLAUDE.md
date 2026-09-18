@@ -51,6 +51,7 @@ run scripts/boot.js --targets 5         # continuous only; the shotgun ignores i
 run scripts/boot.js --once --no-cloud
 run scripts/boot.js --no-formulas       # force the *Analyze math path
 run scripts/boot.js --no-contracts      # do not solve coding contracts
+run scripts/boot.js --no-sing           # do not run the singularity supervisor
 ```
 
 **Boot chooses between TWO batchers**, and the choice is a flag, not a marker - retype it if
@@ -78,6 +79,7 @@ run scripts/sharemode.js 0.5            # retune live, no restart
 run scripts/gang/gang.js --create "Slum Snakes"  # found the gang, once, by hand
 run scripts/gang/gang.js                # the gang supervisor (boot starts it too)
 run scripts/contracts/contracts.js      # one contract sweep (boot runs it every tick)
+run scripts/sing/sing.js                # the singularity supervisor (boot starts it too)
 run scripts/contracts/contracts.js --dummy   # mint one contract of every type and solve it
 run scripts/contracts/contracts.js --forget  # clear the skip list, after fixing a solver
 run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
@@ -348,6 +350,10 @@ editor's RAM panel when one moves.
 | ↳ find body | transient: every .cct with its type and data | 12.00 |
 | ↳ submit body | transient: `attempt` and nothing else | 11.60 |
 | ↳ dummy body | transient: `--dummy` self-test minting | 3.60 |
+| `sing/config.js` | singularity tunables, `SING_SERVICE`, `JOIN_DENY` | 0 |
+| `sing/plan.js` | `chooseAction` + `sameAsCurrent` — every decision, pure | 0 |
+| `sing/sing.js` | entry: resident supervisor; every singularity call is an rpc body | 2.60 |
+| ↳ seventeen bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, buy | 3.60–6.60 |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
@@ -897,6 +903,124 @@ that is *supposed* to exit, so there is nothing to gate on. boot checks `isUp` f
 not for duplicates but for **stacking**: a hand-run `--dummy` can still be going, and a second
 sweep on top of it would have both attempting the same contracts. It runs last in the tick
 because `runToCompletion` blocks. `--no-contracts` opts out.
+
+### The singularity subsystem (`scripts/sing/`)
+
+BitNode 4 automation: home RAM, TOR and darkweb programs, faction invites, the Tian Di Hui trip,
+and the player's own work (company and faction rep; gym and Homicide only for an opted-in gang). Self-contained
+like `gang/`: it imports only `scripts/rpc.js` and re-exports one 0 GB constant from
+`scripts/config.js` (`SHARE_HOLD_MARKER`), and `boot.js` reads one path constant out of it.
+
+**Many small bodies, not a few fat ones.** `sing.js` holds no singularity call (2.60), and
+`rpc()` allows one call in flight per process - so the free RAM the subsystem needs is the
+**max** over its bodies, never the sum. `commitCrime` alone is 5.00, so the CRIME body at
+**6.60** is the floor of that max, and every other body is held at or under it: work was one
+12.70 body (stop, focus, gym, crime, faction together) and joining was 7.60 until each was
+split. Splitting *below* 6.60 lowers nothing and costs a round trip, which is why UPGRADE (6.25)
+and READ stay whole - READ sits exactly ON the ceiling since `getCompanyRep` joined it, so the
+next read it needs is a second body, not a bigger one. `tests/ram.test.mjs` prices every body
+through `bodiesOf()` - the only place a body is priced before the game does it - and pins all
+seventeen.
+
+The split also retired two calls outright: `gymWorkout`, `commitCrime` and `workForFaction` all
+take `focus` as an argument, so `setFocus` is never needed, and starting work finishes the
+previous work, so `stopAction` is not either.
+
+**Always on, and it PARKS rather than exits.** Singularity has no 0 GB availability check -
+`getResetInfo` is 1.00 and boot is pinned at 3.50 - so boot cannot gate it the way it gates the
+gang on `inGang()`. Without Source-File 4 outside BN4, every call throws `checkSingularityAccess`'s
+"requires Source-File 4"; `sing.js` matches that **message** and sleeps forever. Exiting would
+have `ensureService` relaunch it every tick, and matching the message rather than "the first call
+failed" is what keeps a no-RAM blip at startup from idling it for the whole BitNode. The cost of
+always-on where it cannot work is 2.60 GB; `--no-sing` reclaims it.
+
+**One `Player.currentWork` slot, and only the three action bodies touch it.** Every
+work-starting call finishes whatever held it, so a work call anywhere else - a PROGS body
+"helpfully" writing a program - cancels the faction session every fourth tick. A test bans the
+starters everywhere except their own body. `createProgram` is not used at all: buying the program
+is cheaper than the hours writing it takes.
+
+**An action already running is never restarted.** `CrimeWork.process()` never returns true - it
+loops `commit()` - so crime is continuous, and `new CrimeWork()` zeroes `unitCompleted`. Homicide
+(3 s) restarted every 20 s tick loses about a seventh; any crime longer than the tick, restarted
+every tick, completes **never** - with a log that happily says "crime" forever. READ returns
+`getCurrentWork()`, `plan.js`'s `sameAsCurrent` compares, and an action body runs only on a
+difference. Faction work survives a restart, which is why the naive version looks right until
+crime matters.
+
+**`getResetInfo().ownedSF` is a Map, and JSON turns a Map into `{}`** - the same class as the
+gang's `Infinity` and the contracts' `bigint`. READ collapses it to `hasSF2` inside the
+transient; a test asserts the body touches it only through `.has()`.
+
+**A warning is logged once per body, not per tick**, and cleared on that body's next success.
+"No free RAM on home" is the expected state for a fresh BitNode's first minutes, and a line a
+tick about it buries the warning that matters. `HOME_RESERVE_GB` was left at 32 deliberately: the
+worst overlap of awaited transients from three processes (contracts find 12.00 + gang equip
+14.70 + CRIME 6.60) is 33.30, and the failure that 1.30 GB buys is one deduped WARN and a retry.
+
+**The gang grind is opt-in, and LIVE.** `GRIND_GANG_KARMA` defaults off: -54000 karma is ~18000
+successful homicides, ~15 hours even at 100% success, that earn no rep anywhere. The gym goes with
+it - Homicide's success and the crime factions' combat bars are all the combat stats serve here.
+The flag is read inside the READ body, not by `plan.js`: a body re-imports `config.js` every run,
+so flipping it takes effect next tick, while anything the resident process imports (the cadences,
+`WORK_ORDER`) is frozen until sing restarts. The tick is 20 s and every cadence is counted in
+ticks, sized so upgrade and join run each minute and programs and promotions every two - change
+the tick and re-derive them.
+
+**Rep work follows `WORK_ORDER`, and a step is a faction OR a company.** Tian Di Hui first, for
+the Neuroreceptor Management Implant, which it alone sells and which removes the 0.8
+unfocused-work penalty. Then Bachman & Associates the **company**: its faction's augs raise rep gain, and
+the invite needs employment there plus `CorpFactionRepRequirement` = 400k company rep. The step
+is skipped below hacking 225 (intern `reqdHacking` 1 + Bachman's `jobStatReqOffset` 224) rather
+than applied for every tick. Promotion is re-applying: `applyForJob` hands out the highest
+position the player qualifies for and touches only `Player.jobs`, so APPLY runs every
+`PROMOTE_EVERY` ticks mid-shift and is not an action body. Neither `applyToCompany` nor
+`workForCompany` checks the city, so Bachman being in Aevum does not matter.
+
+**The only trip is Tian Di Hui's**, whose invite needs the player standing in Chongqing, New Tokyo
+or Ishima. Out from Sector-12 once hacking is 50 with $1m *plus both fares* in hand; back once
+joined, because the gym and Sector-12's own invite are Sector-12-only. Leaving only from home and
+returning only from Chongqing means a trip made by hand is never undone. Chongqing's own invite
+arrives while waiting and is declined by `JOIN_DENY`. A flight skips that tick's work: READ's
+player still stands in the old city.
+
+**Share follows faction work.** The share bonus is in the three faction formulas in
+`src/PersonObjects/formulas/reputation.ts` and nowhere else - company work never reads it - so
+share during the gym, crime or company work is batcher RAM spent on nothing. `sing.js` writes
+`SHARE_HOLD_MARKER` on each change: `"hold"`, or `""` while faction work runs. Both managers read
+share through `effectiveShareFraction(marker, hold)` in `scripts/config.js`, so the hold reaches
+both batchers or neither, and the user's fraction in `/data/share.txt` survives it. A missing or
+empty hold file is no hold, so without sing share behaves exactly as before - and the two ways
+sing can stop while holding both release it: a parked `sing.js` clears it, and so does
+`boot.js --no-sing`.
+
+`JOIN_DENY` is the four city factions Sector-12 is enemies with (`FactionInfo.tsx`), because
+joining one locks out its enemies forever; phase 1 accepts every other invite rather than pay 3.00
+GB for `getFactionInviteRequirements`.
+
+**A faction is worked to the rep its unbought augs need, and no further.** Every `AUGS_EVERY`
+ticks the aug pass reads what is owned (`getOwnedAugmentations(true)` - installed AND queued),
+what each faction sells, and each unowned aug's rep and price; `repTargets` makes each faction's
+target the dearest rep requirement left, and **0 when everything is bought, which skips it** -
+the live bug this fixed was Tian Di Hui being farmed with every aug already purchased. NeuroFlux
+never counts: nearly every faction sells it at an ever-rising level, so counting it would make
+every target unreachable. A faction not read yet falls back to `FACTION_REP_TARGET`, and unknown
+never reads as done. The company step uses its faction's target too, so Bachman is not worked for
+an invite that would buy nothing.
+
+**Augs are bought as a BATCH, or not at all** - the user's rule. `planAugBuys` takes every aug
+that is rep-unlocked at a joined faction, **dearest first** (each queued aug multiplies every later
+price by 1.9 - `getGenericAugmentationPriceMultiplier` - so cheap-first pays the multiplier on the
+expensive ones), skipping any that do not fit or whose prerequisite is neither owned nor earlier in
+the batch; then NeuroFlux levels fill, each x1.14 dearer in money AND rep. It returns the batch only
+when queued + batch reaches `MIN_AUG_BATCH` (10) and cash covers all of it. 1.9 is the ceiling -
+Source-File 11 only lowers it - so the plan over-states and can never buy a batch it cannot finish.
+Whatever is left then goes on home RAM (UPGRADE at fraction 1): an install resets money and keeps
+home RAM. Shadows of Anarchy is never bought from - its augs price off their own ladder. Installing
+is still manual. Each read is its own body: together they would be 14.10 GB. What each faction sells
+and each aug's prerequisites are fixed for the node and kept in memory; prices and the owned list
+are re-read every pass. READ now runs FIRST in the tick, so the batch gets the cash before the
+normal 25% home upgrade can take it.
 
 ### Invariants that look arbitrary but aren't
 

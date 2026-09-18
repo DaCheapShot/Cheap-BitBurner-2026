@@ -391,6 +391,22 @@ export const tests = {
       `--no-gang should suppress it, launched: ${r.launched}`);
   },
 
+  // Always on, unlike the gang: there is no 0 GB availability check to gate on,
+  // and none is needed - sing.js parks without Source-File 4 instead of exiting,
+  // so there is no relaunch loop for a gate to prevent.
+  "boot starts the singularity supervisor by default, once": async () => {
+    const r = await runBoot({ ticks: 4 });
+    const starts = r.launched.filter((f) => f === "scripts/sing/sing.js").length;
+    assert(starts === 1, `sing should be started once and then adopted, got ${starts} starts`);
+    assert(r.procs.some((p) => p.filename === "scripts/sing/sing.js"), "it should still be up");
+  },
+
+  "--no-sing leaves singularity alone": async () => {
+    const r = await runBoot({ args: ["--no-sing"], ticks: 3 });
+    assert(!r.launched.includes("scripts/sing/sing.js"),
+      `--no-sing should suppress it, launched: ${r.launched}`);
+  },
+
   // The contract solver is a TRANSIENT, not a service - the opposite of the gang
   // supervisor above. It does one sweep and exits, so boot runs it EVERY tick
   // and nothing is held in between. A service would pin 4.10 GB forever to

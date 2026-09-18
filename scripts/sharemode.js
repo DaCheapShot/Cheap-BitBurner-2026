@@ -1,7 +1,7 @@
 import { buildWorkerPool, shareRam } from "./prepper.js";
 import {
   SHARE_MARKER, SHARE_PORT, SHARE_FRACTION, SHARE_MAX_FRACTION,
-  shareFractionFrom, shareBonusFor,
+  shareFractionFrom, shareBonusFor, SHARE_HOLD_MARKER, shareHeld,
 } from "./config.js";
 
 /**
@@ -119,7 +119,9 @@ export async function main(ns) {
   const ram = shareRam(ns);
 
   ns.tprint(
-    `\nshare mode: ${current > 0 ? `ON at ${pct(current)} of the pool` : "OFF"}\n` +
+    `\nshare mode: ${current > 0 ? `ON at ${pct(current)} of the pool` : "OFF"}` +
+      // The setting survives a hold; what is in FORCE is off until faction work resumes.
+      `${shareHeld(ns.read(SHARE_HOLD_MARKER)) ? " - HELD by sing/sing.js: not doing faction work" : ""}\n` +
       `  measured power   x${power.toFixed(4)}  (ns.getSharePower, includes the ` +
       `intelligence and home-core bonuses)\n` +
       `  pool             ${fmtRam(pool.usableRam)} usable across ${pool.servers.length} host(s)\n` +

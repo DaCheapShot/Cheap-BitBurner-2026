@@ -34,6 +34,11 @@ const NESTED = [
   "contracts/config.js",
   "contracts/solvers.js",
   "contracts/contracts.js",
+  // The singularity subsystem. plan.js is pure and holds every decision - the
+  // same split again. sing.js's rpc bodies are parsed by tests/rpc.test.mjs.
+  "sing/config.js",
+  "sing/plan.js",
+  "sing/sing.js",
 ];
 
 /** Every .js under scripts/, as posix paths relative to it. */

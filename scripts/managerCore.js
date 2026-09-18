@@ -22,7 +22,9 @@ import {
   SHARE_MARKER,
   SHARE_WORKER,
   SHARE_PORT,
-  shareFractionFrom,
+  SHARE_HOLD_MARKER,
+  effectiveShareFraction,
+  shareHeld,
 } from "./config.js";
 import {
   analyzeBatch, batchOk, batchOutcome, restoreStats, crossBatchOrder, moneyTrail,
@@ -609,7 +611,10 @@ function measureVolley(byBatch, expected, wantGrowMult, breakEvenMult) {
  * @returns {{fraction: number, threads: number, launched: number} | null}
  */
 function serviceShare(ns, pool, ramPerThread, log, prefix = INDENT) {
-  const fraction = shareFractionFrom(ns.read(SHARE_MARKER));
+  // Through the hold, not the marker alone: sing/sing.js holds share off while
+  // the player is not doing faction work, the only work the bonus multiplies.
+  const holdText = ns.read(SHARE_HOLD_MARKER);
+  const fraction = effectiveShareFraction(ns.read(SHARE_MARKER), holdText);
 
   // Broadcast BEFORE anything is launched, and unconditionally - including when
   // share is off, so any worker still running sees the 0 and retires.
@@ -631,7 +636,8 @@ function serviceShare(ns, pool, ramPerThread, log, prefix = INDENT) {
     // 10s share calls. Nothing to do but report it, so the RAM appearing to be
     // busy for one more cycle is not mistaken for a leak.
     log(
-      `${prefix}share OFF - ${census.threads}t still winding down, gone within 10s ` +
+      `${prefix}share ${shareHeld(holdText) ? "HELD (no faction work)" : "OFF"} - ` +
+        `${census.threads}t still winding down, gone within 10s ` +
         `(${fmtRam(census.threads * ramPerThread)} returns to the pool next cycle)`,
     );
     return { fraction, threads: census.threads, launched: 0 };
