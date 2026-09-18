@@ -178,15 +178,13 @@ export const AUG_SKIP_FACTIONS = ["Shadows of Anarchy"];
 
 /**
  * A faction whose favor has reached getFavorToDonate() (150 in BN4) sells rep
- * for money, so it is DONATED to its rep target rather than worked for it - the
- * work moves on down WORK_ORDER. Favor only changes at an install
- * (Faction.prestigeAugmentation), so what is read once per cycle holds for it.
- *
- * Donations spend at most this fraction of cash per AUGS pass, and only while
- * rep is what the batch lacks: once queued + rep-unlocked augs reach
- * MIN_AUG_BATCH, cash is the constraint and it is saved for the batch.
+ * for money, so it is not worked - the work moves on down WORK_ORDER - and its
+ * rep is BOUGHT as part of an aug batch: planAugBuys prices the donation an aug
+ * needs beside the aug itself, and nothing is donated unless the whole batch is
+ * bought in the same pass. Money donated with no batch behind it is money the
+ * batcher's servers and home RAM could have had. Favor only changes at an
+ * install (Faction.prestigeAugmentation), so it is read once per process.
  */
-export const DONATE_BUDGET_FRACTION = 0.5;
 /**
  * rep = $ / DonateMoneyToRepDivisor * mults.faction_rep * FactionWorkRepGain
  * (src/Faction/formulas/donation.ts). The divisor is CONSTANTS' 1e6.

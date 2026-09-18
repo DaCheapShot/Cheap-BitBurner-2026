@@ -242,69 +242,110 @@ export const tests = {
     assert(alone.faction === "Bachman & Associates", `nothing else: work it rather than idle, got ${JSON.stringify(alone)}`);
   },
 
-  "planDonations: cheapest to finish first, within the budget, one rep over": async () => {
-    const mods = await loadScripts();
-    const { planDonations } = mods["sing/plan"];
-    const { DONATE_BUDGET_FRACTION } = mods["sing/config"];
-    const perRep = 1e6 / (2 * 0.75);
+  // The user's rule: rep is bought only as part of a batch that is bought. The
+  // donation is priced beside the aug it unlocks, and it counts against cash.
+  "the batch buys rep by donation, and only as part of the batch": async () => {
+    const { planAugBuys, donationPerRep } = (await loadScripts())["sing/plan"];
+    const perRep = donationPerRep(1, 0.75);
+    const nine = Array.from({ length: 9 }, (_, i) => `a${i}`);
+    const info = Object.fromEntries(nine.map((n) => [n, { rep: 1, price: 1e6 }]));
+    info.SmartJaw = { rep: 375e3, price: 1e6 };
     const base = {
-      targets: { A: 100e3, B: 10e3, C: 50e3, D: 50e3 }, rep: { A: 0, B: 0, C: 60e3, D: 0, E: 0 },
-      favor: { A: 200, B: 150, C: 150, D: 10, E: 150 }, favorNeed: 150,
-      workTypes: { A: ["hacking"], B: ["hacking"], C: ["hacking"], D: ["hacking"], E: ["hacking"] },
-      repMult: 2, bnRepMult: 0.75,
+      augsOf: { CyberSec: nine, Bachman: ["SmartJaw"] }, owned: [], queued: 0, info, prereqs: {},
+      rep: { CyberSec: 1e3, Bachman: 100e3 },
+      donate: { perRep, can: (f) => f === "Bachman" },
     };
-    const rich = planDonations({ ...base, cash: 1e15 });
-    assert(JSON.stringify(rich.map((d) => d.faction)) === '["B","A"]',
-      `B (10k short) then A; C is past its target, D lacks favor, E has no target: ${JSON.stringify(rich)}`);
-    assert(Math.abs(rich[0].amount - 10001 * perRep) < 1, `B: 10001 rep at ${perRep}/rep, got ${rich[0].amount}`);
-    const poor = planDonations({ ...base, cash: 12001 * perRep / DONATE_BUDGET_FRACTION });
-    assert(poor.length === 2 && Math.abs(poor[1].amount - 2000 * perRep) < 1,
-      `the budget finishes B and puts the last 2000 rep's worth into A: ${JSON.stringify(poor)}`);
+    const lift = 275001 * perRep;
+    const augs = 1e6 * (1.9 ** 10 - 1) / 0.9;
+    const ok = planAugBuys({ ...base, cash: lift + augs + 1 });
+    assert(ok.buys.length === 10 && ok.buys.some((b) => b.name === "SmartJaw" && b.faction === "Bachman"),
+      `SmartJaw via donation makes ten: ${ok.buys.map((b) => b.name)}`);
+    assert(ok.donations.length === 1 && Math.abs(ok.donations[0].amount - lift) < 1,
+      `one donation, 375001 - 100000 rep: ${JSON.stringify(ok.donations)}`);
+    assert(Math.abs(ok.total - lift - augs) < 1, "the donation counts against cash with the augs");
+
+    const short = planAugBuys({ ...base, cash: lift + augs - 1e3 });
+    assert(!short.buys.length && !short.donations.length, "cash for the augs but not the rep: nothing, not even the donation");
+    const noFavor = planAugBuys({ ...base, donate: null, cash: 1e15 });
+    assert(!noFavor.buys.length && !noFavor.donations.length && noFavor.batch === 9, "no favor: SmartJaw is out of reach");
   },
 
-  // End to end: the donation lands in the aug pass and the work goes elsewhere.
-  "a favored faction is donated to its target and never worked": async () => {
-    const mods = await loadScripts();
-    const r = await driveSing(mods, {
-      ticks: 1, p: player({ factions: ["Bachman & Associates", "CyberSec"], money: 1e13 }),
-      favor: { "Bachman & Associates": 150 },
-      augs: { ...SELLS, "Bachman & Associates": [{ name: "SmartJaw", rep: 375e3, price: 1e15 }] },
+  // Two augs from one faction: it is lifted ONCE, to the higher need.
+  "a faction is lifted once, to the highest rep the batch needs from it": async () => {
+    const { planAugBuys } = (await loadScripts())["sing/plan"];
+    const names = Array.from({ length: 8 }, (_, i) => `a${i}`);
+    const info = Object.fromEntries(names.map((n) => [n, { rep: 1, price: 1e6 }]));
+    info.lo = { rep: 200e3, price: 2e6 };
+    info.hi = { rep: 300e3, price: 3e6 };
+    const plan = planAugBuys({
+      augsOf: { F: names, B: ["lo", "hi"] }, owned: [], queued: 0, info, prereqs: {},
+      rep: { F: 1e9, B: 100e3 }, cash: 1e15, donate: { perRep: 1, can: (f) => f === "B" },
     });
-    const d = r.calls.filter((c) => c.startsWith("donateToFaction:"));
-    assert(d.length === 1 && d[0].startsWith("donateToFaction:Bachman & Associates,"), `one donation: ${d}`);
-    const amt = Number(d[0].split(",")[1]);
-    assert(Math.abs(amt - 375001 / 0.75 * 1e6) < 1, `375001 rep at 1.33m per rep, got ${amt}`);
-    assert(!r.calls.some((c) => c.startsWith("workForFaction:Bachman")), "not worked");
-    assert(r.calls.some((c) => c.startsWith("workForFaction:CyberSec")), "the work moved on");
-    assert(r.ns._log.some((l) => l.includes("donate: $")), `logged: ${r.ns._log}`);
+    assert(plan.buys.length === 10, `ten: ${plan.buys.length}`);
+    assert(plan.donations.length === 1 && plan.donations[0].amount === 200001,
+      `100k -> 300001 once, not per aug: ${JSON.stringify(plan.donations)}`);
   },
 
-  // The price comes from the game, never a guess: without SF5 the read throws,
-  // and nothing is donated.
-  "no Source-File 5, no donation - and one warning": async () => {
+  // End to end: the donation lands immediately before the buys it unlocks.
+  "a batch donates first, then buys - and the favored faction is never worked": async () => {
     const mods = await loadScripts();
-    const r = await driveSing(mods, {
-      ticks: 7, p: player({ factions: ["Bachman & Associates", "CyberSec"], money: 1e13 }),
-      favor: { "Bachman & Associates": 150 },
-      augs: { ...SELLS, "Bachman & Associates": [{ name: "SmartJaw", rep: 375e3, price: 1e15 }] },
-      extra: { getBitNodeMultipliers: () => { throw new Error("Requires Source-File 5 to run."); } },
-    });
-    assert(r.count("donateToFaction") === 0, "no multiplier, no donation");
-    assert(r.ns._log.filter((l) => l.includes("WARN: bitnode mults failed")).length === 1, `warned once: ${r.ns._log}`);
-  },
-
-  // Ten augs already unlocked: the batch lacks CASH, and a donation would only
-  // push it further away.
-  "no donation while the batch is waiting on cash, not rep": async () => {
-    const mods = await loadScripts();
-    const ten = Array.from({ length: 10 }, (_, i) => ({ name: `aug${i}`, rep: 1, price: 1e15 }));
+    const nine = Array.from({ length: 9 }, (_, i) => ({ name: `aug${i}`, rep: 1, price: 1e4 }));
     const r = await driveSing(mods, {
       ticks: 1, p: player({ factions: ["Bachman & Associates", "CyberSec"], money: 1e13 }),
       rep: { CyberSec: 1e3 }, favor: { "Bachman & Associates": 150 },
-      augs: { CyberSec: ten, "Bachman & Associates": [{ name: "SmartJaw", rep: 375e3, price: 1e15 }] },
+      augs: { CyberSec: nine, "Bachman & Associates": [{ name: "SmartJaw", rep: 375e3, price: 1e6 }] },
     });
-    assert(r.count("donateToFaction") === 0, "saved for the batch");
-    assert(r.ns._log.some((l) => l.includes("donate: holding - 10 augs unlocked")), `why: ${r.ns._log}`);
+    const d = r.calls.filter((c) => c.startsWith("donateToFaction:"));
+    assert(d.length === 1 && d[0].startsWith("donateToFaction:Bachman & Associates,"), `one donation: ${d}`);
+    assert(Math.abs(Number(d[0].split(",")[1]) - 375001 / 0.75 * 1e6) < 1, `375001 rep at 1.33m per rep: ${d[0]}`);
+    const firstBuy = r.calls.findIndex((c) => c.startsWith("purchaseAugmentation:"));
+    assert(r.calls.indexOf(d[0]) < firstBuy, "rep before the augs it unlocks");
+    assert(r.calls.includes("purchaseAugmentation:Bachman & Associates,SmartJaw"), "SmartJaw bought");
+    assert(r.count("purchaseAugmentation") === 10, `the whole batch: ${r.count("purchaseAugmentation")}`);
+    assert(!r.calls.some((c) => c.startsWith("workForFaction:Bachman")), "not worked");
+  },
+
+  // No batch, no donation - however much cash and favor there is.
+  "nothing is donated when no batch is bought": async () => {
+    const mods = await loadScripts();
+    const five = Array.from({ length: 5 }, (_, i) => ({ name: `aug${i}`, rep: 1, price: 1e4 }));
+    const r = await driveSing(mods, {
+      ticks: 4, p: player({ factions: ["Bachman & Associates", "CyberSec"], money: 1e13 }),
+      rep: { CyberSec: 1e3 }, favor: { "Bachman & Associates": 150 },
+      augs: { CyberSec: five, "Bachman & Associates": [{ name: "SmartJaw", rep: 375e3, price: 1e6 }] },
+    });
+    assert(r.count("donateToFaction") === 0, "six is not a batch - the money stays for the batcher");
+    assert(r.count("purchaseAugmentation") === 0, "and nothing bought");
+  },
+
+  // A refused donation would leave the buys behind it stopping at its aug - a
+  // partial batch. So nothing is bought.
+  "a refused donation buys nothing": async () => {
+    const mods = await loadScripts();
+    const nine = Array.from({ length: 9 }, (_, i) => ({ name: `aug${i}`, rep: 1, price: 1e4 }));
+    const r = await driveSing(mods, {
+      ticks: 1, p: player({ factions: ["Bachman & Associates", "CyberSec"], money: 1e13 }),
+      rep: { CyberSec: 1e3 }, favor: { "Bachman & Associates": 150 },
+      augs: { CyberSec: nine, "Bachman & Associates": [{ name: "SmartJaw", rep: 375e3, price: 1e6 }] },
+      api: { donateToFaction: () => false },
+    });
+    assert(r.count("purchaseAugmentation") === 0, "no partial batch");
+    assert(r.ns._log.some((l) => l.includes("WARN: donation refused")), `said why: ${r.ns._log}`);
+  },
+
+  // The price comes from the game, never a guess: without SF5 the read throws,
+  // warns once, and the batch is planned without donations.
+  "no Source-File 5, no donation - and one warning": async () => {
+    const mods = await loadScripts();
+    const nine = Array.from({ length: 9 }, (_, i) => ({ name: `aug${i}`, rep: 1, price: 1e4 }));
+    const r = await driveSing(mods, {
+      ticks: 7, p: player({ factions: ["Bachman & Associates", "CyberSec"], money: 1e13 }),
+      rep: { CyberSec: 1e3 }, favor: { "Bachman & Associates": 150 },
+      augs: { CyberSec: nine, "Bachman & Associates": [{ name: "SmartJaw", rep: 375e3, price: 1e6 }] },
+      extra: { getBitNodeMultipliers: () => { throw new Error("Requires Source-File 5 to run."); } },
+    });
+    assert(r.count("donateToFaction") === 0 && r.count("purchaseAugmentation") === 0, "nine without SmartJaw");
+    assert(r.ns._log.filter((l) => l.includes("WARN: bitnode mults failed")).length === 1, `warned once: ${r.ns._log}`);
   },
 
   // ------------------------------------------------------------ augs ----

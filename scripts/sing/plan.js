@@ -3,7 +3,7 @@ import {
   WORK_ORDER, WORK_TYPE_ORDER, FACTION_REP_TARGET,
   TDH_FACTION, TDH_CITY, TDH_HACKING, TDH_MONEY, HOME_CITY, TRAVEL_COST,
   MIN_AUG_BATCH, NFG, AUG_PRICE_MULT, NFG_LEVEL_MULT, AUG_SKIP_FACTIONS,
-  DONATE_BUDGET_FRACTION, DONATE_MONEY_PER_REP,
+  DONATE_MONEY_PER_REP,
 } from "./config.js";
 
 /**
@@ -64,6 +64,14 @@ export function repTargets(augsOf, owned, info) {
  * MIN_AUG_BATCH and the cash covers all of it - buying part of one leaves
  * augs queued and no reason to install.
  *
+ * An aug short of rep at every seller is still in reach at a seller that takes
+ * donations (`o.donate`): its price then carries the donation that lifts that
+ * faction to the aug's rep, and the batch's `donations` are made before its
+ * buys. A faction is lifted once to the highest rep the batch needs from it -
+ * a later aug from the same faction pays only the difference. One rep over,
+ * so float rounding in the game's $/1e6 * mult cannot leave it a hair short.
+ * NeuroFlux is never donated for; it fills on whatever rep the batch reaches.
+ *
  * @param o.augsOf   {faction: aug names}
  * @param o.owned    installed and queued aug names
  * @param o.queued   how many are queued (not yet installed)
@@ -71,32 +79,49 @@ export function repTargets(augsOf, owned, info) {
  * @param o.prereqs  {aug: prerequisite names}
  * @param o.rep      {faction: rep} for joined factions - only these can sell
  * @param o.cash     money on hand
- * @returns {{ buys: {faction, name, cost}[], batch: number, total: number, eligible: number }}
+ * @param o.donate   { perRep, can(faction) } - or null, and nothing is donated
+ * @returns {{ buys: {faction, name, cost}[], donations: {faction, amount, rep}[],
+ *             batch: number, total: number, eligible: number }}
  */
-export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash }) {
+export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, donate = null }) {
   // Who sells each aug, among joined factions we may buy from.
   const sellers = {};
   for (const [faction, augs] of Object.entries(augsOf)) {
     if (!(faction in rep) || AUG_SKIP_FACTIONS.includes(faction)) continue;
     for (const a of augs) (sellers[a] ??= []).push(faction);
   }
-  const best = (factions) => factions.reduce((b, f) => (rep[f] > rep[b] ? f : b));
+  // The rep each faction will have once this batch's donations are made.
+  const reach = { ...rep };
+  const best = (factions) => factions.reduce((b, f) => (reach[f] > reach[b] ? f : b));
   const have = new Set(owned);
+  /** Money to lift faction f to `need` rep: 0 if it is there, Infinity if it cannot be bought. */
+  const lift = (f, need) => {
+    if (reach[f] >= need) return 0;
+    return donate?.can(f) ? (need - reach[f] + 1) * donate.perRep : Infinity;
+  };
+  const cheapest = (c) => c.sellers.reduce((b, f) => (lift(f, c.need) < lift(b, c.need) ? f : b));
 
   const eligible = Object.keys(sellers)
     .filter((a) => a !== NFG && !have.has(a) && info[a])
-    .map((a) => ({ name: a, faction: best(sellers[a]), price: info[a].price, need: info[a].rep }))
-    .filter((c) => rep[c.faction] >= c.need)
+    .map((a) => ({ name: a, sellers: sellers[a], price: info[a].price, need: info[a].rep }))
+    .filter((c) => Number.isFinite(lift(cheapest(c), c.need)))
     .sort((x, y) => y.price - x.price);
 
   const buys = [];
+  const donated = {};
   let total = 0;
   for (const c of eligible) {
     if (!(prereqs[c.name] ?? []).every((p) => have.has(p))) continue;
+    const f = cheapest(c);
+    const d = lift(f, c.need);
     const cost = c.price * AUG_PRICE_MULT ** buys.length;
-    if (total + cost > cash) continue;
-    buys.push({ faction: c.faction, name: c.name, cost });
-    total += cost;
+    if (total + cost + d > cash) continue;
+    if (d) {
+      donated[f] = (donated[f] ?? 0) + d;
+      reach[f] = c.need + 1;
+    }
+    buys.push({ faction: f, name: c.name, cost });
+    total += cost + d;
     have.add(c.name);
   }
 
@@ -104,14 +129,22 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash })
     const f = best(sellers[NFG]);
     for (let level = 0; ; level++) {
       const cost = info[NFG].price * NFG_LEVEL_MULT ** level * AUG_PRICE_MULT ** buys.length;
-      if (rep[f] < info[NFG].rep * NFG_LEVEL_MULT ** level || total + cost > cash) break;
+      if (reach[f] < info[NFG].rep * NFG_LEVEL_MULT ** level || total + cost > cash) break;
       buys.push({ faction: f, name: NFG, cost });
       total += cost;
     }
   }
 
   const batch = queued + buys.length;
-  return { buys: batch >= MIN_AUG_BATCH ? buys : [], batch, total, eligible: eligible.length };
+  const donations = Object.entries(donated)
+    .map(([faction, amount]) => ({ faction, amount, rep: amount / donate.perRep }));
+  const go = batch >= MIN_AUG_BATCH;
+  return { buys: go ? buys : [], donations: go ? donations : [], batch, total, eligible: eligible.length };
+}
+
+/** Dollars per rep point donated (donation.ts): 1e6 / faction_rep / FactionWorkRepGain. */
+export function donationPerRep(repMult, bnRepMult) {
+  return DONATE_MONEY_PER_REP / (repMult * bnRepMult);
 }
 
 /**
@@ -125,37 +158,6 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash })
 export function canDonate(faction, state) {
   return state.favorNeed > 0 && (state.favor?.[faction] ?? 0) >= state.favorNeed &&
     (state.workTypes?.[faction] ?? []).length > 0;
-}
-
-/**
- * The donations to make now: every faction that can take one and is short of
- * its rep target, cheapest to finish first, within DONATE_BUDGET_FRACTION of
- * cash. One rep over the target, so float rounding in the game's
- * $/1e6 * mult cannot leave it a hair short of the aug it was bought for.
- * A faction with no target yet (augs unread) gets nothing: unknown is not a
- * reason to spend.
- *
- * @param o.targets   {faction: rep} from repTargets
- * @param o.rep       {faction: rep} joined factions
- * @param o.repMult    getPlayer().mults.faction_rep
- * @param o.bnRepMult  getBitNodeMultipliers().FactionWorkRepGain
- * @returns {{faction, amount, rep}[]}
- */
-export function planDonations({ targets, rep, favor, favorNeed, workTypes, cash, repMult, bnRepMult }) {
-  const perRep = DONATE_MONEY_PER_REP / (repMult * bnRepMult);
-  const want = Object.keys(rep)
-    .filter((f) => canDonate(f, { favor, favorNeed, workTypes }) && (targets[f] ?? 0) > rep[f])
-    .map((f) => ({ faction: f, need: targets[f] - rep[f] + 1 }))
-    .sort((a, b) => a.need - b.need);
-  let budget = cash * DONATE_BUDGET_FRACTION;
-  const out = [];
-  for (const w of want) {
-    const amount = Math.min(w.need * perRep, budget);
-    if (amount <= 0) break;
-    out.push({ faction: w.faction, amount, rep: amount / perRep });
-    budget -= amount;
-  }
-  return out;
 }
 
 /**
@@ -217,9 +219,9 @@ export function chooseAction(player, state) {
     return { kind: "crime", crime: CRIME_TYPE };
   }
 
-  // 3. Rep, down WORK_ORDER. A faction that takes donations is bought to its
-  //    target, not worked - unless nothing else is left, when working it (at
-  //    its favor's 1 + favor/100) still beats idling.
+  // 3. Rep, down WORK_ORDER. A faction that takes donations has its rep bought
+  //    with the next aug batch, so it is not worked - unless nothing else is
+  //    left, when working it (at its favor's 1 + favor/100) still beats idling.
   let donatable = null;
   for (const step of steps(player)) {
     if (step.company) {

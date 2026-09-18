@@ -6,7 +6,7 @@ import {
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTarget, repTargets, planAugBuys,
-  planDonations, canDonate,
+  canDonate, donationPerRep,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 
@@ -44,11 +44,12 @@ import { rpc } from "scripts/rpc.js";
  * stays manual. What each faction sells and each aug's prerequisites are fixed
  * for the node, so they are read once and kept here.
  *
- * FAVOR BUYS REP. A faction at getFavorToDonate() favor (150) is donated to its
- * rep target rather than worked for it, and the work moves on down WORK_ORDER.
- * Donations run in the AUGS pass only when no batch was bought and rep - not
- * cash - is what the batch lacks. Favor moves only at an install, so each
- * faction's is read once per process; an install restarts this process anyway.
+ * FAVOR BUYS REP - AT PURCHASE TIME ONLY. A faction at getFavorToDonate() favor
+ * (150) is not worked; the work moves on down WORK_ORDER. When a batch is
+ * planned, an aug that faction's rep does not reach is priced WITH the donation
+ * that reaches it, and the donations are made immediately before the buys - so
+ * money is never donated without a batch bought behind it. Favor moves only at
+ * an install, so each faction's is read once per process.
  *
  * ALWAYS ON. boot starts this unconditionally, because singularity has no 0 GB
  * availability check to gate on. Without Source-File 4 outside BN4 every body
@@ -275,7 +276,11 @@ function upgradeLine(ns, u) {
 function augsWaitLine(ns, plan, queued, cash) {
   if (queued >= MIN_AUG_BATCH) return `${queued} queued - install when ready; nothing more affordable now`;
   return `waiting: best batch is ${plan.batch} of ${MIN_AUG_BATCH} (${queued} queued), ` +
-    `${plan.eligible} unlocked by rep, cash ${money$(ns, cash)}`;
+    `${plan.eligible} unlocked by rep or favor, cash ${money$(ns, cash)}`;
+}
+
+function donationsLine(ns, ds) {
+  return ds.map((d) => `${money$(ns, d.amount)} to ${d.faction} (+${n2(ns, d.rep)} rep)`).join(", ");
 }
 
 function progsLine(ns, p) {
@@ -375,28 +380,16 @@ export async function main(ns) {
   let bnRepMult = null;
 
   /**
-   * Buy rep for the factions that sell it, when rep is what the batch lacks.
-   * With queued + rep-unlocked augs already at MIN_AUG_BATCH the batch is
-   * waiting on CASH, and a donation would only push it further away.
+   * How the batch may buy rep, or null. The price needs the node's rep
+   * multiplier, read only once some faction can actually take a donation - so
+   * a save without Source-File 5 that never reaches 150 favor never warns.
    */
-  const donatePass = async (r, plan, queued) => {
-    if (!Object.values(favor).some((f) => favorNeed > 0 && f >= favorNeed)) return;
+  const donateTerms = async (r) => {
+    const st = { favor, favorNeed, workTypes: r.workTypes };
+    if (!r.player.factions.some((f) => canDonate(f, st))) return null;
     bnRepMult ??= await call("bitnode mults", BN_MULTS);
-    if (!bnRepMult) return;
-    const d = planDonations({
-      targets, rep: r.rep, favor, favorNeed, workTypes: r.workTypes,
-      cash: r.player.money, repMult: r.player.mults.faction_rep, bnRepMult,
-    });
-    if (!d.length) return;
-    if (queued + plan.eligible >= MIN_AUG_BATCH) {
-      log(`donate: holding - ${queued + plan.eligible} augs unlocked, cash is what the batch lacks`);
-      return;
-    }
-    const done = (await call("donate", DONATE, JSON.stringify(d.map((x) => [x.faction, x.amount])))) ?? [];
-    const got = d.filter((x) => done.includes(x.faction));
-    log(`donate: ${got.length
-      ? got.map((x) => `${money$(ns, x.amount)} to ${x.faction} (+${n2(ns, x.rep)} rep)`).join(", ")
-      : `the game refused ${d.map((x) => x.faction).join(", ")}`}`);
+    if (!bnRepMult) return null;
+    return { perRep: donationPerRep(r.player.mults.faction_rep, bnRepMult), can: (f) => canDonate(f, st) };
   };
 
   /**
@@ -426,17 +419,39 @@ export async function main(ns) {
       }
     }
     const cash = r.player.money;
-    const plan = planAugBuys({ augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash });
+    const donate = await donateTerms(r);
+    const plan = planAugBuys({
+      augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash, donate,
+    });
     if (!plan.buys.length) {
       log(`augs: ${augsWaitLine(ns, plan, owned.queued, cash)}`);
-      await donatePass(r, plan, owned.queued);
       return;
+    }
+    // The rep first, then the augs it unlocks. A refused donation stops the
+    // batch before any buy: the buys behind it would stop at that aug and leave
+    // a partial batch, which the batch rule exists to prevent.
+    if (plan.donations.length) {
+      const pairs = plan.donations.map((d) => [d.faction, d.amount]);
+      const done = (await call("donate", DONATE, JSON.stringify(pairs))) ?? [];
+      const got = plan.donations.filter((d) => done.includes(d.faction));
+      if (got.length) {
+        log(`donate: ${donationsLine(ns, got)}`);
+        ns.tprint(`sing: donated ${donationsLine(ns, got)}`);
+      }
+      if (got.length < plan.donations.length) {
+        log(`WARN: donation refused (${plan.donations.filter((d) => !got.includes(d)).map((d) => d.faction)}) - ` +
+          "batch not bought this pass");
+        return;
+      }
     }
     const bought = (await call("buy", BUY, JSON.stringify(plan.buys.map((b) => [b.faction, b.name])))) ?? [];
     const line = `bought ${bought.length} of ${plan.buys.length} planned (${bought.join(", ")}) - ` +
       `${owned.queued + bought.length} queued, install when ready`;
     log(`augs: ${line}`);
     if (bought.length) ns.tprint(`sing: ${line}`);
+    // Now, not at the next pass: a faction whose last aug was just bought must
+    // not be worked for three ticks toward a target that no longer exists.
+    targets = repTargets(augsOf, [...owned.all, ...bought], info);
     // What is left would be reset by the install; home RAM survives it.
     if (bought.length) {
       const u = await call("upgrade", UPGRADE, 1);

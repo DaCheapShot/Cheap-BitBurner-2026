@@ -1024,16 +1024,20 @@ and each aug's prerequisites are fixed for the node and kept in memory; prices a
 are re-read every pass. READ now runs FIRST in the tick, so the batch gets the cash before the
 normal 25% home upgrade can take it.
 
-**A faction at 150 favor is BOUGHT to its target, not worked.** Favor moves only at an install
-(`Faction.prestigeAugmentation`: `addRepToFavor(favor, rep)`, where 150 favor is ~462k lifetime rep),
-and at `getFavorToDonate()` the faction sells rep: `$ / 1e6 * mults.faction_rep * FactionWorkRepGain`
+**A faction at 150 favor is not worked; its rep is BOUGHT with the batch.** Favor moves only at an
+install (`Faction.prestigeAugmentation`: `addRepToFavor(favor, rep)`, where 150 favor is ~462k lifetime
+rep), and at `getFavorToDonate()` the faction sells rep: `$ / 1e6 * mults.faction_rep * FactionWorkRepGain`
 (`donation.ts`). The live bug: Bachman worked toward 375k with 150 favor already banked. `chooseAction`
 skips a donatable faction - `canDonate`: favor at the bar AND a non-empty work-type list, which is
-exactly the set `donateToFaction` accepts - and works it only when nothing else is left. The AUGS
-pass donates, cheapest-to-finish first, up to `DONATE_BUDGET_FRACTION` of cash, and **only when no
-batch was bought and rep is what the batch lacks**: once queued + rep-unlocked augs reach
-`MIN_AUG_BATCH` the batch is waiting on cash, and a donation would push it further off. One rep over
-the target, so float rounding cannot leave it a hair short. `FactionWorkRepGain` (BN4 0.75) is read
+exactly the set `donateToFaction` accepts - and works it only when nothing else is left.
+**Donating happens only as part of a batch that is bought** - the user's rule: money donated with no
+batch behind it is money the batcher could have had. `planAugBuys` treats an aug short of rep at a
+donatable seller as in reach, priced WITH the donation that reaches it, so the donation counts
+against cash and against the batch rule like the aug does. A faction is lifted once, to the highest
+rep the batch needs from it, one rep over so float rounding cannot leave it a hair short. `sing.js`
+donates immediately before the buys, and a refused donation buys nothing - the buys behind it would
+stop at its aug and leave a partial batch. After a batch the rep targets are recomputed at once, or a
+faction whose last aug was just bought is worked for three more ticks. `FactionWorkRepGain` (BN4 0.75) is read
 once per process by the BN_MULTS body - `getBitNodeMultipliers()` with no arguments defaults to exactly
 what `initBitNodeMultipliers` installs. It needs Source-File 5; without it the body warns once and
 nothing is donated, rather than donated at a guessed price.
