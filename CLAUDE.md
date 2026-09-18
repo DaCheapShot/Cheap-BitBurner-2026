@@ -1015,8 +1015,8 @@ from home**, always legal and never needing a trim, because `installBackdoor` ac
 current server (`Singularity.ts`). It moves the player's terminal, and a `finally` puts it back on
 home even when a hop fails. It refuses `w0r1d_d43m0n` itself - that backdoor ends the node and is the
 user's call. **The install takes `hackTime / 4`, far past rpc's 10 s**, so it goes through
-`rpcWithin` and the loop waits it out: one server per pass, run LAST in the tick so the work is
-already chosen, and a server slower than `BACKDOOR_MAX_MS` waits for hacking level to shrink it.
+`rpcWithin` and the loop waits it out: every ready server per pass, one after another (the
+terminal is one slot), run LAST in the tick so the work is already chosen, and a server slower than `BACKDOOR_MAX_MS` waits for hacking level to shrink it.
 Backdoors vanish at an install, which kills the process, so once none is left the pass stops.
 
 **Share follows faction work.** The share bonus is in the three faction formulas in

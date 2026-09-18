@@ -52,9 +52,9 @@ import { rpcWithin, RPC_TIMEOUT_MS } from "scripts/rpc.js";
  * money is never donated without a batch bought behind it. Favor moves only at
  * an install, so each faction's is read once per process.
  *
- * BACKDOORS FOR INVITES. Every BACKDOOR_EVERY ticks, one faction server that is
- * rooted and in hacking range is backdoored, and its invite arrives through the
- * JOIN pass. installBackdoor takes hackTime / 4 - far past rpc's 10 s - so that
+ * BACKDOORS FOR INVITES. Every BACKDOOR_EVERY ticks, every faction server that
+ * is rooted and in hacking range is backdoored, and the invites arrive through
+ * the JOIN pass. installBackdoor takes hackTime / 4 - far past rpc's 10 s - so that
  * one call gets a timeout of its own and the loop waits it out; a server slower
  * than BACKDOOR_MAX_MS waits for a later pass instead.
  *
@@ -401,7 +401,6 @@ function backdoorWaitLine(ns, level, waiting) {
   return waiting.map((b) => {
     if (!b.root) return `${b.host} not rooted`;
     if (b.need > level) return `${b.host} needs hacking ${b.need} (have ${level})`;
-    if (b.ms <= BACKDOOR_MAX_MS) return `${b.host} next pass`;
     return `${b.host} takes ${ns.format.time(b.ms)} (over ${ns.format.time(BACKDOOR_MAX_MS)})`;
   }).join(", ");
 }
@@ -600,8 +599,9 @@ export async function main(ns) {
   };
 
   /**
-   * Backdoor at most one faction server - the loop waits the whole install out,
-   * and one per pass keeps that wait to a single server's.
+   * Backdoor every faction server in reach, one after another - the terminal
+   * is one slot, so they cannot overlap. The loop waits all of them out, which
+   * BACKDOOR_MAX_MS bounds per server; late in a node each is seconds.
    */
   const backdoorPass = async () => {
     const b = await call("backdoors", BACKDOORS);
@@ -611,14 +611,14 @@ export async function main(ns) {
       log("backdoor: every faction server backdoored");
       return;
     }
-    const next = b.left.find((x) => x.root && x.need <= b.level && x.ms <= BACKDOOR_MAX_MS);
-    const waiting = b.left.filter((x) => x !== next);
-    if (next) {
+    const ready = (x) => x.root && x.need <= b.level && x.ms <= BACKDOOR_MAX_MS;
+    for (const next of b.left.filter(ready)) {
       const ok = await callWithin(next.ms + RPC_TIMEOUT_MS, "backdoor", BACKDOOR, ...next.route);
       const line = ok ? `installed on ${next.host}` : ok === false ? `could not reach ${next.host}` : null;
       if (line) log(`backdoor: ${line}`);
       if (ok) ns.tprint(`sing: backdoor ${line}`);
     }
+    const waiting = b.left.filter((x) => !ready(x));
     if (waiting.length) log(`backdoor: waiting - ${backdoorWaitLine(ns, b.level, waiting)}`);
   };
 

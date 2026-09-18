@@ -789,15 +789,16 @@ export const tests = {
   // ------------------------------------------------------------ backdoor ----
 
   // installBackdoor acts on the TERMINAL's server, so the route is walked hop by
-  // hop from home, and the terminal is put back on home after. One per pass, and
+  // hop from home, and the terminal is put back on home after. Every ready
+  // server in one pass - one at a time was hours of waiting late in a node - and
   // every server left behind says why.
-  "a ready faction server is backdoored along its route, and the terminal comes home": async () => {
+  "every ready faction server is backdoored along its route, and the terminal comes home": async () => {
     const mods = await loadScripts();
     const r = await driveSing(mods, {
       ticks: 1,
       servers: {
         CSEC: { hasAdminRights: true, requiredHackingSkill: 50, hackTime: 40e3 },
-        // Ready too, and queued behind CSEC: one backdoor per pass.
+        // Ready too: the same pass does it, straight after CSEC.
         "avmnite-02h": { hasAdminRights: true, requiredHackingSkill: 200, hackTime: 4e3 },
         "I.I.I.I": { hasAdminRights: true, requiredHackingSkill: 1e9 },
         run4theh111z: { hasAdminRights: true, requiredHackingSkill: 1, hackTime: 1e9 },
@@ -808,11 +809,14 @@ export const tests = {
     });
     const seq = r.calls.filter((c) => /^(connect|installBackdoor):/.test(c));
     assert(JSON.stringify(seq) === JSON.stringify(
-      ["connect:home", "connect:n00dles", "connect:CSEC", "installBackdoor:", "connect:home"]),
+      ["connect:home", "connect:n00dles", "connect:CSEC", "installBackdoor:", "connect:home",
+        "connect:home", "connect:n00dles", "connect:avmnite-02h", "installBackdoor:", "connect:home"]),
     `wrong route or no return home: ${seq}`);
     const log = r.ns._log.join(" | ");
-    assert(log.includes("installed on CSEC"), `no success line: ${log}`);
-    for (const why of ["avmnite-02h next pass", "I.I.I.I needs hacking", "run4theh111z takes"]) {
+    for (const done of ["installed on CSEC", "installed on avmnite-02h"]) {
+      assert(log.includes(done), `missing "${done}": ${log}`);
+    }
+    for (const why of ["I.I.I.I needs hacking", "run4theh111z takes"]) {
       assert(log.includes(why), `missing wait reason "${why}": ${log}`);
     }
   },
