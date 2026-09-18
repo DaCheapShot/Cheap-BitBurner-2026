@@ -55,8 +55,17 @@ export const RPC_TIMEOUT_MS = 10000;
  */
 const IMPORT_LINE = /^[ \t]*import[ \t][^\n]*$/gm;
 
-/** One rpc in flight per process - see the guard in rpc(). */
-let busy = false;
+/**
+ * Pids with an rpc in flight - see the guard in rpc().
+ *
+ * A Set keyed by pid, never one flag: the game hands every importer of this file
+ * the SAME module instance (NetscriptJSEvaluator.ts compile: `if (script.mod)
+ * return script.mod.module`), so module state here is shared by gang.js,
+ * sing.js and contracts.js. A single boolean refused any overlap between two
+ * processes, and sing's pre-install sweep - which awaits contracts.js, itself a
+ * caller - could never sweep at all. The reply port is per pid; so is the guard.
+ */
+const busy = new Set();
 
 /** djb2, so an identical body always lands on an identical filename. */
 function digest(text) {
@@ -109,8 +118,8 @@ export async function rpc(ns, body, ...args) {
   // Concurrent calls from one process would share a reply port and swap
   // answers. The game's own concurrency check does not catch this, because
   // nextWrite() is not a blocking netscript call - so the guard has to be here.
-  if (busy) throw new Error("rpc: a call is already in flight - await each one");
-  busy = true;
+  if (busy.has(ns.pid)) throw new Error("rpc: a call is already in flight - await each one");
+  busy.add(ns.pid);
   try {
     const file = `/tmp/rpc-${digest(body)}.js`;
     ns.write(file, source(body), "w");
@@ -138,6 +147,6 @@ export async function rpc(ns, body, ...args) {
     if (out.e !== undefined) throw new Error(`rpc: ${file} threw: ${out.e}`);
     return out.v;
   } finally {
-    busy = false;
+    busy.delete(ns.pid);
   }
 }

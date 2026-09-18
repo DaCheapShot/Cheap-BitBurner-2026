@@ -179,6 +179,21 @@ export const tests = {
     assert(msg.includes("already in flight"), `expected the concurrency guard, got: ${msg}`);
   },
 
+  // The game hands every importer of rpc.js the SAME module instance
+  // (NetscriptJSEvaluator.ts compile: `if (script.mod) return script.mod.module`),
+  // so a module-level flag is shared by gang.js, sing.js and contracts.js. It was
+  // one boolean: any overlap between two processes threw here, and sing's
+  // pre-install SWEEP - which awaits contracts.js, itself an rpc caller - could
+  // never sweep. One loaded module standing in for two processes is exactly the
+  // game's shape.
+  "another process's call in flight does not block this one": async () => {
+    const { rpc } = await loadScripts();
+    const first = rpc.rpc(rpcNs({ pid: 7, neverReplies: true }), "return 1;").catch(() => {});
+    const got = await rpc.rpc(rpcNs({ pid: 8 }), 'return "other";');
+    await first;
+    assert(got === "other", `a second process was refused: ${got}`);
+  },
+
   "the guard releases after a failed call": async () => {
     const { rpc } = await loadScripts();
     const ns = rpcNs();
