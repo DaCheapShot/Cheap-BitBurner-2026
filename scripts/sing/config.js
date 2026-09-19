@@ -52,6 +52,16 @@ export const PARKED_MS = 3600000;
 export const HOME_RAM_BUDGET_FRACTION = 0.25;
 /** Each darkweb program is bought only when it costs at most this fraction of cash. */
 export const PROG_BUDGET_FRACTION = 0.10;
+/**
+ * The only darkweb programs bought: the five port openers and Formulas.exe.
+ * The rest (ServerProfiler, DeepscanV1/V2, AutoLink, DarkscapeNavigator) serve
+ * the terminal, not these scripts - and bought cheapest-first they spent ~$2m
+ * before FTPCrack's $1.5m, delaying the second port opener early in a node.
+ * LIVE: read inside the PROGS body.
+ */
+export const PROGS_WANTED = [
+  "BruteSSH.exe", "FTPCrack.exe", "relaySMTP.exe", "HTTPWorm.exe", "SQLInject.exe", "Formulas.exe",
+];
 
 // ------------------------------------------------------------------- join ---
 
@@ -96,6 +106,15 @@ export const GRIND_GANG_KARMA = false;
 export const CRIME_TYPE = "Homicide";
 /** GangConstants.GangKarmaRequirement. */
 export const GANG_KARMA_TARGET = -54000;
+
+/**
+ * The crimes the idle fallback may pick (bestCrime), by chance x money / time.
+ * The user's rule: the long ones (Larceny 90 s up to Heist 600 s) are not worth
+ * it. A crime is restarted whenever the pick changes or real work turns up, and
+ * a restart forfeits the whole unit - these four are 2-10 s, so a switch costs
+ * seconds, not minutes. Spelled as CrimeType's values (src/Crime/Enums.ts).
+ */
+export const MONEY_CRIMES = ["Shoplift", "Mug", "Deal Drugs", "Homicide"];
 
 /**
  * Rep work, in priority order: the first step with work left wins. Joined

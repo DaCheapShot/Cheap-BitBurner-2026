@@ -945,7 +945,9 @@ always-on where it cannot work is 2.60 GB; `--no-sing` reclaims it.
 work-starting call finishes whatever held it, so a work call anywhere else - a PROGS body
 "helpfully" writing a program - cancels the faction session every fourth tick. A test bans the
 starters everywhere except their own body. `createProgram` is not used at all: buying the program
-is cheaper than the hours writing it takes.
+is cheaper than the hours writing it takes. Only `PROGS_WANTED` is bought - the five port openers
+and Formulas.exe: cheapest-first over the whole darkweb spent ~$2m on ServerProfiler, DeepscanV1
+and AutoLink before FTPCrack's $1.5m.
 
 **An action already running is never restarted.** `CrimeWork.process()` never returns true - it
 loops `commit()` - so crime is continuous, and `new CrimeWork()` zeroes `unitCompleted`. Homicide
@@ -991,7 +993,9 @@ company step waits on hacking 225, so the first stretch of every node had nothin
 the programs, the Tian Di Hui trip and home RAM all wait on money. `bestCrime` takes the highest
 `chance x money / time`, both read from the game (`getCrimeStats`, once per process - money already
 carries the multipliers - and `getCrimeChance`, every idle tick, since odds move with every stat
-point), so no crime table is transcribed. Crime was chosen over the university: the batcher already
+point), so no crime table is transcribed. It picks only from `MONEY_CRIMES` - Shoplift, Mug, Deal
+Drugs, Homicide, all 2-10 s - the user's rule: a switch or real work turning up restarts the crime
+and forfeits the unit, which on Heist is 600 s. Crime was chosen over the university: the batcher already
 out-earns a class in hacking exp, and crime also trains the combat stats. Only a failed read leaves
 it truly idle.
 

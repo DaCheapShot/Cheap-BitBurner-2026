@@ -3,7 +3,7 @@ import {
   WORK_ORDER, WORK_TYPE_ORDER, FACTION_REP_TARGET,
   TDH_FACTION, TDH_CITY, TDH_HACKING, TDH_MONEY, HOME_CITY, TRAVEL_COST,
   MIN_AUG_BATCH, NFG, AUG_PRICE_MULT, NFG_LEVEL_MULT, AUG_SKIP_FACTIONS,
-  DONATE_MONEY_PER_REP, RED_PILL,
+  DONATE_MONEY_PER_REP, RED_PILL, MONEY_CRIMES,
 } from "./config.js";
 
 /**
@@ -273,14 +273,15 @@ export function chooseAction(player, state) {
 }
 
 /**
- * The crime paying the most per second at the player's own odds, or null.
- * Failure pays nothing and still takes the full time, so the rate is
+ * The MONEY_CRIMES entry paying the most per second at the player's own odds,
+ * or null. Failure pays nothing and still takes the full time, so the rate is
  * chance x money / time. Both inputs come from the game (getCrimeStats money
  * already carries the player's and the node's multipliers), so no crime table
- * is transcribed here.
+ * is transcribed here. Crimes outside the list are never picked, whatever they
+ * pay - the user's rule, see MONEY_CRIMES.
  *
  * ponytail: no hysteresis. A switch restarts the crime and forfeits its
- * progress - up to Heist's 600 s - but chance only rises, so each pair
+ * progress - at most Deal Drugs' 10 s - and chance only rises, so each pair
  * crosses once. Add a margin if a live log shows it flapping.
  *
  * @param stats   {crime: {money, time}}   getCrimeStats, time in ms
@@ -289,7 +290,9 @@ export function chooseAction(player, state) {
 export function bestCrime(stats, chances) {
   let best = null;
   let rate = 0;
-  for (const [crime, c] of Object.entries(stats)) {
+  for (const crime of MONEY_CRIMES) {
+    const c = stats[crime];
+    if (!c) continue;
     const r = (chances[crime] ?? 0) * c.money / c.time;
     if (r > rate) [best, rate] = [crime, r];
   }

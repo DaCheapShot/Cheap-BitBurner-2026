@@ -111,14 +111,15 @@ return { had, owned: had || ns.singularity.purchaseTor() };
 `;
 
 /**
- * Cheapest program first, each at most PROG_BUDGET_FRACTION of what is left.
- * getDarkwebProgramCost returns 0 for a program already owned, so it doubles
- * as the ownership check and fileExists is not needed.
+ * Cheapest WANTED program first, each at most PROG_BUDGET_FRACTION of what is
+ * left. getDarkwebProgramCost returns 0 for a program already owned, so it
+ * doubles as the ownership check and fileExists is not needed.
  */
 const PROGS = `
-import { PROG_BUDGET_FRACTION } from "/scripts/sing/config.js";
+import { PROG_BUDGET_FRACTION, PROGS_WANTED } from "/scripts/sing/config.js";
 let money = ns.getServerMoneyAvailable("home");
 const want = ns.singularity.getDarkwebPrograms()
+  .filter((name) => PROGS_WANTED.includes(name))
   .map((name) => ({ name, cost: ns.singularity.getDarkwebProgramCost(name) }))
   .filter((p) => p.cost > 0)
   .sort((a, b) => a.cost - b.cost);
@@ -384,7 +385,7 @@ function donationsLine(ns, ds) {
 
 function progsLine(ns, p) {
   if (p.bought.length) return `bought ${p.bought.join(", ")}${p.left ? ` - ${p.left} left` : ""}`;
-  if (!p.left) return "every darkweb program owned";
+  if (!p.left) return "every wanted program owned";
   return `nothing bought: ${p.left} left, cheapest ${money$(ns, p.next)} against ` +
     `${money$(ns, p.money)} cash (buys at ${ns.format.percent(PROG_BUDGET_FRACTION, 0)})`;
 }

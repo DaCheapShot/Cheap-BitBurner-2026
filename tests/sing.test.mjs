@@ -67,8 +67,9 @@ async function driveSing(mods, {
     getUpgradeHomeRamCost: () => 1e6,
     upgradeHomeRam: rec("upgradeHomeRam", () => true),
     purchaseTor: rec("purchaseTor", () => { tor = true; return true; }),
-    getDarkwebPrograms: () => ["BruteSSH.exe", "FTPCrack.exe"],
-    getDarkwebProgramCost: (n) => (n === "BruteSSH.exe" ? 5e5 : 1.5e6),
+    // ServerProfiler is the cheapest and must still never be bought: not a port opener.
+    getDarkwebPrograms: () => ["ServerProfiler.exe", "BruteSSH.exe", "FTPCrack.exe"],
+    getDarkwebProgramCost: (n) => ({ "ServerProfiler.exe": 4e5, "BruteSSH.exe": 5e5 })[n] ?? 1.5e6,
     purchaseProgram: rec("purchaseProgram", () => true),
     checkFactionInvitations: () => (typeof invites === "function" ? invites() : invites),
     joinFaction: rec("joinFaction", (f) => { p.factions.push(f); return true; }),
@@ -629,6 +630,7 @@ export const tests = {
     assert(r.count("purchaseTor") === 1, `purchaseTor ${r.count("purchaseTor")} times`);
     assert(r.count("hasTorRouter") === 1, `the TOR body should stop running once owned: ${r.count("hasTorRouter")}`);
     assert(r.count("purchaseProgram") >= 1, "programs should be bought once TOR is owned");
+    assert(!r.calls.includes("purchaseProgram:ServerProfiler.exe"), "only PROGS_WANTED is bought");
   },
 
   "denied invites never reach JOIN, allowed ones do": async () => {
@@ -758,12 +760,17 @@ export const tests = {
     assert(short.count("purchaseAugmentation") === 0 && short.count("installAugmentations") === 0, "149 is not the bar");
   },
 
-  "bestCrime ranks by chance x money / time, and none at zero odds": async () => {
+  "bestCrime ranks MONEY_CRIMES by chance x money / time, and none at zero odds": async () => {
     const { bestCrime } = (await loadScripts())["sing/plan"];
-    const stats = { Shoplift: { money: 15e3, time: 2e3 }, Heist: { money: 120e6, time: 600e3 } };
-    assert(bestCrime(stats, { Shoplift: 1, Heist: 0.01 }) === "Shoplift", "1% Heist is $2k/s, Shoplift $7.5k/s");
-    assert(bestCrime(stats, { Shoplift: 1, Heist: 0.5 }) === "Heist", "50% Heist is $100k/s");
-    assert(bestCrime(stats, { Shoplift: 0, Heist: 0 }) === null, "no odds, no crime");
+    const stats = {
+      Shoplift: { money: 15e3, time: 2e3 }, Homicide: { money: 45e3, time: 3e3 },
+      Heist: { money: 120e6, time: 600e3 },
+    };
+    assert(bestCrime(stats, { Shoplift: 1, Homicide: 0.3 }) === "Shoplift", "Shoplift $7.5k/s, Homicide $4.5k/s");
+    assert(bestCrime(stats, { Shoplift: 1, Homicide: 0.9 }) === "Homicide", "Homicide $13.5k/s");
+    // Heist at 50% is $100k/s - and still never picked: the long crimes are out.
+    assert(bestCrime(stats, { Shoplift: 1, Homicide: 0.9, Heist: 0.5 }) === "Homicide", "Heist is not a MONEY_CRIME");
+    assert(bestCrime(stats, { Heist: 1 }) === null, "no odds on the list, no crime");
   },
 
   // A fresh install: no faction, no company step open. Crime for money rather
