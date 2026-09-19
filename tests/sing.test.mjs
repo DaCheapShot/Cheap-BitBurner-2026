@@ -578,19 +578,44 @@ export const tests = {
     assert(joined.company !== "Fulcrum Technologies", `its faction joined - done, got ${JSON.stringify(joined)}`);
   },
 
-  // Only ever the Tian Di Hui round trip, and only from/to its own two ends, so
-  // a trip the player made by hand is never undone.
-  "travel: out for Tian Di Hui with the fare home in hand, back once joined": async () => {
-    const { chooseTravel } = (await loadScripts())["sing/plan"];
+  "chooseCityGroup: a joined city decides; else most priority augs, then most augs, ties to Sector-12": async () => {
+    const mods = await loadScripts();
+    const { chooseCityGroup } = mods["sing/plan"];
+    const { CITY_GROUPS } = mods["sing/config"];
+    const [west, east, volhaven] = CITY_GROUPS;
+    assert(chooseCityGroup(["Chongqing"], {}, []) === east, "joined Chongqing - the game has locked the rest");
+    const augsOf = {
+      "Sector-12": ["c1", "NeuroFlux Governor"], Aevum: [], Chongqing: ["h1"], "New Tokyo": ["h1", "h2"],
+      Ishima: [], Volhaven: ["h1", "c2", "c3"],
+    };
+    const priority = { h1: true, h2: true, c1: false, c2: false, c3: false };
+    assert(chooseCityGroup([], augsOf, [], priority) === east, "two priority augs east, one in Volhaven");
+    assert(chooseCityGroup([], augsOf, ["h2"], priority) === volhaven, "one each - Volhaven has more augs in all");
+    assert(chooseCityGroup([], augsOf, ["h1", "h2", "c1", "c2", "c3"], priority) === west,
+      "nothing left anywhere (NeuroFlux never counts) - Sector-12's group");
+  },
+
+  "travel: Tian Di Hui first, then the group's cities, each once its money bar is met": async () => {
+    const mods = await loadScripts();
+    const { chooseTravel } = mods["sing/plan"];
+    const [west, east] = mods["sing/config"].CITY_GROUPS;
+    const go = (over, o = {}) => chooseTravel(player(over), { group: west, ...o });
     const hacker = { ...strong, hacking: 50 };
-    assert(chooseTravel(player({ skills: hacker, money: 1.4e6 })) === "Chongqing", "go");
-    assert(chooseTravel(player({ skills: hacker, money: 1.39e6 })) === null, "not without the fare home");
-    assert(chooseTravel(player({ skills: { ...strong, hacking: 49 }, money: 1e9 })) === null, "not below hacking 50");
-    assert(chooseTravel(player({ skills: hacker, city: "Aevum" })) === null, "never from a city the player chose");
-    assert(chooseTravel(player({ skills: hacker, city: "Chongqing" })) === null, "wait there for the invite");
-    assert(chooseTravel(player({ skills: hacker, city: "Chongqing", factions: ["Tian Di Hui"] })) === "Sector-12",
-      "home once joined");
-    assert(chooseTravel(player({ skills: hacker, factions: ["Tian Di Hui"] })) === null, "done");
+    assert(go({ skills: hacker, money: 1.4e6 }) === "Chongqing", "Tian Di Hui's $1m plus a fare out and back");
+    assert(go({ skills: hacker, money: 1.39e6 }) === null, "short of the fares, and Sector-12 wants $15m");
+    assert(go({ skills: { ...strong, hacking: 49 }, money: 1e9 }) === null, "no Tian Di Hui below 50 - wait for Sector-12 here");
+    assert(go({ skills: hacker, city: "New Tokyo", money: 1e6 }) === null, "any Tian Di Hui city will do - wait there");
+    const tdh = { skills: hacker, factions: ["Tian Di Hui"], city: "Chongqing" };
+    assert(go({ ...tdh, money: 1e9 }) === "Sector-12", "then Sector-12's invite");
+    assert(go({ ...tdh, money: 1e7 }) === null, "not yet affordable - stay put, never undo a trip for nothing");
+    const s12 = { ...tdh, factions: ["Tian Di Hui", "Sector-12"], city: "Sector-12" };
+    assert(go({ ...s12, money: 4.04e7 }) === "Aevum", "Aevum's $40m plus the fares");
+    assert(go({ ...s12, money: 4e7 }) === null, "not with less");
+    assert(go({ ...tdh, money: 1e9 }, { targets: { "Sector-12": 0, Aevum: 0 } }) === null, "nothing left to buy there");
+    assert(go({ ...tdh, money: 1e9 }, { targets: { "Sector-12": 0, Aevum: 0 }, grindKarma: true }) === "Sector-12",
+      "nothing wanted and grinding karma - the gym's city");
+    assert(go({ ...tdh, money: 1e9 }, { group: east }) === null, "east: Chongqing is wanted and here");
+    assert(go({ ...tdh, factions: ["Tian Di Hui", "Chongqing"], money: 1e9 }, { group: east }) === "New Tokyo", "then New Tokyo");
   },
 
   // workForFaction refuses the gang's faction and getFactionWorkTypes returns []
@@ -753,17 +778,19 @@ export const tests = {
     assert(r.count("travelToCity") === 0, "already in Tian Di Hui - no trip");
   },
 
-  // The whole trip against a fake that only invites a player standing in
-  // Chongqing. Chongqing's own invite arrives too and must be declined.
+  // Out for Tian Di Hui at tick 0, invited at the first JOIN tick, then on to
+  // Sector-12 for its own invite. Chongqing's invite arrives too and must be declined.
   "the Tian Di Hui round trip, end to end": async () => {
     const mods = await loadScripts();
-    const p = player({ skills: { ...strong, hacking: 60 }, money: 1e7 });
+    const p = player({ skills: { ...strong, hacking: 60 }, money: 2e7 });
     const { JOIN_EVERY } = mods["sing/config"];
     // Out at tick 0, invited at the first JOIN tick; READ runs before JOIN, so it
     // sees the join a tick later, flies home, and works the tick after that.
     const r = await driveSing(mods, {
       ticks: JOIN_EVERY + 3, p,
       invites: () => (p.city === "Chongqing" && !p.factions.includes("Tian Di Hui") ? ["Tian Di Hui", "Chongqing"] : []),
+      augs: { "Tian Di Hui": [{ name: "Neuroreceptor Management Implant", rep: 75e3, price: 5e8 }],
+        "Sector-12": [{ name: "CashRoot Starter Kit", rep: 1e12, price: 1 }] },
     });
     const trips = r.calls.filter((c) => c.startsWith("travelToCity:"));
     assert(JSON.stringify(trips) === JSON.stringify(["travelToCity:Chongqing", "travelToCity:Sector-12"]),

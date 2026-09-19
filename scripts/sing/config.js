@@ -310,17 +310,28 @@ export const BACKDOOR_KEEP_GB = 6.60;
 
 /**
  * Tian Di Hui invites only a player standing in Chongqing, New Tokyo or Ishima
- * with hacking 50 and $1m (FactionInfo.tsx). So: fly out from Sector-12 once
- * both hold with the fare home in hand, wait there for the invite, fly back once
- * joined - the gym and Sector-12's own invite are Sector-12-only. Chongqing's
- * own invite, which would arrive while waiting, is in JOIN_DENY.
+ * with hacking 50 and $1m (FactionInfo.tsx) - TDH_CITIES, flying to the first.
+ * Its stop comes before every city faction's in chooseTravel.
  */
 export const TDH_FACTION = "Tian Di Hui";
-export const TDH_CITY = "Chongqing";
+export const TDH_CITIES = ["Chongqing", "New Tokyo", "Ishima"];
 export const TDH_HACKING = 50;
 export const TDH_MONEY = 1e6;
-export const HOME_CITY = "Sector-12";
 /** CONSTANTS.TravelCost. */
 export const TRAVEL_COST = 200e3;
+
+/**
+ * The city factions, grouped by the enemy table in FactionInfo.tsx: joining
+ * one locks out every faction in the other groups for the rest of the install.
+ * Membership resets at an install, so chooseCityGroup picks one group per
+ * install - the one with the most priority augs left, then the most augs - and
+ * the others' invites are declined. That is the rotation: every group's augs
+ * come in reach over enough installs. Ties go to the first group.
+ */
+export const CITY_GROUPS = [["Sector-12", "Aevum"], ["Chongqing", "New Tokyo", "Ishima"], ["Volhaven"]];
+/** Each city faction's invite: standing in the city with this much cash (FactionInfo.tsx). */
+export const CITY_INVITE_MONEY = {
+  "Sector-12": 15e6, Aevum: 40e6, Chongqing: 20e6, "New Tokyo": 20e6, Ishima: 30e6, Volhaven: 50e6,
+};
 /** Unfocused work earns CONSTANTS.BaseFocusBonus = 0.8 without the Neuroreceptor implant. */
 export const WORK_FOCUS = true;

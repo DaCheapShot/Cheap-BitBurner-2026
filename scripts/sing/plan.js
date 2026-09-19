@@ -1,7 +1,7 @@
 import {
   TRAIN_STAT_FLOOR, TRAIN_GYM, TRAIN_GYM_CITY, CRIME_TYPE, GANG_KARMA_TARGET,
   WORK_ORDER, WORK_TYPE_ORDER, FACTION_REP_TARGET,
-  TDH_FACTION, TDH_CITY, TDH_HACKING, TDH_MONEY, HOME_CITY, TRAVEL_COST,
+  TDH_FACTION, TDH_CITIES, TDH_HACKING, TDH_MONEY, TRAVEL_COST, CITY_GROUPS, CITY_INVITE_MONEY,
   MIN_AUG_BATCH, NFG, AUG_PRICE_MULT, NFG_LEVEL_MULT, AUG_SKIP_FACTIONS,
   DONATE_MONEY_PER_REP, RED_PILL, MONEY_CRIMES,
 } from "./config.js";
@@ -200,18 +200,58 @@ function steps(player) {
 }
 
 /**
- * Where to fly, or null. Only ever the Tian Di Hui round trip: out from
- * HOME_CITY once the invite's hacking and money bars are met with the fare home
- * in hand, back once joined. Leaving only from home and returning only from
- * TDH_CITY means a trip the player made by hand is never undone.
+ * This install's city group: the one already joined into, since the game has
+ * locked the others - else the group with the most priority augs left, then
+ * the most augs of any kind, over its factions without duplicates. Ties go to
+ * the earlier group, Sector-12's. NeuroFlux never counts, as in repTargets; an
+ * unrated aug counts as priority, as there.
+ *
+ * @param priority {aug: bool} from AUG_STATS
  */
-export function chooseTravel(player) {
-  const joined = player.factions.includes(TDH_FACTION);
-  if (!joined && player.city === HOME_CITY && player.skills.hacking >= TDH_HACKING &&
-      player.money >= TDH_MONEY + 2 * TRAVEL_COST) {
-    return TDH_CITY;
+export function chooseCityGroup(joined, augsOf, owned, priority = {}) {
+  const inGroup = CITY_GROUPS.find((g) => g.some((c) => joined.includes(c)));
+  if (inGroup) return inGroup;
+  const have = new Set(owned);
+  const score = (g) => {
+    const left = [...new Set(g.flatMap((c) => augsOf[c] ?? []))].filter((a) => a !== NFG && !have.has(a));
+    return [left.filter((a) => priority[a] !== false).length, left.length];
+  };
+  let best = CITY_GROUPS[0];
+  let bs = score(best);
+  for (const g of CITY_GROUPS.slice(1)) {
+    const s = score(g);
+    if (s[0] > bs[0] || (s[0] === bs[0] && s[1] > bs[1])) [best, bs] = [g, s];
   }
-  if (joined && player.city === TDH_CITY) return HOME_CITY;
+  return best;
+}
+
+/**
+ * Where to fly, or null. The stops, in order: Tian Di Hui (any of TDH_CITIES,
+ * hacking TDH_HACKING) while unjoined with augs left, then each city of `group`
+ * whose faction is unjoined with augs left. The first stop whose money bar is
+ * met wins - the bar alone where the player already stands, the bar plus a
+ * fare out and back from anywhere else, since an invite checks cash on hand
+ * after the ticket. Standing in the winner's city is a wait for its invite, and
+ * no stop affordable is a wait wherever the player is. With no stop left at
+ * all, a karma grinder goes to the gym's city - the only other reason to move.
+ *
+ * ponytail: a cash dip while waiting can send the player on to a later, cheaper
+ * stop and back again, $200k a leg. Add hysteresis if a log shows it.
+ *
+ * @param o.group      chooseCityGroup's pick
+ * @param o.targets    {faction: rep}, tier 2 - 0 means nothing left there;
+ *                     absent means unread, which counts as wanted
+ * @param o.grindKarma GRIND_GANG_KARMA, as READ returned it
+ */
+export function chooseTravel(player, { group, targets = {}, grindKarma = false }) {
+  const want = (f) => !player.factions.includes(f) && targets[f] !== 0;
+  const stops = [];
+  if (want(TDH_FACTION) && player.skills.hacking >= TDH_HACKING) stops.push({ cities: TDH_CITIES, money: TDH_MONEY });
+  for (const c of group) if (want(c)) stops.push({ cities: [c], money: CITY_INVITE_MONEY[c] });
+  const here = (s) => s.cities.includes(player.city);
+  const next = stops.find((s) => player.money >= s.money + (here(s) ? 0 : 2 * TRAVEL_COST));
+  if (next) return here(next) ? null : next.cities[0];
+  if (!stops.length && grindKarma && player.city !== TRAIN_GYM_CITY) return TRAIN_GYM_CITY;
   return null;
 }
 

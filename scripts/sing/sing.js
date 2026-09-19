@@ -1,6 +1,6 @@
 import {
   SING_TICK_MS, UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
-  PROG_BUDGET_FRACTION, JOIN_DENY,
+  PROG_BUDGET_FRACTION, JOIN_DENY, CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, MIN_AUG_BATCH, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
 } from "./config.js";
@@ -711,7 +711,7 @@ export async function main(ns) {
     // resets its progress, and one longer than the tick would never complete.
     // A flight skips this tick's work: r.player still says the old city, and the
     // gym is only where the player no longer is.
-    const city = r && chooseTravel(r.player);
+    const city = r && chooseTravel(r.player, { group: CITY_GROUPS[0], targets, grindKarma: r.grindKarma });
     const flew = city ? await call("travel", TRAVEL, city) : false;
     if (city) log(`travel: ${flew ? "flew" : "could not fly"} to ${city}`);
     if (r && !flew) {
