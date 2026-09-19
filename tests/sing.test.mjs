@@ -375,6 +375,54 @@ export const tests = {
     assert(t.D === 1e6, `D: z unread must not read as done - got ${t.D}`);
   },
 
+  "tier 1 rep targets count only priority augs; an unrated aug still counts": async () => {
+    const { repTargets } = (await loadScripts())["sing/plan"];
+    const augsOf = { A: ["h", "c"], B: ["c"], C: ["u"] };
+    const info = { h: { rep: 5e3 }, c: { rep: 20e3 }, u: { rep: 7e3 } };
+    const t = repTargets(augsOf, [], info, { h: true, c: false });
+    assert(t.A === 5e3, `A: only h counts - got ${t.A}`);
+    assert(t.B === 0, `B: sells only a non-priority aug - got ${t.B}`);
+    assert(t.C === 7e3, `C: u is unrated, and unknown must not read as done - got ${t.C}`);
+    assert(repTargets(augsOf, [], info).A === 20e3, "no priority map: every aug counts, as before");
+  },
+
+  "tier 1 first: a faction with priority augs left beats one with only the rest": async () => {
+    const { chooseAction } = (await loadScripts())["sing/plan"];
+    const p = player({ factions: ["NiteSec", "CyberSec"] });
+    const workTypes = { NiteSec: ["hacking"], CyberSec: ["hacking"] };
+    const targets = { NiteSec: 50e3, CyberSec: 10e3 };
+    const priorityTargets = { NiteSec: 0, CyberSec: 10e3 };
+    const one = chooseAction(p, state({ workTypes, targets, priorityTargets }));
+    assert(one.faction === "CyberSec" && one.tier === 1 && one.target === 10e3,
+      `NiteSec has no priority aug left - CyberSec in tier 1, got ${JSON.stringify(one)}`);
+    const two = chooseAction(p, state({ workTypes, targets, priorityTargets, rep: { CyberSec: 10e3 } }));
+    assert(two.faction === "NiteSec" && two.tier === 2 && two.target === 50e3,
+      `tier 1 done - NiteSec for the rest, got ${JSON.stringify(two)}`);
+    const flat = chooseAction(p, state({ workTypes, targets }));
+    assert(flat.faction === "NiteSec" && flat.tier === undefined, "no priorityTargets: one pass, no tier");
+  },
+
+  "a company step is skipped in the tier where its faction has nothing left": async () => {
+    const mods = await loadScripts();
+    const { chooseAction } = mods["sing/plan"];
+    const { WORK_ORDER } = mods["sing/config"];
+    const none = Object.fromEntries(WORK_ORDER.filter((s) => s.company).map((s) => [s.faction ?? s.company, 0]));
+    const a = chooseAction(player({ skills: { ...strong, hacking: 300 } }),
+      state({ targets: {}, priorityTargets: none }));
+    assert(a.kind === "company" && a.company === "Bachman & Associates" && a.tier === 2,
+      `no company has a priority aug - the first company in tier 2, got ${JSON.stringify(a)}`);
+  },
+
+  "the batch plans priority augs first, then the rest, each dearest first": async () => {
+    const { planAugBuys } = (await loadScripts())["sing/plan"];
+    const info = { h1: { rep: 1, price: 1e6 }, h2: { rep: 1, price: 2e6 }, c1: { rep: 1, price: 9e6 } };
+    const base = { augsOf: { F: ["h1", "h2", "c1"] }, owned: [], queued: 0, info, prereqs: {}, rep: { F: 1e9 }, cash: 1e15, force: true };
+    const tiered = planAugBuys({ ...base, priority: { h1: true, h2: true, c1: false } }).buys.map((b) => b.name);
+    assert(JSON.stringify(tiered) === '["h2","h1","c1"]', `priority first, then the rest: ${tiered}`);
+    const flat = planAugBuys(base).buys.map((b) => b.name);
+    assert(JSON.stringify(flat) === '["c1","h2","h1"]', `no priority map: dearest first, as before: ${flat}`);
+  },
+
   "the batch: dearest first, each priced x1.9 per aug ahead of it": async () => {
     const { planAugBuys } = (await loadScripts())["sing/plan"];
     const names = Array.from({ length: 10 }, (_, i) => `a${i}`);
