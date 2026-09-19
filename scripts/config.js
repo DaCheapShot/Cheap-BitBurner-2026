@@ -310,6 +310,37 @@ export const SHARE_MAX_FRACTION = 0.90;
  *
  * Pure arithmetic, no ns calls - config.js must stay 0 GB.
  */
+/**
+ * sing/sing.js writes "hold" here whenever the player is not doing FACTION work,
+ * and "" when they are. A hold turns share off without touching SHARE_MARKER,
+ * so the fraction the user chose with sharemode.js survives and comes back the
+ * moment faction work resumes.
+ *
+ * Faction work ONLY, and that is the game's rule, not a preference: the share
+ * bonus appears in the three faction formulas in
+ * src/PersonObjects/formulas/reputation.ts and nowhere else - company work
+ * (calculateCompanyWorkStats) never reads it. Share during company work, crime
+ * or the gym is RAM taken from the batcher for nothing.
+ *
+ * A missing or empty file is NOT a hold: without sing (--no-sing, or outside
+ * BN4 without SF4) share follows the marker exactly as before.
+ */
+export const SHARE_HOLD_MARKER = "/data/share-hold.txt";
+
+/**
+ * The share fraction actually in force: SHARE_MARKER's, unless sing holds it.
+ * Both managers read share through this, so a hold cannot reach one and not
+ * the other. Pure, like everything in this file.
+ */
+export function effectiveShareFraction(markerText, holdText) {
+  return shareHeld(holdText) ? 0 : shareFractionFrom(markerText);
+}
+
+/** Is SHARE_HOLD_MARKER's content a hold? The one parser, for the logs that say why share is off. */
+export function shareHeld(holdText) {
+  return String(holdText ?? "").trim() === "hold";
+}
+
 export function shareFractionFrom(text) {
   const word = String(text ?? "").trim().split("\n")[0].trim().toLowerCase();
   if (word === "" || word === "off" || word === "false") return 0;

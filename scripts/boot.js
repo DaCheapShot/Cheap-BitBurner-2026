@@ -1,10 +1,11 @@
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
          WORKER_LIST,
-         DEPLOY_LIST, DEPLOY_MANIFEST } from "./config.js";
+         DEPLOY_LIST, DEPLOY_MANIFEST, SHARE_HOLD_MARKER } from "./config.js";
 // The gang supervisor's path. Same kind of import as the line above - that file
 // is constants only, no ns call anywhere in it, so this is 0 GB.
 import { GANG_SERVICE } from "./gang/config.js";
 import { CONTRACTS_SERVICE } from "./contracts/config.js";
+import { SING_SERVICE } from "./sing/config.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -21,6 +22,9 @@ import { CONTRACTS_SERVICE } from "./contracts/config.js";
  *                     ns.gang.inGang() is 0 GB, so the check costs nothing on
  *                     every BitNode that will never have one. The gang
  *                     supervisor holds no gang API itself; it runs transients.
+ *   7. sing         - kept alive as a service, ALWAYS. Singularity has no 0 GB
+ *                     availability check, so sing.js gates itself: without
+ *                     Source-File 4 it parks rather than exits.
  *
  * TWO BATCHERS, ONE POOL. scripts/continuous/ is the JIT batcher - it streams
  * batches at a cadence and sizes its own steal fraction from the server and the
@@ -49,6 +53,7 @@ import { CONTRACTS_SERVICE } from "./contracts/config.js";
  *         run scripts/boot.js --no-cloud          (don't buy servers)
  *         run scripts/boot.js --no-gang           (don't supervise the gang)
  *         run scripts/boot.js --no-contracts      (don't solve coding contracts)
+ *         run scripts/boot.js --no-sing           (don't run the singularity supervisor)
  *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
  *         run scripts/boot.js --shotgun           (the volley batcher, not the stream)
  *         run scripts/boot.js --targets 5         (continuous only; shotgun ignores it)
@@ -303,6 +308,10 @@ export async function main(ns) {
   const noCloud = args.includes("--no-cloud");
   const noGang = args.includes("--no-gang");
   const noContracts = args.includes("--no-contracts");
+  const noSing = args.includes("--no-sing");
+  // sing.js holds share off whenever the player is not doing faction work. With
+  // sing opted out nothing would ever release that hold, so clear it here.
+  if (noSing) ns.write(SHARE_HOLD_MARKER, "", "w");
   const noManager = args.includes("--no-manager");
   const noFormulas = args.includes("--no-formulas");
   // Continuous by default. It is the measured better earner - $947m/s average
@@ -438,6 +447,15 @@ export async function main(ns) {
     if (!noGang && ns.gang.inGang()) {
       killDuplicates(ns, GANG_SERVICE, log);
       ensureService(ns, GANG_SERVICE, [], log);
+    }
+    // The singularity supervisor. NOT gated like the gang: there is no 0 GB
+    // way to ask whether singularity is available (getResetInfo is 1.00, and
+    // boot is pinned at 3.50). It does not need a gate, because sing.js never
+    // exits - without Source-File 4 it parks, so ensureService finds it up and
+    // there is no relaunch loop to prevent.
+    if (!noSing) {
+      killDuplicates(ns, SING_SERVICE, log);
+      ensureService(ns, SING_SERVICE, [], log);
     }
     // The contract solver, and it is a TRANSIENT, not a service - one sweep per
     // tick, holding nothing in between. As a resident it pinned 4.10 GB forever

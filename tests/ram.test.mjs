@@ -13,7 +13,7 @@ const COST = {
   getServerGrowth: 0.1, getServerMaxRam: 0.05, getServerUsedRam: 0.05,
   fileExists: 0.1, isRunning: 0.1, ps: 0.2, ls: 0.2,
   getScriptRam: 0.1, getHackTime: 0.05, getGrowTime: 0.05, getWeakenTime: 0.05,
-  getPlayer: 0.5, nuke: 0.05, brutessh: 0.05, ftpcrack: 0.05,
+  getPlayer: 0.5, getFavorToDonate: 0.1, getBitNodeMultipliers: 4, nuke: 0.05, brutessh: 0.05, ftpcrack: 0.05,
   relaysmtp: 0.05, httpworm: 0.05, sqlinject: 0.05,
   share: 2.4, getSharePower: 0.2,
   // The fork's ns.cloud namespace, which replaces vanilla's top-level purchased
@@ -52,6 +52,34 @@ const COST = {
   // only route to it: ns.getPlayer() carries totalPlaytime, not
   // playtimeSinceLastAug.
   getResetInfo: 1,
+  // ns.singularity, the WHOLE namespace rather than what sing/ calls, so a later
+  // phase cannot collide with a name nobody thought to add. At BitNode 4's 1x:
+  // SF4Cost() in RamCostGenerator.ts returns the base cost when bitNodeN === 4,
+  // and the base is SingularityFn1 = 2, Fn2 = 3, Fn3 = 5 and their fractions.
+  // Outside BN4 the game multiplies these by 16/4/1 by SF4 level - but only the
+  // rpc transients hold them, so no resident pin here depends on which.
+  //
+  // `connect` (2.00) and `cat` (0.50) are the realistic accidents: obvious local
+  // names in any routing or file code. connect is in BANNED below.
+  universityCourse: 2, gymWorkout: 2, travelToCity: 2, goToLocation: 5,
+  purchaseTor: 2, purchaseProgram: 2, getCurrentServer: 2,
+  getCompanyPositionInfo: 2, getCompanyPositions: 2, cat: 0.5, connect: 2,
+  manualHack: 2, installBackdoor: 2, getDarkwebProgramCost: 0.5, getDarkwebPrograms: 0.5,
+  hospitalize: 0.5, isBusy: 0.5, stopAction: 1, upgradeHomeRam: 3, upgradeHomeCores: 3,
+  getUpgradeHomeRamCost: 1.5, getUpgradeHomeCoresCost: 1.5, workForCompany: 3,
+  applyToCompany: 3, quitJob: 3, getCompanyRep: 1, getCompanyFavor: 1,
+  getCompanyFavorGain: 0.75, getFactionInviteRequirements: 3, getFactionEnemies: 3,
+  checkFactionInvitations: 3, joinFaction: 3, workForFaction: 3, getFactionWorkTypes: 1,
+  getFactionRep: 1, getFactionFavor: 1, getFactionFavorGain: 0.75, donateToFaction: 5,
+  createProgram: 5, getHackingLevelRequirementOfProgram: 5, commitCrime: 5,
+  getCrimeChance: 5, getCrimeStats: 5, getOwnedAugmentations: 5, getOwnedSourceFiles: 5,
+  getAugmentationFactions: 5, getAugmentationsFromFaction: 5, getAugmentationPrereq: 5,
+  getAugmentationPrice: 2.5, getAugmentationBasePrice: 2.5, getAugmentationRepReq: 2.5,
+  getAugmentationStats: 5, purchaseAugmentation: 5, softReset: 5, installAugmentations: 5,
+  isFocused: 0.1, setFocus: 0.1, getSaveData: 1, exportGame: 1, exportGameBonus: 0.5,
+  b1tflum3: 16, destroyW0r1dD43m0n: 32, getCurrentWork: 0.5, getUnlockedAchievements: 5,
+  // Top-level, not ns.singularity, but only the singularity bodies reach for it.
+  hasTorRouter: 0.05,
   // probe is this fork's ns.dnet.probe.
   probe: 0.2, disableLog: 0,
   // Not functions. RamCalculations.ts resolves a ref named `window` or
@@ -131,23 +159,43 @@ function closure(bare, seen = new Set()) {
  */
 function ramOf(bare) {
   const refs = new Set();
-  for (const mod of closure(bare)) {
-    const src = codeOnly(readScript(mod));
-    // The optional leading dot is the MemberExpression case: `times.hack` is
-    // charged for `hack` just as a bare `hack` would be.
-    for (const m of src.matchAll(/(?<![\w$])(\.?)([A-Za-z_$][\w$]*)\s*(:?)/g)) {
-      const [, dot, name, colon] = m;
-      // hasOwn, not a truthiness check: COST inherits `constructor`, `toString`
-      // and the rest of Object.prototype, and every one of them appears in real
-      // code. The game skips the same list, by name, in parseOnlyCalculateDeps.
-      if (!Object.hasOwn(COST, name)) continue;
-      // `{ hack: 1.70 }` costs nothing: acorn-walk's Property visitor walks the
-      // key only when it is computed. A dotted name is never a key.
-      if (colon && !dot) continue;
-      refs.add(name);
-    }
-  }
+  for (const mod of closure(bare)) addRefs(codeOnly(readScript(mod)), refs);
   return BASE + [...refs].reduce((n, f) => n + COST[f], 0);
+}
+
+/** Every billed name in `code` (already through codeOnly), added to `refs`. */
+function addRefs(code, refs) {
+  // The optional leading dot is the MemberExpression case: `times.hack` is
+  // charged for `hack` just as a bare `hack` would be.
+  for (const m of code.matchAll(/(?<![\w$])(\.?)([A-Za-z_$][\w$]*)\s*(:?)/g)) {
+    const [, dot, name, colon] = m;
+    // hasOwn, not a truthiness check: COST inherits `constructor`, `toString`
+    // and the rest of Object.prototype, and every one of them appears in real
+    // code. The game skips the same list, by name, in parseOnlyCalculateDeps.
+    if (!Object.hasOwn(COST, name)) continue;
+    // `{ hack: 1.70 }` costs nothing: acorn-walk's Property visitor walks the
+    // key only when it is computed. A dotted name is never a key.
+    if (colon && !dot) continue;
+    refs.add(name);
+  }
+  return refs;
+}
+
+/**
+ * What the game charges the transient each rpc body in `bare` runs in: BASE
+ * plus every billed name in the body, keyed by the body's const name. A body's
+ * own imports are 0 GB modules pinned separately, so they are not followed.
+ *
+ * ramOf() cannot see a body - to it the whole thing is one template literal,
+ * blanked by codeOnly(). This is the only place a body is priced before the
+ * game does it.
+ */
+function bodiesOf(bare) {
+  const out = {};
+  for (const m of readScript(bare).matchAll(/\bconst\s+([A-Z_]+)\s*=\s*`([\s\S]*?)`;/g)) {
+    out[m[1]] = BASE + [...addRefs(codeOnly(m[2]), new Set())].reduce((n, f) => n + COST[f], 0);
+  }
+  return out;
 }
 
 export const tests = {
@@ -338,6 +386,76 @@ export const tests = {
     }
   },
 
+  // The singularity surface phase 1 needs is 30.30 GB held together, against a
+  // fresh BN4 home's 32 shared with boot and the batcher. So sing.js holds no
+  // singularity call at all: 1.60 + ns.run 1.00, exactly gang.js's shape.
+  // backdoor.js is started once per server and many run at once, so what one
+  // copy costs is what sing.js budgets launches by - BACKDOOR_GB must match.
+  "sing's backdoor.js is 5.60 GB, and BACKDOOR_GB says so": async () => {
+    const ram = ramOf("sing/backdoor");
+    assert(Math.abs(ram - 5.60) < 0.011, `expected 5.60 GB (1.60 + connect + installBackdoor), got ${ram.toFixed(2)}`);
+    const { BACKDOOR_GB } = (await loadScripts())["sing/config"];
+    assert(Math.abs(BACKDOOR_GB - ram) < 0.011, `BACKDOOR_GB ${BACKDOOR_GB} but backdoor.js costs ${ram.toFixed(2)}`);
+  },
+
+  "sing.js holds no singularity API: 2.60 GB": () => {
+    const ram = ramOf("sing/sing");
+    assert(Math.abs(ram - 2.60) < 0.011, `expected 2.60 GB (1.60 + run 1.00), got ${ram.toFixed(2)}`);
+  },
+
+  // config.js is imported by boot.js (pinned at 3.50) and by the UPGRADE and
+  // PROGS bodies; plan.js is imported by sing.js. One billed name in either is
+  // charged to all of them.
+  "the singularity subsystem's shared modules are free to import": () => {
+    for (const mod of ["sing/config", "sing/plan"]) {
+      const ram = ramOf(mod);
+      assert(Math.abs(ram - BASE) < 0.011,
+        `${mod}.js costs ${(ram - BASE).toFixed(2)} GB to import; it must be 0`);
+    }
+  },
+
+  // The split rule. rpc() allows one call in flight per process, so the free RAM
+  // sing/ needs is the MAX over its bodies, never the sum - and commitCrime alone
+  // is 5.00, so CRIME at 6.60 is the floor of that max. Every other body is held
+  // at or under it: work was one 12.70 ACT body (stop, focus, gym, crime,
+  // faction) and joining was 7.60 until each was split.
+  //
+  // Every body is pinned, not just the max. Without this nothing notices a body
+  // re-fattening until a fresh home refuses to run it - a runtime ns.run -> 0,
+  // logged once as a WARN, and the subsystem quietly doing nothing.
+  "every sing body is priced, and none exceeds CRIME's 6.60": () => {
+    const want = {
+      UPGRADE: 6.25, TOR: 3.65, PROGS: 4.70, INVITES: 4.60, JOIN: 4.60,
+      // 5.60 -> 6.60 for getCompanyRep, which puts READ exactly on the ceiling.
+      // Anything more READ needs is a second read body, not a bigger one.
+      READ: 6.60, GYM: 3.60, CRIME: 6.60, FACTION: 4.60,
+      COMPANY: 4.60, APPLY: 4.60, TRAVEL: 3.60,
+      // The aug reads, one call each: together they would be 14.10.
+      OWNED: 6.60, FAC_AUGS: 6.60, PREREQ: 6.60, AUG_INFO: 6.60, BUY: 6.60,
+      // Favor split from READ (full); DONATE is donateToFaction alone.
+      FAVOR: 2.70, DONATE: 6.60, BN_MULTS: 5.60,
+      // getFactionFavorGain alone, for the Red Pill faction's favor-bar install.
+      FAVOR_GAIN: 2.35,
+      // The install: the sweep (run + isRunning) is split off installAugmentations,
+      // which is 5.00 alone - together 7.70.
+      SWEEP: 2.70, INSTALL: 6.60,
+      // The idle money crime: getCrimeStats and getCrimeChance, 5.00 each.
+      CRIME_STATS: 6.60, CRIME_CHANCE: 6.60,
+      // The backdoor read: scan + getServer + ps + three 0.05 reads. The install
+      // itself is backdoor.js, a real file - it is fire-and-forget, see below.
+      BACKDOORS: 4.15,
+    };
+    const got = bodiesOf("sing/sing");
+    assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),
+      `sing.js bodies ${Object.keys(got)} - every body must be pinned here`);
+    for (const [name, gb] of Object.entries(want)) {
+      assert(Math.abs(got[name] - gb) < 0.011,
+        `${name} body: expected ${gb.toFixed(2)} GB, got ${got[name].toFixed(2)}`);
+      assert(got[name] <= 6.60 + 0.001,
+        `${name} body is ${got[name].toFixed(2)} GB - split it under CRIME's 6.60`);
+    }
+  },
+
   // ns.codingcontract is priced off CodingContractBase = 10, and reading plus
   // attempting in one process is ~22 GB with the network walk - more than a
   // fresh BitNode's 32 GB home has free beside boot, cloud and the continuous
@@ -421,7 +539,7 @@ export const tests = {
     for (const entry of ["boot", "manager", "capacity", "cloud", "deploy",
                          "root", "sharemode", "connectme", "prep",
                          "continuous/manager", "continuous/servers",
-                         "gang/gang", "contracts/contracts"]) {
+                         "gang/gang", "contracts/contracts", "sing/sing"]) {
       for (const mod of closure(entry)) seen.add(mod);
     }
 
@@ -451,12 +569,12 @@ export const tests = {
   // cheap ones (`hack`, `grow`, `weaken` as property names) are deliberate and
   // priced into the totals above.
   "no script names a variable after an expensive ns function": () => {
-    const BANNED = { window: 25, document: 25, attempt: 10, share: 2.4, run: 1, probe: 0.2 };
+    const BANNED = { window: 25, document: 25, attempt: 10, share: 2.4, run: 1, probe: 0.2, connect: 2 };
     const entries = new Set();
     for (const e of ["boot", "manager", "capacity", "cloud", "deploy",
                      "root", "sharemode", "connectme", "prep",
                      "continuous/manager", "continuous/servers",
-                     "gang/gang", "contracts/contracts"]) {
+                     "gang/gang", "contracts/contracts", "sing/sing"]) {
       for (const mod of closure(e)) entries.add(mod);
     }
 
@@ -476,7 +594,7 @@ export const tests = {
       //
       // The trailing (?!\s*:) skips object keys - `{ hack: 1.70 }` costs nothing,
       // because acorn-walk only walks a Property key when it is computed.
-      const BANNED_RE = /(?<![\w$])(\.?)(window|document|attempt|share|run|probe)(?![\w$])(?!\s*:)/g;
+      const BANNED_RE = /(?<![\w$])(\.?)(window|document|attempt|share|run|probe|connect)(?![\w$])(?!\s*:)/g;
       for (const m of src.matchAll(BANNED_RE)) {
         const name = m[2];
         if (calls.has(name)) continue;
