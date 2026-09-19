@@ -63,17 +63,6 @@ export const PROGS_WANTED = [
   "BruteSSH.exe", "FTPCrack.exe", "relaySMTP.exe", "HTTPWorm.exe", "SQLInject.exe", "Formulas.exe",
 ];
 
-// ------------------------------------------------------------------- join ---
-
-/**
- * Invites never accepted. Joining a city faction permanently locks out its
- * enemies (src/Faction/FactionInfo.tsx), and Sector-12 - where every BitNode
- * starts - lists exactly these four. Aevum is Sector-12's ally, so it is not
- * here. Everything else is accepted: phase 1 has no read of invite
- * requirements, which is getFactionInviteRequirements at 3.00 GB.
- */
-export const JOIN_DENY = ["Chongqing", "New Tokyo", "Ishima", "Volhaven"];
-
 // ------------------------------------------------------------------- work ---
 
 /**
@@ -236,6 +225,25 @@ export const NFG_LEVEL_MULT = 1.14;
  * for them (AugmentationHelpers.ts getAugCost).
  */
 export const AUG_SKIP_FACTIONS = ["Shadows of Anarchy"];
+
+/**
+ * Tier 1 - the user's rule: the road to w0r1d_d43m0n is hacking level, so an
+ * aug that raises any of these multipliers (getAugmentationStats) is worked for
+ * and bought before the rest. faction_rep and company_rep are in because a
+ * rep-gain aug speeds every later hour toward the hacking ones - it is why
+ * Bachman comes early. Decided from the game's own stats, not a name list, so
+ * a fork that edits the roster is still sorted right.
+ */
+export const PRIORITY_MULTS = [
+  "hacking", "hacking_exp", "hacking_chance", "hacking_speed", "hacking_money", "hacking_grow",
+  "faction_rep", "company_rep",
+];
+/**
+ * Tier 1 by name: augs whose effect is not a multiplier. The Neuroreceptor
+ * Management Implant removes the unfocused-work penalty, the reason Tian Di Hui
+ * is worked first.
+ */
+export const PRIORITY_AUGS = ["Neuroreceptor Management Implant"];
 
 /**
  * The user's shortcut to the end of the node. THE RED PILL is bought the moment

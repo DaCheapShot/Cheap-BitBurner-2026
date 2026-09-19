@@ -109,6 +109,8 @@ async function driveSing(mods, {
     getAugmentationRepReq: (n) => aug(n)?.rep ?? 0,
     // The game's own pricing: every queued aug multiplies the rest by 1.9.
     getAugmentationPrice: (n) => (aug(n)?.price ?? 0) * 1.9 ** queued.length,
+    // The aug's own `stats` in the fixture, else no multipliers: not a priority aug.
+    getAugmentationStats: rec("getAugmentationStats", (n) => aug(n)?.stats ?? {}),
     purchaseAugmentation: rec("purchaseAugmentation", (f, n) => { queued.push(n); return true; }),
     // The game kills every script here; the fake records and returns, so the
     // loop carries on to the STOP sentinel.
@@ -759,6 +761,35 @@ export const tests = {
     const mixed = await driveSing(mods, { ticks: 1, invites: ["CyberSec", "Ishima"] });
     assert(mixed.calls.includes("joinFaction:CyberSec") && mixed.count("joinFaction") === 1,
       `only CyberSec should be joined: ${mixed.calls}`);
+  },
+
+  // The group is chosen on the aug pass at tick 0, which runs before JOIN.
+  "invites outside this install's city group are declined": async () => {
+    const mods = await loadScripts();
+    const r = await driveSing(mods, {
+      ticks: 1, invites: ["Sector-12", "Chongqing", "CyberSec"],
+      augs: { Chongqing: [{ name: "Neuregen Gene Modification", rep: 1e12, price: 1, stats: { hacking_exp: 1.4 } }] },
+    });
+    const joins = r.calls.filter((c) => c.startsWith("joinFaction:"));
+    assert(JSON.stringify(joins) === '["joinFaction:Chongqing","joinFaction:CyberSec"]',
+      `the east has the only hacking aug - Sector-12 declined: ${joins}`);
+  },
+
+  "each aug is rated once per process": async () => {
+    const mods = await loadScripts();
+    const { AUGS_EVERY } = mods["sing/config"];
+    const r = await driveSing(mods, { ticks: AUGS_EVERY * 2 + 1, p: player({ factions: ["CyberSec"] }), augs: SELLS });
+    assert(r.count("getAugmentationStats") === 2, `two augs sold, each rated once: ${r.count("getAugmentationStats")}`);
+  },
+
+  "the work line names the tier": async () => {
+    const mods = await loadScripts();
+    const r = await driveSing(mods, {
+      ticks: 1, p: player({ factions: ["CyberSec"] }),
+      augs: { CyberSec: [{ name: "BitWire", rep: 1e12, price: 1, stats: { hacking: 1.05 } }] },
+    });
+    assert(r.ns._log.some((l) => l.includes("work: ") && l.includes("CyberSec") && l.includes("tier 1")),
+      `${r.ns._log.filter((l) => l.includes("work: "))}`);
   },
 
   // Hired on the first tick, worked once, promoted on the PROMOTE_EVERY cadence -
