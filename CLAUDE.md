@@ -355,10 +355,10 @@ editor's RAM panel when one moves.
 | ↳ find body | transient: every .cct with its type and data | 12.00 |
 | ↳ submit body | transient: `attempt` and nothing else | 11.60 |
 | ↳ dummy body | transient: `--dummy` self-test minting | 3.60 |
-| `sing/config.js` | singularity tunables, `SING_SERVICE`, `JOIN_DENY` | 0 |
+| `sing/config.js` | singularity tunables, `SING_SERVICE`, `WORK_ORDER`, `CITY_GROUPS` | 0 |
 | `sing/plan.js` | `chooseAction` + `sameAsCurrent` — every decision, pure | 0 |
 | `sing/sing.js` | entry: resident supervisor; every singularity call is an rpc body | 2.60 |
-| ↳ twenty-six bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors | 2.35–6.60 |
+| ↳ twenty-seven bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors | 2.35–6.60 |
 | `sing/backdoor.js` | one fire-and-forget backdoor; many run at once | 5.60 each |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
@@ -927,7 +927,7 @@ split. Splitting *below* 6.60 lowers nothing and costs a round trip, which is wh
 and READ stay whole - READ sits exactly ON the ceiling since `getCompanyRep` joined it, so the
 next read it needs is a second body, not a bigger one. `tests/ram.test.mjs` prices every body
 through `bodiesOf()` - the only place a body is priced before the game does it - and pins all
-twenty-six.
+twenty-seven.
 
 The split also retired two calls outright: `gymWorkout`, `commitCrime` and `workForFaction` all
 take `focus` as an argument, so `setFocus` is never needed, and starting work finishes the
@@ -987,6 +987,17 @@ position the player qualifies for and touches only `Player.jobs`, so APPLY runs 
 `workForCompany` checks the city, so Bachman being in Aevum does not matter. After Bachman the
 hacking factions run HIGHEST first (Daedalus, BitRunners, The Black Hand, NiteSec, CyberSec): the
 higher shops largely cover the lower ones' augs, and each lower target drops as those are bought.
+After the hacking factions come the six city factions (only joined ones apply), then every
+megacorp as a company step followed by its faction: the same 400k bar, hired at 250 hacking for
+ECorp, MegaCorp and NWO and 225 for the rest. A company step's `faction` defaults to its own
+name. Fulcrum is the exception: its faction is Fulcrum Secret Technologies, which also wants
+`fulcrumassets` backdoored. **Work runs in two tiers.** The AUGS pass rates every aug once per
+process with AUG_STATS (`getAugmentationStats`, 6.60). An aug is tier 1 when it raises any
+hacking multiplier or `faction_rep` / `company_rep`, or when it is named in `PRIORITY_AUGS`
+(the Neuroreceptor implant, whose effect is not a multiplier). `chooseAction` walks the steps
+against tier-1 targets first, and against every aug's targets only once no step has tier-1 work.
+The goal is the hacking level `w0r1d_d43m0n` needs, and rep-gain augs speed up every later hour
+of that.
 
 **Nothing to work means a money crime, not idle.** After an install no faction is joined and the
 company step waits on hacking 225, so the first stretch of every node had nothing to do - while TOR,
@@ -999,11 +1010,18 @@ and forfeits the unit, which on Heist is 600 s. Crime was chosen over the univer
 out-earns a class in hacking exp, and crime also trains the combat stats. Only a failed read leaves
 it truly idle.
 
-**The only trip is Tian Di Hui's**, whose invite needs the player standing in Chongqing, New Tokyo
-or Ishima. Out from Sector-12 once hacking is 50 with $1m *plus both fares* in hand; back once
-joined, because the gym and Sector-12's own invite are Sector-12-only. Leaving only from home and
-returning only from Chongqing means a trip made by hand is never undone. Chongqing's own invite
-arrives while waiting and is declined by `JOIN_DENY`. A flight skips that tick's work: READ's
+**One city group per install, and travel collects its invites.** The six city factions are three
+enemy groups (`FactionInfo.tsx`): Sector-12 + Aevum, Chongqing + New Tokyo + Ishima, and
+Volhaven. Joining one locks out the others until the next install, which resets membership. So
+`chooseCityGroup` picks one group per install, the one with the most tier-1 augs left and then
+the most augs overall, with ties going to Sector-12's group. JOIN declines the other groups'
+invites, and over enough installs every group's augs come within reach. A city invite needs the
+player standing in that city with its cash (Sector-12 $15m up to Volhaven $50m). `chooseTravel`
+walks the stops in order: Tian Di Hui (any of Chongqing, New Tokyo or Ishima, hacking 50, $1m),
+then each unjoined city of the group with augs left. It goes to the first stop whose bar is met:
+the bar alone where the player already stands, or the bar plus a fare out and back from anywhere
+else. Standing there means waiting for the invite. This is also what collects Aevum's invite,
+which the old Tian Di Hui-only trip never did. A flight skips that tick's work, because READ's
 player still stands in the old city.
 
 **Backdoors: the four faction servers first, then the whole network.** CyberSec, NiteSec, The Black
@@ -1038,9 +1056,8 @@ empty hold file is no hold, so without sing share behaves exactly as before - an
 sing can stop while holding both release it: a parked `sing.js` clears it, and so does
 `boot.js --no-sing`.
 
-`JOIN_DENY` is the four city factions Sector-12 is enemies with (`FactionInfo.tsx`), because
-joining one locks out its enemies forever; phase 1 accepts every other invite rather than pay 3.00
-GB for `getFactionInviteRequirements`.
+Every invite outside the chosen city group is accepted: only the city factions have enemies in
+this fork, so there is nothing else to deny.
 
 **A faction is worked to the rep its unbought augs need, and no further.** Every `AUGS_EVERY`
 ticks the aug pass reads what is owned (`getOwnedAugmentations(true)` - installed AND queued),
@@ -1053,10 +1070,10 @@ never reads as done. The company step uses its faction's target too, so Bachman 
 an invite that would buy nothing.
 
 **Augs are bought as a BATCH, or not at all** - the user's rule. `planAugBuys` takes every aug
-that is rep-unlocked at a joined faction, **dearest first** (each queued aug multiplies every later
-price by 1.9 - `getGenericAugmentationPriceMultiplier` - so cheap-first pays the multiplier on the
-expensive ones), skipping any that do not fit or whose prerequisite is neither owned nor earlier in
-the batch; then NeuroFlux levels fill, each x1.14 dearer in money AND rep. It returns the batch only
+that is rep-unlocked at a joined faction, **tier 1 first, then dearest first within each tier**
+(each queued aug multiplies every later price by 1.9 - `getGenericAugmentationPriceMultiplier` -
+so cheap-first pays the multiplier on the expensive ones), skipping any that do not fit or whose
+prerequisite is neither owned nor earlier in the batch; then NeuroFlux levels fill, each x1.14 dearer in money AND rep. It returns the batch only
 when queued + batch reaches `MIN_AUG_BATCH` (10) and cash covers all of it. 1.9 is the ceiling -
 Source-File 11 only lowers it - so the plan over-states and can never buy a batch it cannot finish.
 Whatever is left then goes on home RAM (UPGRADE at fraction 1): an install resets money and keeps
