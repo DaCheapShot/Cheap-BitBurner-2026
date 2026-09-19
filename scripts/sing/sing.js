@@ -620,15 +620,24 @@ export async function main(ns) {
     // aug is tier 1" can each move the score, and a group picked on that
     // half-known data would fly the player between groups at $200k a leg. Once
     // settled the score can never move again from here, so the choice locks
-    // for the rest of the process - a real join still overrides it, since
-    // chooseCityGroup checks that first, before it ever scores anything.
-    if (!citySettled) {
+    // for the rest of the process. A city faction joined ANYWHERE - by JOIN or
+    // by hand - still always overrides, settled or not: chooseCityGroup's
+    // joined-group check runs before it ever scores anything, so recomputing
+    // is free and skipping it would strand the group against a real join.
+    const cityJoined = r.player.factions.some((f) => CITY_GROUPS.flat().includes(f));
+    if (!citySettled || cityJoined) {
       const group = chooseCityGroup(r.player.factions, augsOf, owned.all, priority);
       if (group !== cityGroup) {
         cityGroup = group;
         log(`cities: ${group.join(", ")} this install - declining ${otherCities(group).join(", ")}`);
       }
-      citySettled = sold.every((a) => a === NFG || a in priority);
+      // Settle only on REAL data: every city faction's augs must have been
+      // read (a failed FAC_AUGS call leaves augsOf empty, and sold.every on an
+      // empty array is vacuously true - that locked the group to the
+      // CITY_GROUPS[0] fallback forever on an ordinary rpc failure) and at
+      // least one aug must actually have been sold and rated.
+      citySettled ||= CITY_GROUPS.flat().every((c) => c in augsOf) &&
+        sold.length > 0 && sold.every((a) => a === NFG || a in priority);
     }
     const noFavor = r.player.factions.filter((f) => !(f in favor));
     if (noFavor.length) {

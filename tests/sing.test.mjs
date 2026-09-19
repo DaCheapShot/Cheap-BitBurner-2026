@@ -808,6 +808,68 @@ export const tests = {
     assert(cityLines[0].includes("Chongqing"), `expected the east group to win and stick: ${cityLines}`);
   },
 
+  // sold.every(...) over an EMPTY array is vacuously true - so a failed first
+  // FAC_AUGS call (an ordinary rpc failure: no free RAM, a timeout) used to
+  // settle the group on zero data and strand it on the CITY_GROUPS[0] fallback
+  // for the rest of the process, with no later successful pass able to fix it.
+  "a failed first FAC_AUGS call does not settle the group on no data": async () => {
+    const mods = await loadScripts();
+    const { AUGS_EVERY } = mods["sing/config"];
+    const augsData = {
+      "Sector-12": [{ name: "w1", rep: 1e12, price: 1, stats: { hacking: 1.4 } }],
+      Chongqing: [{ name: "e1", rep: 1e12, price: 1, stats: { hacking: 1.4 } }],
+      "New Tokyo": [{ name: "e2", rep: 1e12, price: 1, stats: { hacking: 1.4 } }],
+    };
+    let calls = 0;
+    const r = await driveSing(mods, {
+      ticks: AUGS_EVERY * 2 + 1,
+      augs: augsData,
+      api: {
+        // The whole FAC_AUGS body throws on its first faction, so the entire
+        // pass 1 read fails and augsOf stays empty; every later call succeeds.
+        getAugmentationsFromFaction: (f) => {
+          calls++;
+          if (calls <= 1) throw new Error("no free RAM on home");
+          return (augsData[f] ?? []).map((a) => a.name);
+        },
+      },
+    });
+    const cityLines = r.ns._log.filter((l) => l.includes("  cities: "));
+    assert(cityLines.length > 0, `the group must eventually be decided: ${cityLines}`);
+    assert(cityLines.at(-1).includes("cities: Chongqing"),
+      `east has two priority augs against Sector-12's one - it must win once real data lands: ${cityLines}`);
+  },
+
+  // Once settled, chooseCityGroup used to be skipped entirely - so a city
+  // faction joined in another group, by any path outside JOIN, was never
+  // followed even though chooseCityGroup's own joined-group check would have
+  // caught it for free.
+  "a city faction joined after settling still overrides the locked group": async () => {
+    const mods = await loadScripts();
+    const { AUGS_EVERY } = mods["sing/config"];
+    const p = player();
+    let reads = 0;
+    const r = await driveSing(mods, {
+      ticks: AUGS_EVERY * 2 + 1,
+      p,
+      // Only Sector-12 sells anything, so west settles on real data at tick 0.
+      augs: { "Sector-12": [{ name: "w1", rep: 1e12, price: 1, stats: { hacking: 1.4 } }] },
+      api: {
+        getCurrentWork: () => {
+          reads++;
+          // After the first aug pass has settled (tick 0), join a city
+          // faction from a DIFFERENT group by hand - outside JOIN entirely.
+          if (reads > AUGS_EVERY && !p.factions.includes("Chongqing")) p.factions.push("Chongqing");
+          return null;
+        },
+      },
+    });
+    const cityLines = r.ns._log.filter((l) => l.includes("  cities: "));
+    assert(cityLines.length >= 2, `settling on west, then Chongqing being joined, must reopen the choice: ${cityLines}`);
+    assert(cityLines.at(-1).includes("cities: Chongqing"),
+      `Chongqing is joined - its group must win regardless of the earlier settle: ${cityLines}`);
+  },
+
   "each aug is rated once per process": async () => {
     const mods = await loadScripts();
     const { AUGS_EVERY } = mods["sing/config"];
