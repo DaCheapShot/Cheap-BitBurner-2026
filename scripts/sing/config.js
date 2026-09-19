@@ -134,13 +134,23 @@ export const MONEY_CRIMES = ["Shoplift", "Mug", "Deal Drugs", "Homicide"];
  *   the software intern's reqdHacking 1 plus Bachman's jobStatReqOffset 224
  *   (CompanyPosition.requiredSkills). Below it the step is skipped rather than
  *   applied for every tick. applyToCompany and workForCompany check no city,
- *   so Bachman being in Aevum does not matter. The company's name is also its
- *   faction's, which is how the step learns the faction's augs are all owned
- *   and skips the company too.
+ *   so Bachman being in Aevum does not matter. A company step's faction is
+ *   `faction`, defaulting to the company's own name - Fulcrum is the one that differs.
  * - Then the hacking factions, HIGHEST first: each one's shop largely covers
  *   the lower ones' augs, so rep earned high up buys what CyberSec sells too,
  *   and the lower factions' targets drop as those augs are bought. An aug is
  *   bought from whichever joined faction has the most rep (planAugBuys).
+ * - Then the six city factions. Only the joined ones apply, and an install
+ *   joins one group of them (CITY_GROUPS). Their rep is cheap, and a company
+ *   step applies without any join, so anything listed after one waits out a
+ *   400k grind.
+ * - Then every megacorp, each a COMPANY step followed by its faction: the same
+ *   400k invite bar as Bachman (CorpFactionRepRequirement), hired at reqdHacking
+ *   1 + jobStatReqOffset - 250 for ECorp, MegaCorp and NWO, 225 for the rest.
+ *   Fulcrum's faction also wants fulcrumassets backdoored, which the backdoor
+ *   pass does anyway. An install clears jobs and company rep but keeps company
+ *   favor, so each grind gets faster. Order is the user's; the tiers skip any
+ *   whose faction has nothing left to buy in the tier being worked.
  */
 export const WORK_ORDER = [
   { faction: "Tian Di Hui" },
@@ -151,6 +161,30 @@ export const WORK_ORDER = [
   { faction: "The Black Hand" },
   { faction: "NiteSec" },
   { faction: "CyberSec" },
+  { faction: "Sector-12" },
+  { faction: "Aevum" },
+  { faction: "Chongqing" },
+  { faction: "New Tokyo" },
+  { faction: "Ishima" },
+  { faction: "Volhaven" },
+  { company: "ECorp", field: "Software", rep: 400e3, hacking: 250 },
+  { faction: "ECorp" },
+  { company: "OmniTek Incorporated", field: "Software", rep: 400e3, hacking: 225 },
+  { faction: "OmniTek Incorporated" },
+  { company: "NWO", field: "Software", rep: 400e3, hacking: 250 },
+  { faction: "NWO" },
+  { company: "MegaCorp", field: "Software", rep: 400e3, hacking: 250 },
+  { faction: "MegaCorp" },
+  { company: "Blade Industries", field: "Software", rep: 400e3, hacking: 225 },
+  { faction: "Blade Industries" },
+  { company: "Four Sigma", field: "Software", rep: 400e3, hacking: 225 },
+  { faction: "Four Sigma" },
+  { company: "KuaiGong International", field: "Software", rep: 400e3, hacking: 225 },
+  { faction: "KuaiGong International" },
+  { company: "Clarke Incorporated", field: "Software", rep: 400e3, hacking: 225 },
+  { faction: "Clarke Incorporated" },
+  { company: "Fulcrum Technologies", faction: "Fulcrum Secret Technologies", field: "Software", rep: 400e3, hacking: 225 },
+  { faction: "Fulcrum Secret Technologies" },
 ];
 /**
  * Re-apply to an employer every this many ticks while working there. It is the

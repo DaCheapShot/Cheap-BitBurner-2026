@@ -533,6 +533,51 @@ export const tests = {
       "the faction is joined - done");
   },
 
+  // Verified: entry software job = reqdHacking 1 + jobStatReqOffset (249 for
+  // ECorp, MegaCorp, NWO; 224 for the rest). Each company's faction step follows
+  // it, so a joined corp faction is worked before the next company grind.
+  "every megacorp is a company step at its hiring bar, followed by its faction": async () => {
+    const { WORK_ORDER } = (await loadScripts())["sing/config"];
+    const bars = {
+      "Bachman & Associates": 225, ECorp: 250, "OmniTek Incorporated": 225, NWO: 250, MegaCorp: 250,
+      "Blade Industries": 225, "Four Sigma": 225, "KuaiGong International": 225,
+      "Clarke Incorporated": 225, "Fulcrum Technologies": 225,
+    };
+    const cos = WORK_ORDER.filter((s) => s.company);
+    assert(JSON.stringify(cos.map((s) => s.company).sort()) === JSON.stringify(Object.keys(bars).sort()),
+      `companies: ${cos.map((s) => s.company)}`);
+    for (const s of cos) {
+      assert(s.hacking === bars[s.company] && s.rep === 400e3 && s.field === "Software", `${s.company}: ${JSON.stringify(s)}`);
+      const next = WORK_ORDER[WORK_ORDER.indexOf(s) + 1];
+      assert(next?.faction === (s.faction ?? s.company) && !next.company, `${s.company} must be followed by its faction step`);
+    }
+    assert(cos.find((s) => s.company === "Fulcrum Technologies").faction === "Fulcrum Secret Technologies",
+      "Fulcrum's faction is named differently from its company");
+  },
+
+  "the city factions come after the hacking factions and before the megacorp grinds": async () => {
+    const { WORK_ORDER } = (await loadScripts())["sing/config"];
+    const at = (f) => WORK_ORDER.findIndex((s) => s.faction === f && !s.company);
+    const firstCorp = WORK_ORDER.findIndex((s) => s.company === "ECorp");
+    for (const c of ["Sector-12", "Aevum", "Chongqing", "New Tokyo", "Ishima", "Volhaven"]) {
+      assert(at(c) > at("CyberSec") && at(c) < firstCorp, `${c} at ${at(c)}`);
+    }
+  },
+
+  "Fulcrum's company step keys on its faction's name": async () => {
+    const mods = await loadScripts();
+    const { chooseAction } = mods["sing/plan"];
+    const { WORK_ORDER } = mods["sing/config"];
+    const zero = (except) => Object.fromEntries(WORK_ORDER.filter((s) => s.company)
+      .map((s) => s.faction ?? s.company).filter((f) => f !== except).map((f) => [f, 0]));
+    const p = player({ skills: { ...strong, hacking: 300 } });
+    const a = chooseAction(p, state({ targets: zero("Fulcrum Secret Technologies") }));
+    assert(a.kind === "company" && a.company === "Fulcrum Technologies", `got ${JSON.stringify(a)}`);
+    const joined = chooseAction(player({ skills: { ...strong, hacking: 300 }, factions: ["Fulcrum Secret Technologies"] }),
+      state({ targets: zero("Fulcrum Secret Technologies") }));
+    assert(joined.company !== "Fulcrum Technologies", `its faction joined - done, got ${JSON.stringify(joined)}`);
+  },
+
   // Only ever the Tian Di Hui round trip, and only from/to its own two ends, so
   // a trip the player made by hand is never undone.
   "travel: out for Tian Di Hui with the fare home in hand, back once joined": async () => {
