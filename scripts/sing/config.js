@@ -239,11 +239,16 @@ export const PRIORITY_MULTS = [
   "faction_rep", "company_rep",
 ];
 /**
- * Tier 1 by name: augs whose effect is not a multiplier. The Neuroreceptor
- * Management Implant removes the unfocused-work penalty, the reason Tian Di Hui
- * is worked first.
+ * Tier 1 by name: augs AUG_STATS cannot rate from a multiplier. The
+ * Neuroreceptor Management Implant removes the unfocused-work penalty, the
+ * reason Tian Di Hui is worked first. THE RED PILL has no multipliers in this
+ * fork (getAugmentationStats returns stats ""), so AUG_STATS alone would rate
+ * it tier 2 and its 2.5m Daedalus rep would wait behind every tier-1 grind -
+ * up to ten 400k company steps - though it is the user's shortcut to the end
+ * of the node (see RED_PILL below) and Source-File 5's absence means nothing
+ * donates it there either. Listed by name for the same reason the implant is.
  */
-export const PRIORITY_AUGS = ["Neuroreceptor Management Implant"];
+export const PRIORITY_AUGS = ["Neuroreceptor Management Implant", "The Red Pill"];
 
 /**
  * The user's shortcut to the end of the node. THE RED PILL is bought the moment

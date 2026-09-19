@@ -775,11 +775,56 @@ export const tests = {
       `the east has the only hacking aug - Sector-12 declined: ${joins}`);
   },
 
+  // Before settling, owned.all can grow mid-process - AUTO_INSTALL off with a
+  // batch bought over several passes - and a score computed from the new list
+  // would fly the player between groups at $200k a leg. Once every sold aug is
+  // rated the choice locks for the process, even though a fresh score (were it
+  // recomputed) would now favour a different group.
+  "the city group locks once settled - it does not re-flip as owned augs grow": async () => {
+    const mods = await loadScripts();
+    const { AUGS_EVERY } = mods["sing/config"];
+    let ownedCalls = 0;
+    const r = await driveSing(mods, {
+      ticks: AUGS_EVERY * 2 + 1,
+      // East (Chongqing, New Tokyo) has two priority augs against Sector-12's
+      // one, so east is chosen first pass. From the second pass on, e1 and e2
+      // read as already owned - simulating a batch bought elsewhere in the
+      // process - which would flip an unlocked score to Sector-12's group.
+      augs: {
+        "Sector-12": [{ name: "w1", rep: 1e12, price: 1, stats: { hacking: 1.4 } }],
+        Chongqing: [{ name: "e1", rep: 1e12, price: 1, stats: { hacking: 1.4 } }],
+        "New Tokyo": [{ name: "e2", rep: 1e12, price: 1, stats: { hacking: 1.4 } }],
+      },
+      api: {
+        getOwnedAugmentations: (purchased) => {
+          if (!purchased) return [];
+          ownedCalls++;
+          return ownedCalls <= 1 ? [] : ["e1", "e2"];
+        },
+      },
+    });
+    const cityLines = r.ns._log.filter((l) => l.includes("  cities: "));
+    assert(cityLines.length === 1, `the group must be chosen once and locked, not re-flipped: ${cityLines}`);
+    assert(cityLines[0].includes("Chongqing"), `expected the east group to win and stick: ${cityLines}`);
+  },
+
   "each aug is rated once per process": async () => {
     const mods = await loadScripts();
     const { AUGS_EVERY } = mods["sing/config"];
     const r = await driveSing(mods, { ticks: AUGS_EVERY * 2 + 1, p: player({ factions: ["CyberSec"] }), augs: SELLS });
     assert(r.count("getAugmentationStats") === 2, `two augs sold, each rated once: ${r.count("getAugmentationStats")}`);
+  },
+
+  // The Red Pill has no multipliers in this fork - getAugmentationStats
+  // returns stats "" - so AUG_STATS can only rate it tier 1 by NAME. Without
+  // it in PRIORITY_AUGS this reads false and the node-ending aug waits behind
+  // every tier-1 grind.
+  "the Red Pill is tier 1 by name - it carries no multiplier to rate": async () => {
+    const mods = await loadScripts();
+    const body = bodies().AUG_STATS;
+    const ns = makeNs({ extra: { singularity: { getAugmentationStats: () => ({}) } } });
+    const r = await mods["rpc"].rpc(ns, body, "The Red Pill");
+    assert(r["The Red Pill"] === true, `Red Pill must rate tier 1 by name, got ${JSON.stringify(r)}`);
   },
 
   "the work line names the tier": async () => {

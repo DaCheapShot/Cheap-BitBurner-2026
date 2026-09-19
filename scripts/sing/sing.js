@@ -208,7 +208,10 @@ return out;
  */
 const APPLY = `return ns.singularity.applyToCompany(args[0], args[1]);`;
 
-/** The Tian Di Hui round trip. travelToCity returns false when the fare is short. */
+/**
+ * Flies toward Tian Di Hui's invite or the chosen city group's - chooseTravel
+ * decides which. travelToCity returns false when the fare is short.
+ */
 const TRAVEL = `return ns.singularity.travelToCity(args[0]);`;
 
 // The aug bodies. Each call is 2.50-5.00 GB, so reading owned + sold + costs in
@@ -514,10 +517,20 @@ export async function main(ns) {
   // the node, so rated once and kept like prereqs.
   let priorityTargets = null;
   const priority = {};
-  // This install's city faction group - chosen on each aug pass until one of
-  // its factions is joined, which locks it. Null until the first pass.
+  // This install's city faction group - re-chosen on every aug pass while
+  // unsettled, then locked for the process (citySettled below). A joined city
+  // faction always wins regardless: chooseCityGroup checks that before ever
+  // scoring, so locking cannot strand the choice against a real join.
   let cityGroup = null;
+  let citySettled = false;
+  // Until the first aug pass has run, JOIN treats Sector-12's group as chosen
+  // (deny below). Deliberate: the player starts in Sector-12 with ~$1k and its
+  // own invite wants $15m, so locking in a group before there is a real choice
+  // to make is practically unreachable anyway.
   const cities = () => cityGroup ?? CITY_GROUPS[0];
+  // The cities: log line and JOIN's deny both need "every OTHER city faction" -
+  // one helper so the two expressions cannot drift apart.
+  const otherCities = (group) => CITY_GROUPS.flat().filter((c) => !group.includes(c));
   // Favor moves only at an install, which kills this process - read once.
   const favor = {};
   let favorNeed = 0;
@@ -602,10 +615,20 @@ export async function main(ns) {
 
     targets = repTargets(augsOf, owned.all, info);
     priorityTargets = repTargets(augsOf, owned.all, info, priority);
-    const group = chooseCityGroup(r.player.factions, augsOf, owned.all, priority);
-    if (group !== cityGroup) {
-      cityGroup = group;
-      log(`cities: ${group.join(", ")} this install - declining ${CITY_GROUPS.flat().filter((c) => !group.includes(c)).join(", ")}`);
+    // Re-chosen only while unsettled: before every sold aug is rated, owned.all
+    // still growing mid-batch and a failed AUG_STATS call defaulting to "every
+    // aug is tier 1" can each move the score, and a group picked on that
+    // half-known data would fly the player between groups at $200k a leg. Once
+    // settled the score can never move again from here, so the choice locks
+    // for the rest of the process - a real join still overrides it, since
+    // chooseCityGroup checks that first, before it ever scores anything.
+    if (!citySettled) {
+      const group = chooseCityGroup(r.player.factions, augsOf, owned.all, priority);
+      if (group !== cityGroup) {
+        cityGroup = group;
+        log(`cities: ${group.join(", ")} this install - declining ${otherCities(group).join(", ")}`);
+      }
+      citySettled = sold.every((a) => a === NFG || a in priority);
     }
     const noFavor = r.player.factions.filter((f) => !(f in favor));
     if (noFavor.length) {
@@ -737,7 +760,7 @@ export async function main(ns) {
     if (tick % JOIN_EVERY === 0) {
       const invites = await call("invites", INVITES);
       if (invites) {
-        const deny = CITY_GROUPS.flat().filter((c) => !cities().includes(c));
+        const deny = otherCities(cities());
         const want = invites.filter((f) => !deny.includes(f));
         const joined = want.length ? (await call("join", JOIN, ...want)) ?? [] : [];
         log(`join: ${joinLine(invites, joined, deny)}`);
@@ -748,6 +771,13 @@ export async function main(ns) {
     // resets its progress, and one longer than the tick would never complete.
     // A flight skips this tick's work: r.player still says the old city, and the
     // gym is only where the player no longer is.
+    //
+    // r.player.money is READ's snapshot from the START of this tick - the aug
+    // pass and the home upgrade above may already have spent some of it, so a
+    // fare can be aimed at a city whose bar the spend has since missed (the
+    // player then just waits there). Left alone on purpose: reordering travel
+    // ahead of the spend passes would skip work more often for the sake of
+    // avoiding one wasted fare and a delay.
     const city = r && chooseTravel(r.player, { group: cities(), targets, grindKarma: r.grindKarma });
     const flew = city ? await call("travel", TRAVEL, city) : false;
     if (city) log(`travel: ${flew ? "flew" : "could not fly"} to ${city}`);

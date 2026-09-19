@@ -912,9 +912,9 @@ because `runToCompletion` blocks. `--no-contracts` opts out.
 
 ### The singularity subsystem (`scripts/sing/`)
 
-BitNode 4 automation: home RAM, TOR and darkweb programs, faction invites, the Tian Di Hui trip,
-and the player's own work (company and faction rep; gym and Homicide only for an opted-in gang;
-a money crime when there is nothing else). Self-contained
+BitNode 4 automation: home RAM, TOR and darkweb programs, faction invites, travel to collect Tian
+Di Hui's and the chosen city group's, and the player's own work (company and faction rep; gym and
+Homicide only for an opted-in gang; a money crime when there is nothing else). Self-contained
 like `gang/`: it imports only `scripts/rpc.js` and re-exports one 0 GB constant from
 `scripts/config.js` (`SHARE_HOLD_MARKER`), and `boot.js` reads one path constant out of it.
 
@@ -1073,14 +1073,15 @@ an invite that would buy nothing.
 that is rep-unlocked at a joined faction, **tier 1 first, then dearest first within each tier**
 (each queued aug multiplies every later price by 1.9 - `getGenericAugmentationPriceMultiplier` -
 so cheap-first pays the multiplier on the expensive ones), skipping any that do not fit or whose
-prerequisite is neither owned nor earlier in the batch; then NeuroFlux levels fill, each x1.14 dearer in money AND rep. It returns the batch only
-when queued + batch reaches `MIN_AUG_BATCH` (10) and cash covers all of it. 1.9 is the ceiling -
-Source-File 11 only lowers it - so the plan over-states and can never buy a batch it cannot finish.
-Whatever is left then goes on home RAM (UPGRADE at fraction 1): an install resets money and keeps
-home RAM. Shadows of Anarchy is never bought from - its augs price off their own ladder. Each read is its own body: together they would be 14.10 GB. What each faction sells
-and each aug's prerequisites are fixed for the node and kept in memory; prices and the owned list
-are re-read every pass. READ now runs FIRST in the tick, so the batch gets the cash before the
-normal 25% home upgrade can take it.
+prerequisite is neither owned nor earlier in the batch; then NeuroFlux levels fill, each x1.14
+dearer in money AND rep. It returns the batch only when queued + batch reaches `MIN_AUG_BATCH`
+(10) and cash covers all of it. 1.9 is the ceiling - Source-File 11 only lowers it - so the plan
+over-states and can never buy a batch it cannot finish. Whatever is left then goes on home RAM
+(UPGRADE at fraction 1): an install resets money and keeps home RAM. Shadows of Anarchy is never
+bought from - its augs price off their own ladder. Each read is its own body: together they would
+be 14.10 GB. What each faction sells and each aug's prerequisites are fixed for the node and kept
+in memory; prices and the owned list are re-read every pass. READ now runs FIRST in the tick, so
+the batch gets the cash before the normal 25% home upgrade can take it.
 
 **A faction at 150 favor is not worked; its rep is BOUGHT with the batch.** Favor moves only at an
 install (`Faction.prestigeAugmentation`: `addRepToFavor(favor, rep)`, where 150 favor is ~462k lifetime
