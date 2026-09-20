@@ -8,3 +8,6 @@ NetScriptDefinitions.d.ts
 # Run artifact: downloaded from the game with `download /data/continuous.log.txt`.
 # Overwritten every run, never source.
 scripts/continuous/continuous.log.txt
+
+# Session scratch: implementation plans and design notes written per branch.
+.claude/plans/
