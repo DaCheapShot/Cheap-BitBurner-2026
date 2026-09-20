@@ -392,10 +392,25 @@ function upgradeLine(ns, u) {
     `(buys at ${ns.format.percent(u.frac, 0)} of cash)`;
 }
 
+/**
+ * What stopped the NeuroFlux fill, which is what stopped the batch: it is the
+ * only filler with no supply limit, so the batch is short exactly when it is.
+ * Its shop price says nothing about the next level - each one is 1.14 x 1.9
+ * dearer than the last, since every queued aug re-prices every later one.
+ */
+function nfgLine(ns, nfg) {
+  if (!nfg) return "no NeuroFlux seller among the joined factions";
+  const at = `${nfg.levels} NeuroFlux level(s)`;
+  if (nfg.why === "rep") {
+    return `${at}, then ${nfg.faction} rep ${n2(ns, nfg.have)} of ${n2(ns, nfg.need)} needed for the next`;
+  }
+  return `${at}, then the next costs ${money$(ns, nfg.cost)} against ${money$(ns, nfg.left)} left`;
+}
+
 function augsWaitLine(ns, plan, queued, cash) {
   if (queued >= MIN_AUG_BATCH) return `${queued} queued; nothing more affordable now`;
   return `waiting: best batch is ${plan.batch} of ${MIN_AUG_BATCH} (${queued} queued), ` +
-    `${plan.eligible} unlocked by rep or favor, cash ${money$(ns, cash)}`;
+    `${plan.eligible} unlocked by rep or favor, cash ${money$(ns, cash)} - ${nfgLine(ns, plan.nfg)}`;
 }
 
 function donationsLine(ns, ds) {

@@ -469,6 +469,15 @@ export const tests = {
     // Rep caps the levels: 1e3 x 1.14^k <= 2e3 allows k = 0..5, six levels.
     const capped = planAugBuys({ ...base, rep: { F: 2e3 } });
     assert(capped.buys.length === 0 && capped.batch === 9, `3 + six levels is nine - no batch: ${capped.batch}`);
+    // The log must name what stopped the fill: rep here, money below. A short
+    // batch reads as a money problem either way, and NeuroFlux is the only
+    // filler, so blaming cash when rep ran out sends the user after the wrong
+    // fix - the shop price of one level says nothing about the tenth.
+    assert(capped.nfg.why === "rep" && capped.nfg.levels === 6,
+      `rep stopped it at six: ${JSON.stringify(capped.nfg)}`);
+    const broke = planAugBuys({ ...base, rep: { F: 1e9 }, cash: 1e7 });
+    assert(broke.nfg.why === "cash" && broke.nfg.cost > broke.nfg.left,
+      `cash stopped it: ${JSON.stringify(broke.nfg)}`);
   },
 
   "a prerequisite must be owned or earlier in the batch; rep, joins and SoA gate the rest": async () => {
