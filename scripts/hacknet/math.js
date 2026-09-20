@@ -209,9 +209,9 @@ export function planMoney(state, cfg) {
     // A new unit. With nothing owned there is no production to derive its rate
     // from, so the first one is unconditional - $1,000 for a node, $50,000 for
     // a server, and in BitNode 9 no servers means no hashes at all.
-    if (units.length === 0) {
-      const nextPrice = unitPrice(isServer, 0, mults);
-      if (Number.isFinite(nextPrice)) {
+    const nextPrice = unitPrice(isServer, units.length, mults);
+    if (Number.isFinite(nextPrice)) {
+      if (units.length === 0) {
         if (nextPrice <= budget - spent) {
           buys.push({ kind: "unit", index: -1, price: nextPrice });
           spent += nextPrice;
@@ -221,6 +221,11 @@ export function planMoney(state, cfg) {
           continue;
         }
         return { buys, spent, reason: "the first unit does not fit the budget" };
+      }
+      const fresh = freshProduction(isServer, units[0]) * perUnit;
+      if (fresh > 0) {
+        const payback = nextPrice / fresh;
+        if (payback < cfg.PAYBACK_SECONDS) best = { kind: "unit", index: -1, price: nextPrice, payback };
       }
     }
 

@@ -263,7 +263,8 @@ export const tests = {
 
     // At level 50 with 1 GB and 1 core, the first rung taken must be the one
     // with the best payback - which is not the cheapest one.
-    const first = plan.buys[0];
+    const firstRung = plan.buys.find(b => b.kind !== "unit");
+    assert(firstRung, "expected at least one rung buy");
     const prices = {};
     const paybacks = {};
     for (const kind of ["level", "ram", "core"]) {
@@ -271,8 +272,36 @@ export const tests = {
       paybacks[kind] = prices[kind] / m.stepGain(false, kind, unit);
     }
     const bestPayback = Object.keys(paybacks).sort((a, b) => paybacks[a] - paybacks[b])[0];
-    assert(first.kind === bestPayback,
-      `first buy was ${first.kind}; best payback is ${bestPayback}`);
+    assert(firstRung.kind === bestPayback,
+      `first rung was ${firstRung.kind}; best payback is ${bestPayback}`);
+  },
+
+  // A whole new unit competes with the rungs on every pass, not only when
+  // nothing is owned. The first implementation scored it inside the
+  // `units.length === 0` branch, which made `kind: "unit"` unreachable after the
+  // first buy - so an unlimited budget poured into one unit's ladders while a
+  // fresh unit at base price paid back four times faster.
+  //
+  // Fixture: level and cores well up their ladders and RAM already at the node
+  // maximum (so that rung prices at Infinity), leaving a fresh node the best
+  // buy by a clear margin.
+  "a fresh unit competes with the rungs once something is owned": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const mults = { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 };
+
+    const nodeRate = (level, ram, cores) =>
+      level * 1.5 * Math.pow(1.035, ram - 1) * ((cores + 5) / 6);
+    const unit = { level: 150, ram: 64, cores: 12 };
+    unit.production = nodeRate(150, 64, 12);
+
+    const plan = m.planMoney(
+      { isServer: false, units: [unit], budget: 1e6, mults },
+      { PAYBACK_SECONDS: 1e5, HASH_PRICE: 250000 });
+
+    assert(plan.buys.length > 0, `expected buys, got none (${plan.reason})`);
+    assert(plan.buys[0].kind === "unit" && plan.buys[0].index === -1,
+      `expected a new unit first, got ${JSON.stringify(plan.buys[0])}`);
   },
 
   "the money plan stops at the budget and says so": async () => {
