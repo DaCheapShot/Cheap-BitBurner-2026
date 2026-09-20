@@ -581,6 +581,42 @@ export const CLOUD_DONE_MARKER = "/data/cloud-maxed.txt";
  */
 export const CLOUD_RECHECK_MS = 30 * 60 * 1000;
 
+/**
+ * The hosts the RUNNING batcher is currently working, one per line, richest
+ * first. Written by whichever manager is up - continuous/core.js at every
+ * rescan, managerCore.js when it picks or switches target - and read by
+ * scripts/hacknet/hashes.js.
+ *
+ * It lives here rather than in either batcher's config because it is a contract
+ * between parties that do not import each other, which is what this file is
+ * for. boot.js CLEARS it whenever a manager swap leaves no manager running: a
+ * stale list has hashes bought for a server nobody is hitting, and hash
+ * upgrades do not refund.
+ *
+ * Missing or empty means "spend nothing", never a default - the share.txt rule.
+ * A wrong target is silent and compounding, so the failure has to be the inert
+ * one.
+ */
+export const TARGETS_MARKER = "/data/targets.txt";
+
+/**
+ * Hostname prefix of a BitNode 9 hacknet server, which both RAM pools skip.
+ *
+ * calculateHashGainRate (src/Hacknet/formulas/HacknetServers.ts) carries
+ * `ramRatio = 1 - ramUsed / maxRam` as a plain factor, and
+ * HacknetServer.updateRamUsed recomputes the rate on every change - so a
+ * hacknet server filled with batch workers produces LITERALLY ZERO hashes.
+ * They are created with adminRights and pushed onto home's network
+ * (Player.createHacknetServer), so root.js, deploy.js and both pools reach them
+ * without being told to.
+ *
+ * Testing the prefix is safe by construction rather than a heuristic: Server's
+ * own constructor renames any ordinary server starting with "hacknet-node-" or
+ * "hacknet-server-", so the namespace is reserved. The alternative test,
+ * ns.getServer(host).isHacknetServer, costs 2.00 GB and ram.js is 0.35.
+ */
+export const HACKNET_HOST_PREFIX = "hacknet-server-";
+
 // ---------------------------------------------------------------- report ----
 
 /**

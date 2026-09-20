@@ -1,0 +1,76 @@
+export { TARGETS_MARKER, HACKNET_HOST_PREFIX } from "scripts/config.js";
+
+/**
+ * Hacknet tunables. No ns call anywhere in this file, and it must stay that
+ * way: boot.js imports the two service paths out of it, and boot is pinned at
+ * 3.50 GB.
+ *
+ * Game constants below are cited to the fork file they came from. Each is one
+ * the API does not expose, so there is nothing to read them from at runtime.
+ */
+
+export const HACKNET_MONEY_SERVICE = "/scripts/hacknet/hacknet.js";
+export const HACKNET_HASH_SERVICE = "/scripts/hacknet/hashes.js";
+
+/**
+ * Boot ticks between sweeps. The tick is 60 s, so this is every two minutes.
+ *
+ * Both sweeps are transients: they cost 5.45 and 6.60 GB for a few hundred ms
+ * and nothing in between, so the cadence is about not bidding for home RAM
+ * against the gang's equip body (14.70) and the contract find body (12.00),
+ * not about the work itself.
+ */
+export const HACKNET_EVERY = 2;
+
+/**
+ * Buy an upgrade only if it repays its own cost within this long.
+ *
+ * This is the whole off switch. The hacknet's marginal gain does not move as
+ * the batcher grows, so paybacks blow out on their own and the sweep stops
+ * buying without anyone deciding it should.
+ */
+export const PAYBACK_SECONDS = 3600;
+
+/**
+ * Share of cash one sweep may spend, priced once at the start of the sweep.
+ *
+ * cloud.js is bidding for the same wallet capped at 10%, and sing's aug batch
+ * wants all of it at once. The server fleet is the batcher's growth path;
+ * the hacknet is not.
+ */
+export const HACKNET_CASH_FRACTION = 0.05;
+
+/**
+ * What a hash is worth in cash, and it is not a modelling choice.
+ *
+ * HashUpgradesMetadata.tsx gives Sell for Money a FLAT `cost: 4` (not a
+ * costPerLevel) and `value: 1e6`, so the rate never rises with level. Overflow
+ * hashes are auto-sold at exactly this rate too
+ * (processAllHacknetServerEarnings computes `wastedHashes / upgrade.cost *
+ * upgrade.value`), which is why spending nothing is a correct null action
+ * rather than a leak - and why every other upgrade has to beat this number.
+ */
+export const HASH_SALE_VALUE = 1e6;
+export const HASH_SALE_COST = 4;
+export const HASH_PRICE = HASH_SALE_VALUE / HASH_SALE_COST;
+
+/** How far ahead a hash upgrade's income gain is counted. */
+export const HASH_HORIZON_S = 3600;
+
+/** How far a hash upgrade must beat the sale price before it is bought. */
+export const HASH_VALUE_MARGIN = 2;
+
+/**
+ * Where Server.changeMaximumMoney starts damping the +2%. Above it the game
+ * applies `1 + (n-1)/Math.log(moneyMax - softCap)/Math.log(8)` - two divisions
+ * by logs, which is what the source does.
+ */
+export const MONEY_SOFTCAP = 10e12;
+
+/**
+ * Spelled as HashUpgradeEnum spells them. spendHashes() resolves the name
+ * through getEnumHelper().nsGetMember and THROWS on a miss, so a fold or a
+ * typo here is a thrown sweep, not a quiet no-op.
+ */
+export const MAX_MONEY_UPGRADE = "Increase Maximum Money";
+export const MIN_SECURITY_UPGRADE = "Reduce Minimum Security";
