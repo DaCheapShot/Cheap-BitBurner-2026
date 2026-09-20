@@ -1,12 +1,12 @@
 import {
   SING_TICK_MS, UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
-  PROG_BUDGET_FRACTION, JOIN_DENY,
+  PROG_BUDGET_FRACTION, CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, MIN_AUG_BATCH, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
 } from "./config.js";
 import {
-  chooseAction, chooseTravel, sameAsCurrent, repTarget, repTargets, planAugBuys,
-  canDonate, donationPerRep, bestCrime,
+  chooseAction, chooseTravel, sameAsCurrent, repTargets, planAugBuys,
+  canDonate, donationPerRep, bestCrime, chooseCityGroup,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 
@@ -208,7 +208,10 @@ return out;
  */
 const APPLY = `return ns.singularity.applyToCompany(args[0], args[1]);`;
 
-/** The Tian Di Hui round trip. travelToCity returns false when the fare is short. */
+/**
+ * Flies toward Tian Di Hui's invite or the chosen city group's - chooseTravel
+ * decides which. travelToCity returns false when the fare is short.
+ */
 const TRAVEL = `return ns.singularity.travelToCity(args[0]);`;
 
 // The aug bodies. Each call is 2.50-5.00 GB, so reading owned + sold + costs in
@@ -245,6 +248,22 @@ const AUG_INFO = `
 const out = {};
 for (const a of args) {
   out[a] = { rep: ns.singularity.getAugmentationRepReq(a), price: ns.singularity.getAugmentationPrice(a) };
+}
+return out;
+`;
+
+/**
+ * Is each aug tier 1? A multiplier in PRIORITY_MULTS above 1, or named in
+ * PRIORITY_AUGS. getAugmentationStats is 5.00 alone, so this is its own 6.60
+ * body; an aug's stats are fixed for the node, so each is rated once per
+ * process - which also freezes the two lists until sing restarts.
+ */
+const AUG_STATS = `
+import { PRIORITY_MULTS, PRIORITY_AUGS } from "/scripts/sing/config.js";
+const out = {};
+for (const a of args) {
+  const m = ns.singularity.getAugmentationStats(a);
+  out[a] = PRIORITY_AUGS.includes(a) || PRIORITY_MULTS.some((k) => m[k] > 1);
 }
 return out;
 `;
@@ -390,11 +409,11 @@ function progsLine(ns, p) {
     `${money$(ns, p.money)} cash (buys at ${ns.format.percent(PROG_BUDGET_FRACTION, 0)})`;
 }
 
-function joinLine(invites, joined) {
+function joinLine(invites, joined, deny) {
   if (!invites.length) return "no pending invites";
   if (joined.length) return `accepted ${joined.join(", ")}`;
-  const denied = invites.filter((f) => JOIN_DENY.includes(f));
-  if (denied.length === invites.length) return `declined ${denied.join(", ")} (JOIN_DENY)`;
+  const denied = invites.filter((f) => deny.includes(f));
+  if (denied.length === invites.length) return `declined ${denied.join(", ")} (outside this install's city group)`;
   return `the game refused ${invites.filter((f) => !denied.includes(f)).join(", ")}`;
 }
 
@@ -424,13 +443,13 @@ function describe(ns, a, r) {
     return `crime ${a.crime}, karma ${ns.format.number(r.player.karma, 2)} of ` +
       `${ns.format.number(GANG_KARMA_TARGET, 2)}`;
   }
+  const tier = a.tier ? `, tier ${a.tier}` : "";
   if (a.kind === "faction") {
-    return `faction ${a.faction} (${a.type}), rep ${n2(ns, r.rep[a.faction] ?? 0)} of ` +
-      `${n2(ns, repTarget(a.faction, r.targets))}` +
+    return `faction ${a.faction} (${a.type}${tier}), rep ${n2(ns, r.rep[a.faction] ?? 0)} of ${n2(ns, a.target)}` +
       (canDonate(a.faction, r) ? " - donatable, worked only for want of anything else" : "");
   }
   if (a.kind === "company") {
-    return `company ${a.company} (${a.field}), company rep ${n2(ns, r.companyRep?.[a.company] ?? 0)}`;
+    return `company ${a.company} (${a.field}${tier}), company rep ${n2(ns, r.companyRep?.[a.company] ?? 0)}`;
   }
   return "idle - no joined faction with work left under its rep target";
 }
@@ -494,6 +513,24 @@ export async function main(ns) {
   const augsOf = {};
   const prereqs = {};
   let targets = {};
+  // Tier 1's targets (priority augs only), and each aug's rating - fixed for
+  // the node, so rated once and kept like prereqs.
+  let priorityTargets = null;
+  const priority = {};
+  // This install's city faction group - re-chosen on every aug pass while
+  // unsettled, then locked for the process (citySettled below). A joined city
+  // faction always wins regardless: chooseCityGroup checks that before ever
+  // scoring, so locking cannot strand the choice against a real join.
+  let cityGroup = null;
+  let citySettled = false;
+  // Until the first aug pass has run, JOIN treats Sector-12's group as chosen
+  // (deny below). Deliberate: the player starts in Sector-12 with ~$1k and its
+  // own invite wants $15m, so locking in a group before there is a real choice
+  // to make is practically unreachable anyway.
+  const cities = () => cityGroup ?? CITY_GROUPS[0];
+  // The cities: log line and JOIN's deny both need "every OTHER city faction" -
+  // one helper so the two expressions cannot drift apart.
+  const otherCities = (group) => CITY_GROUPS.flat().filter((c) => !group.includes(c));
   // Favor moves only at an install, which kills this process - read once.
   const favor = {};
   let favorNeed = 0;
@@ -562,17 +599,46 @@ export async function main(ns) {
   const augsPass = async (r) => {
     const owned = await call("owned", OWNED);
     if (!owned) return;
-    const companies = WORK_ORDER.filter((s) => s.company).map((s) => s.company);
-    const unread = [...new Set([...r.player.factions, ...companies])].filter((f) => !(f in augsOf));
+    // Every faction WORK_ORDER names, joined or not: a company step and a city
+    // stop are both judged by what their faction sells before any invite.
+    const named = WORK_ORDER.map((s) => s.faction ?? s.company);
+    const unread = [...new Set([...r.player.factions, ...named])].filter((f) => !(f in augsOf));
     if (unread.length) Object.assign(augsOf, (await call("faction augs", FAC_AUGS, ...unread)) ?? {});
     const sold = [...new Set(Object.values(augsOf).flat())];
     const noPrereqs = sold.filter((a) => a !== NFG && !(a in prereqs));
     if (noPrereqs.length) Object.assign(prereqs, (await call("prereqs", PREREQ, ...noPrereqs)) ?? {});
+    const unrated = sold.filter((a) => a !== NFG && !(a in priority));
+    if (unrated.length) Object.assign(priority, (await call("aug stats", AUG_STATS, ...unrated)) ?? {});
     const unowned = sold.filter((a) => a === NFG || !owned.all.includes(a));
     const info = unowned.length ? await call("aug info", AUG_INFO, ...unowned) : {};
     if (!info) return;
 
     targets = repTargets(augsOf, owned.all, info);
+    priorityTargets = repTargets(augsOf, owned.all, info, priority);
+    // Re-chosen only while unsettled: before every sold aug is rated, owned.all
+    // still growing mid-batch and a failed AUG_STATS call defaulting to "every
+    // aug is tier 1" can each move the score, and a group picked on that
+    // half-known data would fly the player between groups at $200k a leg. Once
+    // settled the score can never move again from here, so the choice locks
+    // for the rest of the process. A city faction joined ANYWHERE - by JOIN or
+    // by hand - still always overrides, settled or not: chooseCityGroup's
+    // joined-group check runs before it ever scores anything, so recomputing
+    // is free and skipping it would strand the group against a real join.
+    const cityJoined = r.player.factions.some((f) => CITY_GROUPS.flat().includes(f));
+    if (!citySettled || cityJoined) {
+      const group = chooseCityGroup(r.player.factions, augsOf, owned.all, priority);
+      if (group !== cityGroup) {
+        cityGroup = group;
+        log(`cities: ${group.join(", ")} this install - declining ${otherCities(group).join(", ")}`);
+      }
+      // Settle only on REAL data: every city faction's augs must have been
+      // read (a failed FAC_AUGS call leaves augsOf empty, and sold.every on an
+      // empty array is vacuously true - that locked the group to the
+      // CITY_GROUPS[0] fallback forever on an ordinary rpc failure) and at
+      // least one aug must actually have been sold and rated.
+      citySettled ||= CITY_GROUPS.flat().every((c) => c in augsOf) &&
+        sold.length > 0 && sold.every((a) => a === NFG || a in priority);
+    }
     const noFavor = r.player.factions.filter((f) => !(f in favor));
     if (noFavor.length) {
       const v = await call("favor", FAVOR, ...noFavor);
@@ -585,7 +651,7 @@ export async function main(ns) {
     const donate = await donateTerms(r);
     const force = await crossesFavorBar(r, owned);
     const plan = planAugBuys({
-      augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash, donate, force,
+      augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash, donate, priority, force,
     });
     if (!plan.buys.length) {
       log(`augs: ${augsWaitLine(ns, plan, owned.queued, cash)}`);
@@ -617,7 +683,9 @@ export async function main(ns) {
     if (bought.length) ns.tprint(`sing: ${line}`);
     // Now, not at the next pass: a faction whose last aug was just bought must
     // not be worked for three ticks toward a target that no longer exists.
-    targets = repTargets(augsOf, [...owned.all, ...bought], info);
+    const now = [...owned.all, ...bought];
+    targets = repTargets(augsOf, now, info);
+    priorityTargets = repTargets(augsOf, now, info, priority);
     if (queued >= MIN_AUG_BATCH || force || owned.pill || bought.includes(RED_PILL)) await install(queued);
     // Still here, so not installed. What is left would be reset by the install
     // when it comes; home RAM survives it.
@@ -701,9 +769,10 @@ export async function main(ns) {
     if (tick % JOIN_EVERY === 0) {
       const invites = await call("invites", INVITES);
       if (invites) {
-        const want = invites.filter((f) => !JOIN_DENY.includes(f));
+        const deny = otherCities(cities());
+        const want = invites.filter((f) => !deny.includes(f));
         const joined = want.length ? (await call("join", JOIN, ...want)) ?? [] : [];
-        log(`join: ${joinLine(invites, joined)}`);
+        log(`join: ${joinLine(invites, joined, deny)}`);
       }
     }
 
@@ -711,11 +780,18 @@ export async function main(ns) {
     // resets its progress, and one longer than the tick would never complete.
     // A flight skips this tick's work: r.player still says the old city, and the
     // gym is only where the player no longer is.
-    const city = r && chooseTravel(r.player);
+    //
+    // r.player.money is READ's snapshot from the START of this tick - the aug
+    // pass and the home upgrade above may already have spent some of it, so a
+    // fare can be aimed at a city whose bar the spend has since missed (the
+    // player then just waits there). Left alone on purpose: reordering travel
+    // ahead of the spend passes would skip work more often for the sake of
+    // avoiding one wasted fare and a delay.
+    const city = r && chooseTravel(r.player, { group: cities(), targets, grindKarma: r.grindKarma });
     const flew = city ? await call("travel", TRAVEL, city) : false;
     if (city) log(`travel: ${flew ? "flew" : "could not fly"} to ${city}`);
     if (r && !flew) {
-      const st = { ...r, targets, favor, favorNeed };
+      const st = { ...r, targets, priorityTargets, favor, favorNeed };
       let action = chooseAction(r.player, st);
       // Nothing to work - the first stretch after an install, before any
       // invite. Money beats idling: it is what TOR, the programs, the Tian Di

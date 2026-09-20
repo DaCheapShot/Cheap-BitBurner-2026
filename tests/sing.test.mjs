@@ -109,6 +109,8 @@ async function driveSing(mods, {
     getAugmentationRepReq: (n) => aug(n)?.rep ?? 0,
     // The game's own pricing: every queued aug multiplies the rest by 1.9.
     getAugmentationPrice: (n) => (aug(n)?.price ?? 0) * 1.9 ** queued.length,
+    // The aug's own `stats` in the fixture, else no multipliers: not a priority aug.
+    getAugmentationStats: rec("getAugmentationStats", (n) => aug(n)?.stats ?? {}),
     purchaseAugmentation: rec("purchaseAugmentation", (f, n) => { queued.push(n); return true; }),
     // The game kills every script here; the fake records and returns, so the
     // loop carries on to the STOP sentinel.
@@ -375,6 +377,54 @@ export const tests = {
     assert(t.D === 1e6, `D: z unread must not read as done - got ${t.D}`);
   },
 
+  "tier 1 rep targets count only priority augs; an unrated aug still counts": async () => {
+    const { repTargets } = (await loadScripts())["sing/plan"];
+    const augsOf = { A: ["h", "c"], B: ["c"], C: ["u"] };
+    const info = { h: { rep: 5e3 }, c: { rep: 20e3 }, u: { rep: 7e3 } };
+    const t = repTargets(augsOf, [], info, { h: true, c: false });
+    assert(t.A === 5e3, `A: only h counts - got ${t.A}`);
+    assert(t.B === 0, `B: sells only a non-priority aug - got ${t.B}`);
+    assert(t.C === 7e3, `C: u is unrated, and unknown must not read as done - got ${t.C}`);
+    assert(repTargets(augsOf, [], info).A === 20e3, "no priority map: every aug counts, as before");
+  },
+
+  "tier 1 first: a faction with priority augs left beats one with only the rest": async () => {
+    const { chooseAction } = (await loadScripts())["sing/plan"];
+    const p = player({ factions: ["NiteSec", "CyberSec"] });
+    const workTypes = { NiteSec: ["hacking"], CyberSec: ["hacking"] };
+    const targets = { NiteSec: 50e3, CyberSec: 10e3 };
+    const priorityTargets = { NiteSec: 0, CyberSec: 10e3 };
+    const one = chooseAction(p, state({ workTypes, targets, priorityTargets }));
+    assert(one.faction === "CyberSec" && one.tier === 1 && one.target === 10e3,
+      `NiteSec has no priority aug left - CyberSec in tier 1, got ${JSON.stringify(one)}`);
+    const two = chooseAction(p, state({ workTypes, targets, priorityTargets, rep: { CyberSec: 10e3 } }));
+    assert(two.faction === "NiteSec" && two.tier === 2 && two.target === 50e3,
+      `tier 1 done - NiteSec for the rest, got ${JSON.stringify(two)}`);
+    const flat = chooseAction(p, state({ workTypes, targets }));
+    assert(flat.faction === "NiteSec" && flat.tier === undefined, "no priorityTargets: one pass, no tier");
+  },
+
+  "a company step is skipped in the tier where its faction has nothing left": async () => {
+    const mods = await loadScripts();
+    const { chooseAction } = mods["sing/plan"];
+    const { WORK_ORDER } = mods["sing/config"];
+    const none = Object.fromEntries(WORK_ORDER.filter((s) => s.company).map((s) => [s.faction ?? s.company, 0]));
+    const a = chooseAction(player({ skills: { ...strong, hacking: 300 } }),
+      state({ targets: {}, priorityTargets: none }));
+    assert(a.kind === "company" && a.company === "Bachman & Associates" && a.tier === 2,
+      `no company has a priority aug - the first company in tier 2, got ${JSON.stringify(a)}`);
+  },
+
+  "the batch plans priority augs first, then the rest, each dearest first": async () => {
+    const { planAugBuys } = (await loadScripts())["sing/plan"];
+    const info = { h1: { rep: 1, price: 1e6 }, h2: { rep: 1, price: 2e6 }, c1: { rep: 1, price: 9e6 } };
+    const base = { augsOf: { F: ["h1", "h2", "c1"] }, owned: [], queued: 0, info, prereqs: {}, rep: { F: 1e9 }, cash: 1e15, force: true };
+    const tiered = planAugBuys({ ...base, priority: { h1: true, h2: true, c1: false } }).buys.map((b) => b.name);
+    assert(JSON.stringify(tiered) === '["h2","h1","c1"]', `priority first, then the rest: ${tiered}`);
+    const flat = planAugBuys(base).buys.map((b) => b.name);
+    assert(JSON.stringify(flat) === '["c1","h2","h1"]', `no priority map: dearest first, as before: ${flat}`);
+  },
+
   "the batch: dearest first, each priced x1.9 per aug ahead of it": async () => {
     const { planAugBuys } = (await loadScripts())["sing/plan"];
     const names = Array.from({ length: 10 }, (_, i) => `a${i}`);
@@ -485,19 +535,89 @@ export const tests = {
       "the faction is joined - done");
   },
 
-  // Only ever the Tian Di Hui round trip, and only from/to its own two ends, so
-  // a trip the player made by hand is never undone.
-  "travel: out for Tian Di Hui with the fare home in hand, back once joined": async () => {
-    const { chooseTravel } = (await loadScripts())["sing/plan"];
+  // Verified: entry software job = reqdHacking 1 + jobStatReqOffset (249 for
+  // ECorp, MegaCorp, NWO; 224 for the rest). Each company's faction step follows
+  // it, so a joined corp faction is worked before the next company grind.
+  "every megacorp is a company step at its hiring bar, followed by its faction": async () => {
+    const { WORK_ORDER } = (await loadScripts())["sing/config"];
+    const bars = {
+      "Bachman & Associates": 225, ECorp: 250, "OmniTek Incorporated": 225, NWO: 250, MegaCorp: 250,
+      "Blade Industries": 225, "Four Sigma": 225, "KuaiGong International": 225,
+      "Clarke Incorporated": 225, "Fulcrum Technologies": 225,
+    };
+    const cos = WORK_ORDER.filter((s) => s.company);
+    assert(JSON.stringify(cos.map((s) => s.company).sort()) === JSON.stringify(Object.keys(bars).sort()),
+      `companies: ${cos.map((s) => s.company)}`);
+    for (const s of cos) {
+      assert(s.hacking === bars[s.company] && s.rep === 400e3 && s.field === "Software", `${s.company}: ${JSON.stringify(s)}`);
+      const next = WORK_ORDER[WORK_ORDER.indexOf(s) + 1];
+      assert(next?.faction === (s.faction ?? s.company) && !next.company, `${s.company} must be followed by its faction step`);
+    }
+    assert(cos.find((s) => s.company === "Fulcrum Technologies").faction === "Fulcrum Secret Technologies",
+      "Fulcrum's faction is named differently from its company");
+  },
+
+  "the city factions come after the hacking factions and before the megacorp grinds": async () => {
+    const { WORK_ORDER } = (await loadScripts())["sing/config"];
+    const at = (f) => WORK_ORDER.findIndex((s) => s.faction === f && !s.company);
+    const firstCorp = WORK_ORDER.findIndex((s) => s.company === "ECorp");
+    for (const c of ["Sector-12", "Aevum", "Chongqing", "New Tokyo", "Ishima", "Volhaven"]) {
+      assert(at(c) > at("CyberSec") && at(c) < firstCorp, `${c} at ${at(c)}`);
+    }
+  },
+
+  "Fulcrum's company step keys on its faction's name": async () => {
+    const mods = await loadScripts();
+    const { chooseAction } = mods["sing/plan"];
+    const { WORK_ORDER } = mods["sing/config"];
+    const zero = (except) => Object.fromEntries(WORK_ORDER.filter((s) => s.company)
+      .map((s) => s.faction ?? s.company).filter((f) => f !== except).map((f) => [f, 0]));
+    const p = player({ skills: { ...strong, hacking: 300 } });
+    const a = chooseAction(p, state({ targets: zero("Fulcrum Secret Technologies") }));
+    assert(a.kind === "company" && a.company === "Fulcrum Technologies", `got ${JSON.stringify(a)}`);
+    const joined = chooseAction(player({ skills: { ...strong, hacking: 300 }, factions: ["Fulcrum Secret Technologies"] }),
+      state({ targets: zero("Fulcrum Secret Technologies") }));
+    assert(joined.company !== "Fulcrum Technologies", `its faction joined - done, got ${JSON.stringify(joined)}`);
+  },
+
+  "chooseCityGroup: a joined city decides; else most priority augs, then most augs, ties to Sector-12": async () => {
+    const mods = await loadScripts();
+    const { chooseCityGroup } = mods["sing/plan"];
+    const { CITY_GROUPS } = mods["sing/config"];
+    const [west, east, volhaven] = CITY_GROUPS;
+    assert(chooseCityGroup(["Chongqing"], {}, []) === east, "joined Chongqing - the game has locked the rest");
+    const augsOf = {
+      "Sector-12": ["c1", "NeuroFlux Governor"], Aevum: [], Chongqing: ["h1"], "New Tokyo": ["h1", "h2"],
+      Ishima: [], Volhaven: ["h1", "c2", "c3"],
+    };
+    const priority = { h1: true, h2: true, c1: false, c2: false, c3: false };
+    assert(chooseCityGroup([], augsOf, [], priority) === east, "two priority augs east, one in Volhaven");
+    assert(chooseCityGroup([], augsOf, ["h2"], priority) === volhaven, "one each - Volhaven has more augs in all");
+    assert(chooseCityGroup([], augsOf, ["h1", "h2", "c1", "c2", "c3"], priority) === west,
+      "nothing left anywhere (NeuroFlux never counts) - Sector-12's group");
+  },
+
+  "travel: Tian Di Hui first, then the group's cities, each once its money bar is met": async () => {
+    const mods = await loadScripts();
+    const { chooseTravel } = mods["sing/plan"];
+    const [west, east] = mods["sing/config"].CITY_GROUPS;
+    const go = (over, o = {}) => chooseTravel(player(over), { group: west, ...o });
     const hacker = { ...strong, hacking: 50 };
-    assert(chooseTravel(player({ skills: hacker, money: 1.4e6 })) === "Chongqing", "go");
-    assert(chooseTravel(player({ skills: hacker, money: 1.39e6 })) === null, "not without the fare home");
-    assert(chooseTravel(player({ skills: { ...strong, hacking: 49 }, money: 1e9 })) === null, "not below hacking 50");
-    assert(chooseTravel(player({ skills: hacker, city: "Aevum" })) === null, "never from a city the player chose");
-    assert(chooseTravel(player({ skills: hacker, city: "Chongqing" })) === null, "wait there for the invite");
-    assert(chooseTravel(player({ skills: hacker, city: "Chongqing", factions: ["Tian Di Hui"] })) === "Sector-12",
-      "home once joined");
-    assert(chooseTravel(player({ skills: hacker, factions: ["Tian Di Hui"] })) === null, "done");
+    assert(go({ skills: hacker, money: 1.4e6 }) === "Chongqing", "Tian Di Hui's $1m plus a fare out and back");
+    assert(go({ skills: hacker, money: 1.39e6 }) === null, "short of the fares, and Sector-12 wants $15m");
+    assert(go({ skills: { ...strong, hacking: 49 }, money: 1e9 }) === null, "no Tian Di Hui below 50 - wait for Sector-12 here");
+    assert(go({ skills: hacker, city: "New Tokyo", money: 1e6 }) === null, "any Tian Di Hui city will do - wait there");
+    const tdh = { skills: hacker, factions: ["Tian Di Hui"], city: "Chongqing" };
+    assert(go({ ...tdh, money: 1e9 }) === "Sector-12", "then Sector-12's invite");
+    assert(go({ ...tdh, money: 1e7 }) === null, "not yet affordable - stay put, never undo a trip for nothing");
+    const s12 = { ...tdh, factions: ["Tian Di Hui", "Sector-12"], city: "Sector-12" };
+    assert(go({ ...s12, money: 4.04e7 }) === "Aevum", "Aevum's $40m plus the fares");
+    assert(go({ ...s12, money: 4e7 }) === null, "not with less");
+    assert(go({ ...tdh, money: 1e9 }, { targets: { "Sector-12": 0, Aevum: 0 } }) === null, "nothing left to buy there");
+    assert(go({ ...tdh, money: 1e9 }, { targets: { "Sector-12": 0, Aevum: 0 }, grindKarma: true }) === "Sector-12",
+      "nothing wanted and grinding karma - the gym's city");
+    assert(go({ ...tdh, money: 1e9 }, { group: east }) === null, "east: Chongqing is wanted and here");
+    assert(go({ ...tdh, factions: ["Tian Di Hui", "Chongqing"], money: 1e9 }, { group: east }) === "New Tokyo", "then New Tokyo");
   },
 
   // workForFaction refuses the gang's faction and getFactionWorkTypes returns []
@@ -643,6 +763,142 @@ export const tests = {
       `only CyberSec should be joined: ${mixed.calls}`);
   },
 
+  // The group is chosen on the aug pass at tick 0, which runs before JOIN.
+  "invites outside this install's city group are declined": async () => {
+    const mods = await loadScripts();
+    const r = await driveSing(mods, {
+      ticks: 1, invites: ["Sector-12", "Chongqing", "CyberSec"],
+      augs: { Chongqing: [{ name: "Neuregen Gene Modification", rep: 1e12, price: 1, stats: { hacking_exp: 1.4 } }] },
+    });
+    const joins = r.calls.filter((c) => c.startsWith("joinFaction:"));
+    assert(JSON.stringify(joins) === '["joinFaction:Chongqing","joinFaction:CyberSec"]',
+      `the east has the only hacking aug - Sector-12 declined: ${joins}`);
+  },
+
+  // Before settling, owned.all can grow mid-process - AUTO_INSTALL off with a
+  // batch bought over several passes - and a score computed from the new list
+  // would fly the player between groups at $200k a leg. Once every sold aug is
+  // rated the choice locks for the process, even though a fresh score (were it
+  // recomputed) would now favour a different group.
+  "the city group locks once settled - it does not re-flip as owned augs grow": async () => {
+    const mods = await loadScripts();
+    const { AUGS_EVERY } = mods["sing/config"];
+    let ownedCalls = 0;
+    const r = await driveSing(mods, {
+      ticks: AUGS_EVERY * 2 + 1,
+      // East (Chongqing, New Tokyo) has two priority augs against Sector-12's
+      // one, so east is chosen first pass. From the second pass on, e1 and e2
+      // read as already owned - simulating a batch bought elsewhere in the
+      // process - which would flip an unlocked score to Sector-12's group.
+      augs: {
+        "Sector-12": [{ name: "w1", rep: 1e12, price: 1, stats: { hacking: 1.4 } }],
+        Chongqing: [{ name: "e1", rep: 1e12, price: 1, stats: { hacking: 1.4 } }],
+        "New Tokyo": [{ name: "e2", rep: 1e12, price: 1, stats: { hacking: 1.4 } }],
+      },
+      api: {
+        getOwnedAugmentations: (purchased) => {
+          if (!purchased) return [];
+          ownedCalls++;
+          return ownedCalls <= 1 ? [] : ["e1", "e2"];
+        },
+      },
+    });
+    const cityLines = r.ns._log.filter((l) => l.includes("  cities: "));
+    assert(cityLines.length === 1, `the group must be chosen once and locked, not re-flipped: ${cityLines}`);
+    assert(cityLines[0].includes("Chongqing"), `expected the east group to win and stick: ${cityLines}`);
+  },
+
+  // sold.every(...) over an EMPTY array is vacuously true - so a failed first
+  // FAC_AUGS call (an ordinary rpc failure: no free RAM, a timeout) used to
+  // settle the group on zero data and strand it on the CITY_GROUPS[0] fallback
+  // for the rest of the process, with no later successful pass able to fix it.
+  "a failed first FAC_AUGS call does not settle the group on no data": async () => {
+    const mods = await loadScripts();
+    const { AUGS_EVERY } = mods["sing/config"];
+    const augsData = {
+      "Sector-12": [{ name: "w1", rep: 1e12, price: 1, stats: { hacking: 1.4 } }],
+      Chongqing: [{ name: "e1", rep: 1e12, price: 1, stats: { hacking: 1.4 } }],
+      "New Tokyo": [{ name: "e2", rep: 1e12, price: 1, stats: { hacking: 1.4 } }],
+    };
+    let calls = 0;
+    const r = await driveSing(mods, {
+      ticks: AUGS_EVERY * 2 + 1,
+      augs: augsData,
+      api: {
+        // The whole FAC_AUGS body throws on its first faction, so the entire
+        // pass 1 read fails and augsOf stays empty; every later call succeeds.
+        getAugmentationsFromFaction: (f) => {
+          calls++;
+          if (calls <= 1) throw new Error("no free RAM on home");
+          return (augsData[f] ?? []).map((a) => a.name);
+        },
+      },
+    });
+    const cityLines = r.ns._log.filter((l) => l.includes("  cities: "));
+    assert(cityLines.length > 0, `the group must eventually be decided: ${cityLines}`);
+    assert(cityLines.at(-1).includes("cities: Chongqing"),
+      `east has two priority augs against Sector-12's one - it must win once real data lands: ${cityLines}`);
+  },
+
+  // Once settled, chooseCityGroup used to be skipped entirely - so a city
+  // faction joined in another group, by any path outside JOIN, was never
+  // followed even though chooseCityGroup's own joined-group check would have
+  // caught it for free.
+  "a city faction joined after settling still overrides the locked group": async () => {
+    const mods = await loadScripts();
+    const { AUGS_EVERY } = mods["sing/config"];
+    const p = player();
+    let reads = 0;
+    const r = await driveSing(mods, {
+      ticks: AUGS_EVERY * 2 + 1,
+      p,
+      // Only Sector-12 sells anything, so west settles on real data at tick 0.
+      augs: { "Sector-12": [{ name: "w1", rep: 1e12, price: 1, stats: { hacking: 1.4 } }] },
+      api: {
+        getCurrentWork: () => {
+          reads++;
+          // After the first aug pass has settled (tick 0), join a city
+          // faction from a DIFFERENT group by hand - outside JOIN entirely.
+          if (reads > AUGS_EVERY && !p.factions.includes("Chongqing")) p.factions.push("Chongqing");
+          return null;
+        },
+      },
+    });
+    const cityLines = r.ns._log.filter((l) => l.includes("  cities: "));
+    assert(cityLines.length >= 2, `settling on west, then Chongqing being joined, must reopen the choice: ${cityLines}`);
+    assert(cityLines.at(-1).includes("cities: Chongqing"),
+      `Chongqing is joined - its group must win regardless of the earlier settle: ${cityLines}`);
+  },
+
+  "each aug is rated once per process": async () => {
+    const mods = await loadScripts();
+    const { AUGS_EVERY } = mods["sing/config"];
+    const r = await driveSing(mods, { ticks: AUGS_EVERY * 2 + 1, p: player({ factions: ["CyberSec"] }), augs: SELLS });
+    assert(r.count("getAugmentationStats") === 2, `two augs sold, each rated once: ${r.count("getAugmentationStats")}`);
+  },
+
+  // The Red Pill has no multipliers in this fork - getAugmentationStats
+  // returns stats "" - so AUG_STATS can only rate it tier 1 by NAME. Without
+  // it in PRIORITY_AUGS this reads false and the node-ending aug waits behind
+  // every tier-1 grind.
+  "the Red Pill is tier 1 by name - it carries no multiplier to rate": async () => {
+    const mods = await loadScripts();
+    const body = bodies().AUG_STATS;
+    const ns = makeNs({ extra: { singularity: { getAugmentationStats: () => ({}) } } });
+    const r = await mods["rpc"].rpc(ns, body, "The Red Pill");
+    assert(r["The Red Pill"] === true, `Red Pill must rate tier 1 by name, got ${JSON.stringify(r)}`);
+  },
+
+  "the work line names the tier": async () => {
+    const mods = await loadScripts();
+    const r = await driveSing(mods, {
+      ticks: 1, p: player({ factions: ["CyberSec"] }),
+      augs: { CyberSec: [{ name: "BitWire", rep: 1e12, price: 1, stats: { hacking: 1.05 } }] },
+    });
+    assert(r.ns._log.some((l) => l.includes("work: ") && l.includes("CyberSec") && l.includes("tier 1")),
+      `${r.ns._log.filter((l) => l.includes("work: "))}`);
+  },
+
   // Hired on the first tick, worked once, promoted on the PROMOTE_EVERY cadence -
   // and a promotion must never restart the shift.
   "company work is applied for, worked once, and re-applied for promotion": async () => {
@@ -660,17 +916,19 @@ export const tests = {
     assert(r.count("travelToCity") === 0, "already in Tian Di Hui - no trip");
   },
 
-  // The whole trip against a fake that only invites a player standing in
-  // Chongqing. Chongqing's own invite arrives too and must be declined.
+  // Out for Tian Di Hui at tick 0, invited at the first JOIN tick, then on to
+  // Sector-12 for its own invite. Chongqing's invite arrives too and must be declined.
   "the Tian Di Hui round trip, end to end": async () => {
     const mods = await loadScripts();
-    const p = player({ skills: { ...strong, hacking: 60 }, money: 1e7 });
+    const p = player({ skills: { ...strong, hacking: 60 }, money: 2e7 });
     const { JOIN_EVERY } = mods["sing/config"];
     // Out at tick 0, invited at the first JOIN tick; READ runs before JOIN, so it
     // sees the join a tick later, flies home, and works the tick after that.
     const r = await driveSing(mods, {
       ticks: JOIN_EVERY + 3, p,
       invites: () => (p.city === "Chongqing" && !p.factions.includes("Tian Di Hui") ? ["Tian Di Hui", "Chongqing"] : []),
+      augs: { "Tian Di Hui": [{ name: "Neuroreceptor Management Implant", rep: 75e3, price: 5e8 }],
+        "Sector-12": [{ name: "CashRoot Starter Kit", rep: 1e12, price: 1 }] },
     });
     const trips = r.calls.filter((c) => c.startsWith("travelToCity:"));
     assert(JSON.stringify(trips) === JSON.stringify(["travelToCity:Chongqing", "travelToCity:Sector-12"]),

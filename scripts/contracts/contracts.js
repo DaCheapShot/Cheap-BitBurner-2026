@@ -171,16 +171,18 @@ export async function main(ns) {
   const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
 
   /**
-   * One body, and a failure that says so. Not fatal: early in a BitNode home
-   * may have no room for a 12.00 GB transient, and boot runs this again in a
-   * minute anyway. The WARN goes to the terminal because this process's own log
-   * window dies with it.
+   * One body, and a failure that says so - in the log only. Not fatal: early in
+   * a BitNode home may have no room for a 12.00 GB transient, and boot runs this
+   * again in a minute anyway. It used to go to the terminal too, since this
+   * process's log window dies with it, but "no free RAM" is the ordinary state
+   * of a fresh node's first minutes and a line a minute of it was noise (the
+   * user's call). Kept out of GATE_MARKER as well, so it cannot make the gate
+   * reason repeat.
    */
   const call = async (tag, body, ...args) => {
     try {
       return await rpc(ns, body, ...args);
     } catch (e) {
-      announce(ns, `contracts: WARN ${tag} failed - ${e.message ?? e}`);
       log(`WARN: ${tag} failed - ${e.message ?? e}`);
       return null;
     }

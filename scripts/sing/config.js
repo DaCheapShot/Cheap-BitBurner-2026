@@ -63,17 +63,6 @@ export const PROGS_WANTED = [
   "BruteSSH.exe", "FTPCrack.exe", "relaySMTP.exe", "HTTPWorm.exe", "SQLInject.exe", "Formulas.exe",
 ];
 
-// ------------------------------------------------------------------- join ---
-
-/**
- * Invites never accepted. Joining a city faction permanently locks out its
- * enemies (src/Faction/FactionInfo.tsx), and Sector-12 - where every BitNode
- * starts - lists exactly these four. Aevum is Sector-12's ally, so it is not
- * here. Everything else is accepted: phase 1 has no read of invite
- * requirements, which is getFactionInviteRequirements at 3.00 GB.
- */
-export const JOIN_DENY = ["Chongqing", "New Tokyo", "Ishima", "Volhaven"];
-
 // ------------------------------------------------------------------- work ---
 
 /**
@@ -134,13 +123,23 @@ export const MONEY_CRIMES = ["Shoplift", "Mug", "Deal Drugs", "Homicide"];
  *   the software intern's reqdHacking 1 plus Bachman's jobStatReqOffset 224
  *   (CompanyPosition.requiredSkills). Below it the step is skipped rather than
  *   applied for every tick. applyToCompany and workForCompany check no city,
- *   so Bachman being in Aevum does not matter. The company's name is also its
- *   faction's, which is how the step learns the faction's augs are all owned
- *   and skips the company too.
+ *   so Bachman being in Aevum does not matter. A company step's faction is
+ *   `faction`, defaulting to the company's own name - Fulcrum is the one that differs.
  * - Then the hacking factions, HIGHEST first: each one's shop largely covers
  *   the lower ones' augs, so rep earned high up buys what CyberSec sells too,
  *   and the lower factions' targets drop as those augs are bought. An aug is
  *   bought from whichever joined faction has the most rep (planAugBuys).
+ * - Then the six city factions. Only the joined ones apply, and an install
+ *   joins one group of them (CITY_GROUPS). Their rep is cheap, and a company
+ *   step applies without any join, so anything listed after one waits out a
+ *   400k grind.
+ * - Then every megacorp, each a COMPANY step followed by its faction: the same
+ *   400k invite bar as Bachman (CorpFactionRepRequirement), hired at reqdHacking
+ *   1 + jobStatReqOffset - 250 for ECorp, MegaCorp and NWO, 225 for the rest.
+ *   Fulcrum's faction also wants fulcrumassets backdoored, which the backdoor
+ *   pass does anyway. An install clears jobs and company rep but keeps company
+ *   favor, so each grind gets faster. Order is the user's; the tiers skip any
+ *   whose faction has nothing left to buy in the tier being worked.
  */
 export const WORK_ORDER = [
   { faction: "Tian Di Hui" },
@@ -151,6 +150,30 @@ export const WORK_ORDER = [
   { faction: "The Black Hand" },
   { faction: "NiteSec" },
   { faction: "CyberSec" },
+  { faction: "Sector-12" },
+  { faction: "Aevum" },
+  { faction: "Chongqing" },
+  { faction: "New Tokyo" },
+  { faction: "Ishima" },
+  { faction: "Volhaven" },
+  { company: "ECorp", field: "Software", rep: 400e3, hacking: 250 },
+  { faction: "ECorp" },
+  { company: "OmniTek Incorporated", field: "Software", rep: 400e3, hacking: 225 },
+  { faction: "OmniTek Incorporated" },
+  { company: "NWO", field: "Software", rep: 400e3, hacking: 250 },
+  { faction: "NWO" },
+  { company: "MegaCorp", field: "Software", rep: 400e3, hacking: 250 },
+  { faction: "MegaCorp" },
+  { company: "Blade Industries", field: "Software", rep: 400e3, hacking: 225 },
+  { faction: "Blade Industries" },
+  { company: "Four Sigma", field: "Software", rep: 400e3, hacking: 225 },
+  { faction: "Four Sigma" },
+  { company: "KuaiGong International", field: "Software", rep: 400e3, hacking: 225 },
+  { faction: "KuaiGong International" },
+  { company: "Clarke Incorporated", field: "Software", rep: 400e3, hacking: 225 },
+  { faction: "Clarke Incorporated" },
+  { company: "Fulcrum Technologies", faction: "Fulcrum Secret Technologies", field: "Software", rep: 400e3, hacking: 225 },
+  { faction: "Fulcrum Secret Technologies" },
 ];
 /**
  * Re-apply to an employer every this many ticks while working there. It is the
@@ -202,6 +225,30 @@ export const NFG_LEVEL_MULT = 1.14;
  * for them (AugmentationHelpers.ts getAugCost).
  */
 export const AUG_SKIP_FACTIONS = ["Shadows of Anarchy"];
+
+/**
+ * Tier 1 - the user's rule: the road to w0r1d_d43m0n is hacking level, so an
+ * aug that raises any of these multipliers (getAugmentationStats) is worked for
+ * and bought before the rest. faction_rep and company_rep are in because a
+ * rep-gain aug speeds every later hour toward the hacking ones - it is why
+ * Bachman comes early. Decided from the game's own stats, not a name list, so
+ * a fork that edits the roster is still sorted right.
+ */
+export const PRIORITY_MULTS = [
+  "hacking", "hacking_exp", "hacking_chance", "hacking_speed", "hacking_money", "hacking_grow",
+  "faction_rep", "company_rep",
+];
+/**
+ * Tier 1 by name: augs AUG_STATS cannot rate from a multiplier. The
+ * Neuroreceptor Management Implant removes the unfocused-work penalty, the
+ * reason Tian Di Hui is worked first. THE RED PILL has no multipliers in this
+ * fork (getAugmentationStats returns stats ""), so AUG_STATS alone would rate
+ * it tier 2 and its 2.5m Daedalus rep would wait behind every tier-1 grind -
+ * up to ten 400k company steps - though it is the user's shortcut to the end
+ * of the node (see RED_PILL below) and Source-File 5's absence means nothing
+ * donates it there either. Listed by name for the same reason the implant is.
+ */
+export const PRIORITY_AUGS = ["Neuroreceptor Management Implant", "The Red Pill"];
 
 /**
  * The user's shortcut to the end of the node. THE RED PILL is bought the moment
@@ -276,17 +323,28 @@ export const BACKDOOR_KEEP_GB = 6.60;
 
 /**
  * Tian Di Hui invites only a player standing in Chongqing, New Tokyo or Ishima
- * with hacking 50 and $1m (FactionInfo.tsx). So: fly out from Sector-12 once
- * both hold with the fare home in hand, wait there for the invite, fly back once
- * joined - the gym and Sector-12's own invite are Sector-12-only. Chongqing's
- * own invite, which would arrive while waiting, is in JOIN_DENY.
+ * with hacking 50 and $1m (FactionInfo.tsx) - TDH_CITIES, flying to the first.
+ * Its stop comes before every city faction's in chooseTravel.
  */
 export const TDH_FACTION = "Tian Di Hui";
-export const TDH_CITY = "Chongqing";
+export const TDH_CITIES = ["Chongqing", "New Tokyo", "Ishima"];
 export const TDH_HACKING = 50;
 export const TDH_MONEY = 1e6;
-export const HOME_CITY = "Sector-12";
 /** CONSTANTS.TravelCost. */
 export const TRAVEL_COST = 200e3;
+
+/**
+ * The city factions, grouped by the enemy table in FactionInfo.tsx: joining
+ * one locks out every faction in the other groups for the rest of the install.
+ * Membership resets at an install, so chooseCityGroup picks one group per
+ * install - the one with the most priority augs left, then the most augs - and
+ * the others' invites are declined. That is the rotation: every group's augs
+ * come in reach over enough installs. Ties go to the first group.
+ */
+export const CITY_GROUPS = [["Sector-12", "Aevum"], ["Chongqing", "New Tokyo", "Ishima"], ["Volhaven"]];
+/** Each city faction's invite: standing in the city with this much cash (FactionInfo.tsx). */
+export const CITY_INVITE_MONEY = {
+  "Sector-12": 15e6, Aevum: 40e6, Chongqing: 20e6, "New Tokyo": 20e6, Ishima: 30e6, Volhaven: 50e6,
+};
 /** Unfocused work earns CONSTANTS.BaseFocusBonus = 0.8 without the Neuroreceptor implant. */
 export const WORK_FOCUS = true;

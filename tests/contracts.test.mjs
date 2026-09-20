@@ -665,5 +665,9 @@ ${ns._log.join("\n")}`);
     });
     assert(ns._log.some((l) => l.includes("WARN: find failed")),
       `the cause must be named:\n${ns._log.join("\n")}`);
+    // No free RAM is the ordinary state for a fresh BitNode's first minutes, and
+    // boot retries every tick - the terminal is no place for it (the user's call).
+    assert(!ns._log.some((l) => l.includes("[T]") && l.includes("WARN")),
+      `a failed body must not reach the terminal:\n${ns._log.join("\n")}`);
   },
 };

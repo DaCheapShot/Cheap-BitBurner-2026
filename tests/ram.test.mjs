@@ -441,6 +441,8 @@ export const tests = {
       SWEEP: 2.70, INSTALL: 6.60,
       // The idle money crime: getCrimeStats and getCrimeChance, 5.00 each.
       CRIME_STATS: 6.60, CRIME_CHANCE: 6.60,
+      // getAugmentationStats alone, rating each aug for tier 1 once per process.
+      AUG_STATS: 6.60,
       // The backdoor read: scan + getServer + ps + three 0.05 reads. The install
       // itself is backdoor.js, a real file - it is fire-and-forget, see below.
       BACKDOORS: 4.15,

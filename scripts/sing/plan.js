@@ -1,7 +1,7 @@
 import {
   TRAIN_STAT_FLOOR, TRAIN_GYM, TRAIN_GYM_CITY, CRIME_TYPE, GANG_KARMA_TARGET,
   WORK_ORDER, WORK_TYPE_ORDER, FACTION_REP_TARGET,
-  TDH_FACTION, TDH_CITY, TDH_HACKING, TDH_MONEY, HOME_CITY, TRAVEL_COST,
+  TDH_FACTION, TDH_CITIES, TDH_HACKING, TDH_MONEY, TRAVEL_COST, CITY_GROUPS, CITY_INVITE_MONEY,
   MIN_AUG_BATCH, NFG, AUG_PRICE_MULT, NFG_LEVEL_MULT, AUG_SKIP_FACTIONS,
   DONATE_MONEY_PER_REP, RED_PILL, MONEY_CRIMES,
 } from "./config.js";
@@ -36,14 +36,17 @@ export function repTarget(faction, targets = {}) {
  * @param augsOf  {faction: aug names}   getAugmentationsFromFaction
  * @param owned   aug names, installed AND queued - getOwnedAugmentations(true)
  * @param info    {aug: {rep, price}}    getAugmentationRepReq / Price
+ * @param priority {aug: bool} from the AUG_STATS body, or null. Given, an aug
+ *                 rated false does not count - that is tier 1. An aug not rated
+ *                 yet still counts: unknown must not read as done.
  */
-export function repTargets(augsOf, owned, info) {
+export function repTargets(augsOf, owned, info, priority = null) {
   const have = new Set(owned);
   const out = {};
   for (const [faction, augs] of Object.entries(augsOf)) {
     let max = 0;
     for (const a of augs) {
-      if (a === NFG || have.has(a)) continue;
+      if (a === NFG || have.has(a) || priority?.[a] === false) continue;
       // Unread means unknown, and unknown must not read as "done".
       max = Math.max(max, info[a]?.rep ?? FACTION_REP_TARGET);
     }
@@ -57,7 +60,9 @@ export function repTargets(augsOf, owned, info) {
  *
  * Most expensive first, because every queued aug multiplies the price of every
  * later one by AUG_PRICE_MULT - buying cheap-first pays the multiplier on the
- * expensive ones. An aug is skipped (not the batch) when it does not fit or a
+ * expensive ones. Priority augs (hacking and rep gain, rated by AUG_STATS) go
+ * ahead of the rest - the user's rule - and dearest-first holds inside each
+ * class. An aug is skipped (not the batch) when it does not fit or a
  * prerequisite is neither owned nor already earlier in the batch. NeuroFlux
  * then fills, one level at a time, each level x NFG_LEVEL_MULT dearer in money
  * and rep. The batch is returned only when queued + batch reaches
@@ -87,11 +92,12 @@ export function repTargets(augsOf, owned, info) {
  * @param o.rep      {faction: rep} for joined factions - only these can sell
  * @param o.cash     money on hand
  * @param o.donate   { perRep, can(faction) } - or null, and nothing is donated
+ * @param o.priority {aug: bool} - priority augs are planned first (tier 1), each class dearest first
  * @param o.force    buy what fits even under MIN_AUG_BATCH
  * @returns {{ buys: {faction, name, cost}[], donations: {faction, amount, rep}[],
  *             batch: number, total: number, eligible: number }}
  */
-export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, donate = null, force = false }) {
+export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, donate = null, priority = null, force = false }) {
   // Who sells each aug, among joined factions we may buy from.
   const sellers = {};
   for (const [faction, augs] of Object.entries(augsOf)) {
@@ -109,11 +115,12 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, d
   };
   const cheapest = (c) => c.sellers.reduce((b, f) => (lift(f, c.need) < lift(b, c.need) ? f : b));
 
+  const rank = (c) => (priority?.[c.name] === false ? 0 : 1);
   const eligible = Object.keys(sellers)
     .filter((a) => a !== NFG && !have.has(a) && info[a])
     .map((a) => ({ name: a, sellers: sellers[a], price: info[a].price, need: info[a].rep }))
     .filter((c) => Number.isFinite(lift(cheapest(c), c.need)))
-    .sort((x, y) => y.price - x.price);
+    .sort((x, y) => rank(y) - rank(x) || y.price - x.price);
 
   const buys = [];
   const donated = {};
@@ -193,19 +200,97 @@ function steps(player) {
 }
 
 /**
- * Where to fly, or null. Only ever the Tian Di Hui round trip: out from
- * HOME_CITY once the invite's hacking and money bars are met with the fare home
- * in hand, back once joined. Leaving only from home and returning only from
- * TDH_CITY means a trip the player made by hand is never undone.
+ * This install's city group: the one already joined into, since the game has
+ * locked the others - else the group with the most priority augs left, then
+ * the most augs of any kind, over its factions without duplicates. Ties go to
+ * the earlier group, Sector-12's. NeuroFlux never counts, as in repTargets; an
+ * unrated aug counts as priority, as there.
+ *
+ * @param priority {aug: bool} from AUG_STATS
  */
-export function chooseTravel(player) {
-  const joined = player.factions.includes(TDH_FACTION);
-  if (!joined && player.city === HOME_CITY && player.skills.hacking >= TDH_HACKING &&
-      player.money >= TDH_MONEY + 2 * TRAVEL_COST) {
-    return TDH_CITY;
+export function chooseCityGroup(joined, augsOf, owned, priority = {}) {
+  const inGroup = CITY_GROUPS.find((g) => g.some((c) => joined.includes(c)));
+  if (inGroup) return inGroup;
+  const have = new Set(owned);
+  const score = (g) => {
+    const left = [...new Set(g.flatMap((c) => augsOf[c] ?? []))].filter((a) => a !== NFG && !have.has(a));
+    return [left.filter((a) => priority[a] !== false).length, left.length];
+  };
+  let best = CITY_GROUPS[0];
+  let bs = score(best);
+  for (const g of CITY_GROUPS.slice(1)) {
+    const s = score(g);
+    if (s[0] > bs[0] || (s[0] === bs[0] && s[1] > bs[1])) [best, bs] = [g, s];
   }
-  if (joined && player.city === TDH_CITY) return HOME_CITY;
+  return best;
+}
+
+/**
+ * Where to fly, or null. The stops, in order: Tian Di Hui (any of TDH_CITIES,
+ * hacking TDH_HACKING) while unjoined with augs left, then each city of `group`
+ * whose faction is unjoined with augs left. The first stop whose money bar is
+ * met wins - the bar alone where the player already stands, the bar plus a
+ * fare out and back from anywhere else, since an invite checks cash on hand
+ * after the ticket. Standing in the winner's city is a wait for its invite, and
+ * no stop affordable is a wait wherever the player is. With no stop left at
+ * all, a karma grinder goes to the gym's city - the only other reason to move.
+ *
+ * ponytail: a cash dip while waiting can send the player on to a later, cheaper
+ * stop and back again, $200k a leg. Add hysteresis if a log shows it.
+ *
+ * @param o.group      chooseCityGroup's pick
+ * @param o.targets    {faction: rep}, tier 2 - 0 means nothing left there;
+ *                     absent means unread, which counts as wanted
+ * @param o.grindKarma GRIND_GANG_KARMA, as READ returned it
+ */
+export function chooseTravel(player, { group, targets = {}, grindKarma = false }) {
+  const want = (f) => !player.factions.includes(f) && targets[f] !== 0;
+  const stops = [];
+  if (want(TDH_FACTION) && player.skills.hacking >= TDH_HACKING) stops.push({ cities: TDH_CITIES, money: TDH_MONEY });
+  for (const c of group) if (want(c)) stops.push({ cities: [c], money: CITY_INVITE_MONEY[c] });
+  const here = (s) => s.cities.includes(player.city);
+  const next = stops.find((s) => player.money >= s.money + (here(s) ? 0 : 2 * TRAVEL_COST));
+  if (next) return here(next) ? null : next.cities[0];
+  if (!stops.length && grindKarma && player.city !== TRAIN_GYM_CITY) return TRAIN_GYM_CITY;
   return null;
+}
+
+/**
+ * One pass down the steps against one tier's targets. Returns the first step
+ * with work left, and the first donatable one met on the way - a faction that
+ * takes donations has its rep bought with the next batch, so it is only a
+ * fallback.
+ */
+function walk(player, state, targets) {
+  let donatable = null;
+  for (const step of steps(player)) {
+    if (step.company) {
+      const c = step.company;
+      // The faction the company's invite leads to. The same name for every
+      // megacorp but Fulcrum, whose faction is Fulcrum Secret Technologies.
+      const f = step.faction ?? c;
+      const employed = Boolean((player.jobs ?? {})[c]);
+      // Done once its faction is joined or the rep bar is met. Not yet hireable
+      // is a skip, not an application every tick that the game refuses.
+      if (player.factions.includes(f) || (state.companyRep?.[c] ?? 0) >= step.rep) continue;
+      // Nothing left to buy there in this tier: the invite would buy nothing.
+      if (targets?.[f] === 0) continue;
+      if (!employed && player.skills.hacking < step.hacking) continue;
+      return { action: { kind: "company", company: c, field: step.field, employed } };
+    }
+    // The gang's own faction offers no work - getFactionWorkTypes returns []
+    // for it - so "has a work type" excludes it without knowing its name, which
+    // would cost getGangInformation (2.00 GB) to find out.
+    const types = state.workTypes[step.faction] ?? [];
+    const type = WORK_TYPE_ORDER.find((t) => types.includes(t));
+    const target = repTarget(step.faction, targets);
+    if (type && (state.rep[step.faction] ?? 0) < target) {
+      const a = { kind: "faction", faction: step.faction, type, target };
+      if (!canDonate(step.faction, state)) return { action: a };
+      donatable ??= a;
+    }
+  }
+  return { action: null, donatable };
 }
 
 /**
@@ -215,6 +300,7 @@ export function chooseTravel(player) {
  * @param state   { hasSF2, inGang, grindKarma, rep: {faction: n},
  *                  workTypes: {faction: string[]}, companyRep: {company: n},
  *                  targets: {faction: rep} from repTargets,
+ *                  priorityTargets: {faction: rep} tier 1, optional,
  *                  favor: {faction: n}, favorNeed: n }
  * @returns       { kind: "gym"|"crime"|"faction"|"company"|"idle", ... }
  */
@@ -237,32 +323,20 @@ export function chooseAction(player, state) {
     return { kind: "crime", crime: CRIME_TYPE };
   }
 
-  // 3. Rep, down WORK_ORDER. A faction that takes donations has its rep bought
-  //    with the next aug batch, so it is not worked - unless nothing else is
-  //    left, when working it (at its favor's 1 + favor/100) still beats idling.
+  // 3. Rep, down WORK_ORDER - in two tiers once the aug pass has rated augs:
+  //    first to the rep the PRIORITY augs need (hacking and rep gain - the
+  //    user's rule, the road to w0r1d_d43m0n's hacking bar), then to what
+  //    everything else needs. A donatable faction is worked only when no tier
+  //    has anything else left, at its favor's 1 + favor/100.
+  const tiers = state.priorityTargets
+    ? [[1, state.priorityTargets], [2, state.targets]]
+    : [[null, state.targets]];
   let donatable = null;
-  for (const step of steps(player)) {
-    if (step.company) {
-      const c = step.company;
-      const employed = Boolean((player.jobs ?? {})[c]);
-      // Done once its faction is joined or the rep bar is met. Not yet hireable
-      // is a skip, not an application every tick that the game refuses.
-      if (player.factions.includes(c) || (state.companyRep?.[c] ?? 0) >= step.rep) continue;
-      // Its faction's augs are all owned: the invite would buy nothing.
-      if (state.targets?.[c] === 0) continue;
-      if (!employed && player.skills.hacking < step.hacking) continue;
-      return { kind: "company", company: c, field: step.field, employed };
-    }
-    // The gang's own faction offers no work - getFactionWorkTypes returns []
-    // for it - so "has a work type" excludes it without knowing its name, which
-    // would cost getGangInformation (2.00 GB) to find out.
-    const types = state.workTypes[step.faction] ?? [];
-    const type = WORK_TYPE_ORDER.find((t) => types.includes(t));
-    if (type && (state.rep[step.faction] ?? 0) < repTarget(step.faction, state.targets)) {
-      const a = { kind: "faction", faction: step.faction, type };
-      if (!canDonate(step.faction, state)) return a;
-      donatable ??= a;
-    }
+  for (const [tier, targets] of tiers) {
+    const w = walk(player, state, targets);
+    const tag = tier ? { tier } : {};
+    if (w.action) return { ...w.action, ...tag };
+    if (w.donatable) donatable ??= { ...w.donatable, ...tag };
   }
   if (donatable) return donatable;
 
