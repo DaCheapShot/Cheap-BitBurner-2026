@@ -167,3 +167,103 @@ export function freshProduction(isServer, unit) {
   return unit.production /
     (unit.level * Math.pow(1.07, Math.log2(unit.ram)) * (1 + (unit.cores - 1) / 5) * ratio);
 }
+
+// ------------------------------------------------------------ money plan ---
+
+/**
+ * What to buy this sweep, in order.
+ *
+ * WHY MINIMUM PAYBACK AND NOT MINIMUM PRICE. Cheapest-first buys whichever
+ * ladder happens to sit low, regardless of what it returns - on a node whose
+ * level has run far ahead of its RAM that is the wrong rung every time. The
+ * ratio is the whole point of having the gains.
+ *
+ * WHY THE BUDGET IS PRICED ONCE. The cap is on the SWEEP, not on each purchase:
+ * priced per purchase it would ratchet down as cash fell and the sweep would
+ * spend a different fraction depending only on how many rungs it happened to
+ * take. cloud.js is bidding for the same wallet at 10% and sing's aug batch
+ * wants all of it.
+ *
+ * WHY PRODUCTION IS PRICED AT THE SALE RATE IN BITNODE 9. There, production is
+ * hashes/s, and a hash's floor value is the auto-sale rate - overflow is sold
+ * at exactly that (processAllHacknetServerEarnings). It understates, because
+ * the hash sweep only spends a hash when it beats that price, and understating
+ * is the right direction for a spend decision.
+ *
+ * @param {object} state  { isServer, units, budget, mults }
+ * @param {object} cfg    { PAYBACK_SECONDS, HASH_PRICE }
+ */
+export function planMoney(state, cfg) {
+  const { isServer, budget, mults } = state;
+  const perUnit = isServer ? cfg.HASH_PRICE : 1;
+  // Local copies: the plan walks several rungs and each one changes what the
+  // next is worth. Nothing here touches the caller's objects.
+  const units = state.units.map((u) => ({ ...u }));
+  const buys = [];
+  let spent = 0;
+  let reason = "nothing left inside the payback threshold";
+
+  for (;;) {
+    let best = null;
+
+    // A new unit. With nothing owned there is no production to derive its rate
+    // from, so the first one is unconditional - $1,000 for a node, $50,000 for
+    // a server, and in BitNode 9 no servers means no hashes at all.
+    if (units.length === 0) {
+      const nextPrice = unitPrice(isServer, 0, mults);
+      if (Number.isFinite(nextPrice)) {
+        if (nextPrice <= budget - spent) {
+          buys.push({ kind: "unit", index: -1, price: nextPrice });
+          spent += nextPrice;
+          units.push(isServer
+            ? { level: 1, ram: 1, cores: 1, cache: 1, used: 0, production: 0 }
+            : { level: 1, ram: 1, cores: 1, production: 0 });
+          continue;
+        }
+        return { buys, spent, reason: "the first unit does not fit the budget" };
+      }
+    }
+
+    for (let i = 0; i < units.length; i++) {
+      // "cache" is absent on purpose: it buys hash capacity, not production, so
+      // it has no payback to rank and is bought by the hash sweep when capacity
+      // is what blocks a purchase.
+      for (const kind of ["level", "ram", "core"]) {
+        const price = stepPrice(isServer, kind, units[i], mults);
+        // Infinity at the maximum, which is what keeps a maxed rung out of the
+        // running with no separate cap check.
+        if (!Number.isFinite(price)) continue;
+        const gain = stepGain(isServer, kind, units[i]) * perUnit;
+        if (gain <= 0) continue;
+        const payback = price / gain;
+        if (payback >= cfg.PAYBACK_SECONDS) continue;
+        if (!best || payback < best.payback) best = { kind, index: i, price, payback };
+      }
+    }
+
+    if (!best) break;
+    if (best.price > budget - spent) {
+      reason = "the next buy does not fit the sweep's budget";
+      break;
+    }
+
+    buys.push({ kind: best.kind, index: best.index, price: best.price });
+    spent += best.price;
+
+    if (best.kind === "unit") {
+      const fresh = freshProduction(isServer, units[0]);
+      units.push(isServer
+        ? { level: 1, ram: 1, cores: 1, cache: 1, used: 0, production: fresh }
+        : { level: 1, ram: 1, cores: 1, production: fresh });
+      continue;
+    }
+
+    const u = units[best.index];
+    u.production += stepGain(isServer, best.kind, u);
+    if (best.kind === "level") u.level += 1;
+    if (best.kind === "ram") u.ram *= 2;
+    if (best.kind === "core") u.cores += 1;
+  }
+
+  return { buys, spent, reason };
+}

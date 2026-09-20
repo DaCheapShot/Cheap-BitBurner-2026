@@ -228,4 +228,132 @@ export const tests = {
     assert(Math.abs(m.freshProduction(true, server) - freshServer) < freshServer * 1e-9,
       `fresh server: got ${m.freshProduction(true, server)}, expected ${freshServer}`);
   },
+
+  // The greedy picks minimum PAYBACK, not minimum price. Cheapest-first buys
+  // whatever ladder happens to be low regardless of what it returns, which on
+  // a node whose level is far ahead of its RAM is the wrong rung every time.
+  "the money plan takes the best payback, not the cheapest price": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const cfg = { PAYBACK_SECONDS: 3600, HASH_PRICE: 250000 };
+
+    const nodeRate = (level, ram, cores) =>
+      level * 1.5 * Math.pow(1.035, ram - 1) * ((cores + 5) / 6);
+    const unit = { level: 50, ram: 1, cores: 1 };
+    unit.production = nodeRate(50, 1, 1);
+
+    const mults = { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 };
+    const plan = m.planMoney(
+      { isServer: false, units: [unit], budget: 1e9, mults }, cfg);
+
+    assert(plan.buys.length > 0, `expected buys, got none (${plan.reason})`);
+
+    // Every buy must clear the threshold it claims to.
+    let live = { ...unit };
+    for (const buy of plan.buys) {
+      if (buy.kind === "unit") continue;
+      const gain = m.stepGain(false, buy.kind, live);
+      assert(buy.price / gain < cfg.PAYBACK_SECONDS,
+        `${buy.kind} pays back in ${(buy.price / gain).toFixed(0)}s, over the threshold`);
+      if (buy.kind === "level") live.level += 1;
+      if (buy.kind === "ram") live.ram *= 2;
+      if (buy.kind === "core") live.cores += 1;
+      live.production += gain;
+    }
+
+    // At level 50 with 1 GB and 1 core, the first rung taken must be the one
+    // with the best payback - which is not the cheapest one.
+    const first = plan.buys[0];
+    const prices = {};
+    const paybacks = {};
+    for (const kind of ["level", "ram", "core"]) {
+      prices[kind] = m.stepPrice(false, kind, unit, mults);
+      paybacks[kind] = prices[kind] / m.stepGain(false, kind, unit);
+    }
+    const bestPayback = Object.keys(paybacks).sort((a, b) => paybacks[a] - paybacks[b])[0];
+    assert(first.kind === bestPayback,
+      `first buy was ${first.kind}; best payback is ${bestPayback}`);
+  },
+
+  "the money plan stops at the budget and says so": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const cfg = { PAYBACK_SECONDS: 1e9, HASH_PRICE: 250000 };
+    const mults = { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 };
+
+    const unit = { level: 10, ram: 2, cores: 1, production: 10 * 1.5 * 1.035 * 1 };
+    // Enough for a handful of level steps at 500-ish each, nothing more.
+    const plan = m.planMoney({ isServer: false, units: [unit], budget: 3000, mults }, cfg);
+
+    assert(plan.spent <= 3000, `spent ${plan.spent} of a 3000 budget`);
+    assert(plan.buys.length > 0, "a 3000 budget should buy at least one level step");
+    assert(plan.reason.includes("budget"), `reason was "${plan.reason}"`);
+  },
+
+  "the money plan refuses everything when nothing pays back in time": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const mults = { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 };
+    const unit = { level: 10, ram: 2, cores: 1, production: 10 * 1.5 * 1.035 };
+
+    const plan = m.planMoney(
+      { isServer: false, units: [unit], budget: 1e12, mults },
+      { PAYBACK_SECONDS: 1e-6, HASH_PRICE: 250000 });
+
+    assert(plan.buys.length === 0, `expected no buys, got ${plan.buys.length}`);
+    assert(plan.spent === 0, `expected to spend nothing, spent ${plan.spent}`);
+    assert(plan.reason.includes("payback"), `reason was "${plan.reason}"`);
+  },
+
+  // With nothing owned there is no production to derive a fresh unit's rate
+  // from, so the first one is bought unconditionally within the budget. It is
+  // $1,000 for a node and $50,000 for a server, and in BitNode 9 no servers
+  // means no hashes at all - there is nothing to weigh it against.
+  "the first unit is bought unconditionally": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const mults = { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 };
+    const cfg = { PAYBACK_SECONDS: 1e-6, HASH_PRICE: 250000 };
+
+    const plan = m.planMoney({ isServer: false, units: [], budget: 1e6, mults }, cfg);
+    assert(plan.buys.length === 1 && plan.buys[0].kind === "unit",
+      `expected one unit purchase, got ${JSON.stringify(plan.buys)}`);
+    assert(plan.buys[0].price === 1000, `first node should cost $1000, got ${plan.buys[0].price}`);
+
+    // ...but not when it does not fit the budget.
+    const broke = m.planMoney({ isServer: false, units: [], budget: 999, mults }, cfg);
+    assert(broke.buys.length === 0, "a budget under the price buys nothing");
+    assert(broke.reason.includes("budget"), `reason was "${broke.reason}"`);
+  },
+
+  // In BitNode 9 production is hashes/s, so it is valued at the auto-sale rate.
+  // That deliberately UNDERSTATES: the hash sweep only spends a hash when it is
+  // worth more than the sale price, so erring low on node upgrades is the right
+  // direction for a spend decision.
+  "server production is valued at the hash sale price": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const mults = { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 };
+
+    const serverRate = (level, used, maxRam, cores) =>
+      0.001 * level * Math.pow(1.07, Math.log2(maxRam)) * (1 + (cores - 1) / 5) * (1 - used / maxRam);
+    const unit = { level: 30, ram: 8, cores: 2, cache: 1, used: 0 };
+    unit.production = serverRate(30, 0, 8, 2);
+
+    const price = m.stepPrice(true, "level", unit, mults);
+    const gain = m.stepGain(true, "level", unit);
+    // A threshold that sits just either side of the true payback in $/s terms.
+    const payback = price / (gain * 250000);
+
+    const bought = m.planMoney(
+      { isServer: true, units: [unit], budget: 1e12, mults },
+      { PAYBACK_SECONDS: payback * 1.5, HASH_PRICE: 250000 });
+    assert(bought.buys.length > 0, "should buy when the hash-priced payback clears the bar");
+
+    const refused = m.planMoney(
+      { isServer: true, units: [unit], budget: 1e12, mults },
+      { PAYBACK_SECONDS: payback * 0.5, HASH_PRICE: 250000 });
+    assert(refused.buys.length === 0,
+      "should refuse when the hash-priced payback misses the bar");
+  },
 };
