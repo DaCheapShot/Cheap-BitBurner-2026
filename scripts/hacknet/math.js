@@ -114,3 +114,56 @@ export function stepPrice(isServer, kind, unit, mults) {
   if (kind === "cache") return isServer ? cachePrice(unit.cache, 1) : Infinity;
   return Infinity;
 }
+
+// ------------------------------------------------------------------ gain ---
+//
+// node   production = level*1.5   * 1.035^(ram-1)     * ((cores+5)/6)   * mult * bnMult
+// server hashRate   = level*0.001 * 1.07^log2(maxRam) * (1+(cores-1)/5) * ramRatio * mult * bnMult
+//
+// Every upgrade's effect is an INDEPENDENT MULTIPLICATIVE FACTOR, so the gain
+// of any one of them is a ratio applied to the production getNodeStats already
+// reports. `mult` and `bnMult` appear in both the before and the after and
+// cancel - which is why nothing here reads ns.getHacknetMultipliers().production,
+// ns.formulas.hacknetNodes.* (Formulas.exe) or ns.getBitNodeMultipliers (4.00 GB).
+
+/** Δ production from ONE upgrade of `kind`. Cache moves capacity, not rate. */
+export function stepGain(isServer, kind, unit) {
+  const p = unit.production;
+  if (kind === "level") return p / unit.level;
+  // (cores+5)/6 for a node, 1+(cores-1)/5 for a server: the +1 step is a
+  // sixth and a fifth of the respective base, which is where the 5 and 4 below
+  // come from.
+  if (kind === "core") return p / (unit.cores + (isServer ? 4 : 5));
+  if (kind === "ram") {
+    if (!isServer) return p * (Math.pow(1.035, unit.ram) - 1);
+    // Doubling maxRam moves the 1.07 ladder AND the used-RAM penalty, since
+    // ramUsed stays put while maxRam doubles. With hacknet servers kept out of
+    // the pool `used` is 0 and this is exactly 1.07.
+    const used = unit.used ?? 0;
+    const before = 1 - used / unit.ram;
+    if (before <= 0) return 0;
+    const after = 1 - used / (2 * unit.ram);
+    return p * ((1.07 * after) / before - 1);
+  }
+  return 0;
+}
+
+/**
+ * Production of a brand new unit, derived from an owned one.
+ *
+ * Divides the owned unit's reported production by its own factors, leaving the
+ * constant term - which IS a fresh unit's rate, since every factor is 1 at
+ * level 1, ram 1, cores 1 and nothing running. With nothing owned there is no
+ * reference and the caller buys the first unit unconditionally instead.
+ */
+export function freshProduction(isServer, unit) {
+  if (!isServer) {
+    return unit.production /
+      (unit.level * Math.pow(1.035, unit.ram - 1) * ((unit.cores + 5) / 6));
+  }
+  const used = unit.used ?? 0;
+  const ratio = 1 - used / unit.ram;
+  if (ratio <= 0) return 0;
+  return unit.production /
+    (unit.level * Math.pow(1.07, Math.log2(unit.ram)) * (1 + (unit.cores - 1) / 5) * ratio);
+}

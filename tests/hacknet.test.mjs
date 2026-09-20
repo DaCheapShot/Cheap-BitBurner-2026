@@ -134,4 +134,98 @@ export const tests = {
     assert(m.unitPrice(true, 20, mults) === Infinity, "the 21st hacknet server should be Infinity");
     assert(Number.isFinite(m.unitPrice(false, 20, mults)), "nodes have no purchase limit");
   },
+
+  // The gain of any upgrade is a RATIO on the production getNodeStats already
+  // reports, because every upgrade's effect is an independent multiplicative
+  // factor. That is what removes ns.formulas.hacknetNodes (Formulas.exe) and
+  // getBitNodeMultipliers (4.00 GB): the production mult and the BitNode mult
+  // appear in both the before and the after, and cancel.
+  //
+  // Checked against a flat transcription of calculateMoneyGainRate and
+  // calculateHashGainRate, recomputed at the upgraded stats.
+  "gain ratios equal a recompute of the fork's production formulas": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+
+    // src/Hacknet/formulas/HacknetNodes.ts. The trailing mult*bnMult is dropped
+    // on both sides of every comparison below, which is the identity under test.
+    const nodeRate = (level, ram, cores) =>
+      level * 1.5 * Math.pow(1.035, ram - 1) * ((cores + 5) / 6);
+    // src/Hacknet/formulas/HacknetServers.ts.
+    const serverRate = (level, used, maxRam, cores) =>
+      0.001 * level * Math.pow(1.07, Math.log2(maxRam)) * (1 + (cores - 1) / 5) * (1 - used / maxRam);
+
+    const near = (a, b, what) =>
+      assert(Math.abs(a - b) < Math.abs(b) * 1e-9 + 1e-12, `${what}: got ${a}, expected ${b}`);
+
+    const node = { level: 7, ram: 4, cores: 3 };
+    node.production = nodeRate(node.level, node.ram, node.cores);
+    near(m.stepGain(false, "level", node), nodeRate(8, 4, 3) - node.production, "node level");
+    near(m.stepGain(false, "ram", node), nodeRate(7, 8, 3) - node.production, "node ram");
+    near(m.stepGain(false, "core", node), nodeRate(7, 4, 4) - node.production, "node core");
+
+    const server = { level: 12, ram: 8, cores: 4, cache: 2, used: 0 };
+    server.production = serverRate(server.level, 0, server.ram, server.cores);
+    near(m.stepGain(true, "level", server), serverRate(13, 0, 8, 4) - server.production, "server level");
+    near(m.stepGain(true, "ram", server), serverRate(12, 0, 16, 4) - server.production, "server ram");
+    near(m.stepGain(true, "core", server), serverRate(12, 0, 8, 5) - server.production, "server core");
+
+    // Cache moves hashCapacity, not the hash rate. It is not scored against the
+    // others; it is bought only when capacity blocks a purchase (see planHashes).
+    assert(m.stepGain(true, "cache", server) === 0, "cache has no production term");
+  },
+
+  // ramRatio = 1 - ramUsed/maxRam is a plain factor in calculateHashGainRate,
+  // and doubling maxRam improves it as well as the 1.07 ladder - so the gain is
+  // strictly MORE than 7% whenever anything is running there. With the pool
+  // exclusion in place `used` is 0 and it collapses to exactly 7%; computing it
+  // properly is free and stays right if a stray script ever lands on one.
+  "a server's RAM gain accounts for the used-RAM penalty": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+
+    const serverRate = (level, used, maxRam, cores) =>
+      0.001 * level * Math.pow(1.07, Math.log2(maxRam)) * (1 + (cores - 1) / 5) * (1 - used / maxRam);
+
+    const idle = { level: 10, ram: 16, cores: 1, used: 0 };
+    idle.production = serverRate(10, 0, 16, 1);
+    assert(Math.abs(m.stepGain(true, "ram", idle) - idle.production * 0.07) < 1e-12,
+      "an idle server's RAM gain is exactly the 1.07 ladder");
+
+    const busy = { level: 10, ram: 16, cores: 1, used: 8 };
+    busy.production = serverRate(10, 8, 16, 1);
+    const expected = serverRate(10, 8, 32, 1) - busy.production;
+    assert(Math.abs(m.stepGain(true, "ram", busy) - expected) < Math.abs(expected) * 1e-9,
+      `busy server RAM gain: got ${m.stepGain(true, "ram", busy)}, expected ${expected}`);
+    assert(m.stepGain(true, "ram", busy) > busy.production * 0.07,
+      "with RAM in use, doubling maxRam beats the bare 1.07 ladder");
+  },
+
+  // A new unit's production has no reference of its own, so it is derived by
+  // dividing an owned unit's reported production by that unit's own factors.
+  // Same cancellation, one step further.
+  "a fresh unit's production is derived from an owned one": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+
+    const nodeRate = (level, ram, cores, mult) =>
+      level * 1.5 * Math.pow(1.035, ram - 1) * ((cores + 5) / 6) * mult;
+    const serverRate = (level, used, maxRam, cores, mult) =>
+      0.001 * level * Math.pow(1.07, Math.log2(maxRam)) * (1 + (cores - 1) / 5) *
+      (1 - used / maxRam) * mult;
+
+    // An arbitrary product of the player's hacknet multiplier and the BitNode's
+    // - neither is read anywhere, and this is what proves it does not need to be.
+    const mult = 3.7;
+
+    const node = { level: 9, ram: 8, cores: 5, production: nodeRate(9, 8, 5, mult) };
+    const freshNode = nodeRate(1, 1, 1, mult);
+    assert(Math.abs(m.freshProduction(false, node) - freshNode) < freshNode * 1e-9,
+      `fresh node: got ${m.freshProduction(false, node)}, expected ${freshNode}`);
+
+    const server = { level: 40, ram: 64, cores: 9, used: 16, production: serverRate(40, 16, 64, 9, mult) };
+    const freshServer = serverRate(1, 0, 1, 1, mult);
+    assert(Math.abs(m.freshProduction(true, server) - freshServer) < freshServer * 1e-9,
+      `fresh server: got ${m.freshProduction(true, server)}, expected ${freshServer}`);
+  },
 };
