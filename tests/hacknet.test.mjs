@@ -330,6 +330,13 @@ export const tests = {
   // That deliberately UNDERSTATES: the hash sweep only spends a hash when it is
   // worth more than the sale price, so erring low on node upgrades is the right
   // direction for a spend decision.
+  //
+  // The claim is pinned by planning the SAME unit twice at two hash prices,
+  // rather than by deriving a threshold from one rung. Every candidate the
+  // greedy scores scales by the same HASH_PRICE factor, so one threshold
+  // separates the two readings whichever candidate happens to win - and the
+  // first version of this test did derive from one rung, set a threshold the
+  // `core` rung beat by 28x, and asserted a refusal that could never happen.
   "server production is valued at the hash sale price": async () => {
     const mods = await loadScripts();
     const m = mods["hacknet/math"];
@@ -340,20 +347,35 @@ export const tests = {
     const unit = { level: 30, ram: 8, cores: 2, cache: 1, used: 0 };
     unit.production = serverRate(30, 0, 8, 2);
 
-    const price = m.stepPrice(true, "level", unit, mults);
-    const gain = m.stepGain(true, "level", unit);
-    // A threshold that sits just either side of the true payback in $/s terms.
-    const payback = price / (gain * 250000);
+    // The best payback over every candidate planMoney scores, with production
+    // valued at $1 per unit. The next-unit candidate is included: on this
+    // fixture it is the fastest of the lot, and leaving it out is exactly how
+    // the first version of this test went wrong.
+    let best = Infinity;
+    for (const kind of ["level", "ram", "core"]) {
+      const price = m.stepPrice(true, kind, unit, mults);
+      const gain = m.stepGain(true, kind, unit);
+      if (gain > 0 && Number.isFinite(price)) best = Math.min(best, price / gain);
+    }
+    const fresh = m.freshProduction(true, unit);
+    const nextPrice = m.unitPrice(true, 1, mults);
+    if (fresh > 0 && Number.isFinite(nextPrice)) best = Math.min(best, nextPrice / fresh);
+    assert(Number.isFinite(best), "the fixture must offer at least one buyable candidate");
 
-    const bought = m.planMoney(
-      { isServer: true, units: [unit], budget: 1e12, mults },
-      { PAYBACK_SECONDS: payback * 1.5, HASH_PRICE: 250000 });
-    assert(bought.buys.length > 0, "should buy when the hash-priced payback clears the bar");
+    // Half the dollar-priced payback: out of reach at $1 a hash, comfortable at
+    // $250k.
+    const threshold = best / 2;
 
-    const refused = m.planMoney(
-      { isServer: true, units: [unit], budget: 1e12, mults },
-      { PAYBACK_SECONDS: payback * 0.5, HASH_PRICE: 250000 });
-    assert(refused.buys.length === 0,
-      "should refuse when the hash-priced payback misses the bar");
+    const priced = m.planMoney(
+      { isServer: true, units: [{ ...unit }], budget: 1e12, mults },
+      { PAYBACK_SECONDS: threshold, HASH_PRICE: 250000 });
+    assert(priced.buys.length > 0,
+      `hashes at $250k each must clear the bar, got no buys (${priced.reason})`);
+
+    const unpriced = m.planMoney(
+      { isServer: true, units: [{ ...unit }], budget: 1e12, mults },
+      { PAYBACK_SECONDS: threshold, HASH_PRICE: 1 });
+    assert(unpriced.buys.length === 0,
+      `hashes at $1 each must be refused, got ${unpriced.buys.length} buy(s)`);
   },
 };
