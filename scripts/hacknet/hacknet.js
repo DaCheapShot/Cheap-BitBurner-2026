@@ -50,9 +50,10 @@ export async function main(ns) {
     units.push({
       level: s.level,
       // getNodeStats reports maxRam in `ram` for a server, and `ramUsed` only
-      // for one. Defaulted so the node branch never reads undefined.
+      // for one.
       ram: s.ram,
       cores: s.cores,
+      // Defaulted so the node branch never reads undefined.
       cache: s.cache ?? 1,
       used: s.ramUsed ?? 0,
       // Money per second for a node, HASHES per second for a server.

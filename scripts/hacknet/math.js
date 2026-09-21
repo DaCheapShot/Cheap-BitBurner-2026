@@ -196,6 +196,10 @@ export function freshProduction(isServer, unit) {
 export function planMoney(state, cfg) {
   const { isServer, budget, mults } = state;
   const perUnit = isServer ? cfg.HASH_PRICE : 1;
+  // Owned nothing at the start of this sweep - the virgin-BitNode case, where
+  // the only possible buy is the unconditional first unit and nothing about
+  // its (unmeasured) production can be sized yet.
+  const startedWithNothing = state.units.length === 0;
   // Local copies: the plan walks several rungs and each one changes what the
   // next is worth. Nothing here touches the caller's objects.
   const units = state.units.map((u) => ({ ...u }));
@@ -268,6 +272,15 @@ export function planMoney(state, cfg) {
     if (best.kind === "level") u.level += 1;
     if (best.kind === "ram") u.ram *= 2;
     if (best.kind === "core") u.cores += 1;
+  }
+
+  // The unconditional first unit reports production 0 until the game measures
+  // it, so every rung on it (and any further unit derived from it) also gains
+  // 0 and cannot clear the payback bar. That is not "nothing pays back" - it
+  // is "nothing to size a payback FROM yet" - so say so rather than blaming a
+  // threshold nothing was ever compared against.
+  if (startedWithNothing && buys.length === 1 && buys[0].kind === "unit") {
+    reason = "bought the first unit - waiting for a production reading before sizing the next buy";
   }
 
   return { buys, spent, reason };
@@ -395,6 +408,13 @@ export function planHashes(state, cfg) {
         const f = factorFor(upgrade, t);
         if (f <= 1) continue;
         const price = bundlePrice(state.perLevel[upgrade], levels[upgrade], 1);
+        // A perLevel of 0 (unreachable in this fork - both upgrades are
+        // costPerLevel: 50 - but a fork can retune it) makes bundlePrice 0,
+        // which the greedy would then "buy" forever: `left -= 0` never drains
+        // the balance, so this never terminates. Wedges a 6.60 GB transient
+        // that runToCompletion times out on but never kills, and boot's isUp
+        // check then blocks every future hash sweep for the life of the process.
+        if (!(price > 0)) continue;
         const gain = (f - 1) * incomeShare * cfg.HASH_HORIZON_S;
         // Eligibility BEFORE affordability, so "worth buying but out of reach"
         // is distinguishable from "not worth buying" - they need different

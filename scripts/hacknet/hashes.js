@@ -87,10 +87,16 @@ export async function main(ns) {
     units.push({ index: i, cache: ns.hacknet.getNodeStats(i).cache ?? 1 });
   }
 
-  // [0] is the income of every script running NOW, which is what a target's
-  // +2% applies to. [1] is earnings since the last install and is a total, not
-  // a rate for this purpose.
-  const income = ns.getTotalScriptIncome()[0];
+  const inc = ns.getTotalScriptIncome();
+  // [0] sums onlineMoneyMade/onlineRunningTime over scripts running RIGHT NOW
+  // (NetscriptFunctions.ts) - and both batchers are just-in-time, so hack.js
+  // credits its money and exits microseconds later. [0] is therefore dominated
+  // by zeros and reads one to two orders of magnitude low. [1] is
+  // scriptProdSinceLastAug / (playtimeSinceLastAug/1000), a real $/s rate - it
+  // averages in the pre-ramp period too, so it UNDERSTATES, which is the safe
+  // direction every other estimate in this module already leans. Take the
+  // larger of the two rather than trusting [0] alone.
+  const income = Math.max(inc[0], inc[1]);
 
   const plan = planHashes(
     {

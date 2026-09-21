@@ -449,6 +449,14 @@ export async function main(ns) {
     }
     if (!noManager) {
       ensureOneManager(ns, wanted, ALL_MANAGERS.filter((f) => f !== wanted), managerArgs, log);
+    } else if (firstPass) {
+      // --no-manager means no manager will EVER publish targets this run, the
+      // same terminal state ensureOneManager reaches once no manager survives a
+      // swap - so clear the marker the same way, once, rather than leaving a
+      // previous boot's list stale. Without this, scripts/hacknet/hashes.js
+      // keeps buying Increase Maximum Money for a server nobody is hitting, and
+      // hash upgrades do not refund.
+      ns.write(TARGETS_MARKER, "", "w");
     }
     // The gang supervisor. Gated on inGang() rather than started unconditionally
     // because the script exits immediately without a gang, and ensureService

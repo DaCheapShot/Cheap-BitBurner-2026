@@ -43,12 +43,15 @@ export const HACKNET_CASH_FRACTION = 0.05;
 /**
  * What a hash is worth in cash, and it is not a modelling choice.
  *
- * HashUpgradesMetadata.tsx gives Sell for Money a FLAT `cost: 4` (not a
- * costPerLevel) and `value: 1e6`, so the rate never rises with level. Overflow
- * hashes are auto-sold at exactly this rate too
- * (processAllHacknetServerEarnings computes `wastedHashes / upgrade.cost *
- * upgrade.value`), which is why spending nothing is a correct null action
- * rather than a leak - and why every other upgrade has to beat this number.
+ * HashUpgradesMetadata.tsx gives Sell for Money BOTH `cost: 4` and
+ * `costPerLevel: 4` - the rate is flat only because HashUpgrade.getCost
+ * early-returns on `cost` when it is set, and that field's own doc comment
+ * says "This property overrides the 'costPerLevel' property". So the price
+ * never rises with level, at `value: 1e6`. Overflow hashes are auto-sold at
+ * exactly this rate too (processAllHacknetServerEarnings computes
+ * `wastedHashes / upgrade.cost * upgrade.value`), which is why spending
+ * nothing is a correct null action rather than a leak - and why every other
+ * upgrade has to beat this number.
  */
 export const HASH_SALE_VALUE = 1e6;
 export const HASH_SALE_COST = 4;

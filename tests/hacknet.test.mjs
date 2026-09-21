@@ -681,6 +681,23 @@ export const tests = {
       "hashes.js must ask the game for its upgrade names rather than trusting the constants");
   },
 
+  // ns.getTotalScriptIncome()[0] sums onlineMoneyMade/onlineRunningTime over
+  // scripts running RIGHT NOW (NetscriptFunctions.ts), and both batchers are
+  // just-in-time - hack.js credits its money and exits microseconds later - so
+  // [0] is dominated by zeros and reads one to two orders of magnitude low.
+  // [1] (scriptProdSinceLastAug / playtimeSinceLastAug) is the usable $/s
+  // rate. Reading [0] alone put every candidate below the 50 x $250k x 2
+  // sale-price bar and made the whole BN9 half of this subsystem silently do
+  // nothing, blaming "nothing beats the sale price" - the wrong cause. Pinned
+  // so nobody "simplifies" it back to [0].
+  "the hash sweep's income read takes the larger of getTotalScriptIncome's two elements": () => {
+    const src = readScript("hacknet/hashes");
+    assert(/const\s+inc\s*=\s*ns\.getTotalScriptIncome\(\)/.test(src),
+      "hashes.js must capture getTotalScriptIncome() before indexing it");
+    assert(/Math\.max\(\s*inc\[0\]\s*,\s*inc\[1\]\s*\)/.test(src),
+      "hashes.js must read Math.max(inc[0], inc[1]) - [0] alone is near-zero for a JIT batcher");
+  },
+
   // ns.read resolves against the server the CALLING SCRIPT runs on
   // (NetscriptFunctions.ts: `const server = ctx.workerScript.getServer()`), and
   // /data/targets.txt exists on home alone. Both sweeps are run by boot on home,
@@ -711,11 +728,15 @@ export const tests = {
       "managerCore.js must publish its target on both pick and switch");
 
     // A stale list has hashes bought for a server nobody is hitting, and hash
-    // upgrades do not refund. boot clears it exactly where it decides no manager
-    // of any system survived the swap.
+    // upgrades do not refund. boot clears it on BOTH paths where no manager of
+    // any system survives: mid-run (a swap) and never-at-all (--no-manager).
+    // Counted rather than .test-ed for the same reason as managerCore's two
+    // sites above - a single occurrence would still pass if either clear site
+    // were deleted.
     const boot = readScript("boot");
-    assert(/ns\.write\(\s*TARGETS_MARKER\s*,\s*""/.test(boot),
-      "boot.js must clear the marker when no manager survives a swap");
+    const bootClears = boot.match(/ns\.write\(\s*TARGETS_MARKER\s*,\s*""/g) ?? [];
+    assert(bootClears.length >= 2,
+      "boot.js must clear the marker both when a swap leaves no manager and under --no-manager");
   },
 
   // Transients that are SUPPOSED to exit, so ensureService and the inGang()

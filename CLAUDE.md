@@ -52,6 +52,7 @@ run scripts/boot.js --once --no-cloud
 run scripts/boot.js --no-formulas       # force the *Analyze math path
 run scripts/boot.js --no-contracts      # do not solve coding contracts
 run scripts/boot.js --no-sing           # do not run the singularity supervisor
+run scripts/boot.js --no-hacknet        # do not buy hacknet nodes or spend hashes
 ```
 
 **Boot chooses between TWO batchers**, and the choice is a flag, not a marker - retype it if
@@ -82,6 +83,8 @@ run scripts/contracts/contracts.js      # one contract sweep (boot runs it every
 run scripts/sing/sing.js                # the singularity supervisor (boot starts it too)
 run scripts/contracts/contracts.js --dummy   # mint one contract of every type and solve it
 run scripts/contracts/contracts.js --forget  # clear the skip list, after fixing a solver
+run scripts/hacknet/hacknet.js --dry-run     # plan a hacknet buy and print it, buy nothing
+run scripts/hacknet/hashes.js --dry-run      # plan a hash spend and print it, spend nothing
 run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
 node tests/run.mjs                      # run the test suite
 ```
@@ -360,6 +363,10 @@ editor's RAM panel when one moves.
 | `sing/sing.js` | entry: resident supervisor; every singularity call is an rpc body | 2.60 |
 | ↳ twenty-seven bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors | 2.35–6.60 |
 | `sing/backdoor.js` | one fire-and-forget backdoor; many run at once | 5.60 each |
+| `hacknet/config.js` | hacknet tunables, the two service paths, the hash price | 0 |
+| `hacknet/math.js` | cost ladders, gain ratios, both plans - pure | 0 |
+| `hacknet/hacknet.js` | entry: ONE money sweep then exits; boot runs it every other tick | 5.45 |
+| `hacknet/hashes.js` | entry: ONE hash sweep then exits; a no-op outside BitNode 9 | 6.60 |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
@@ -1126,6 +1133,109 @@ bar, the FAVOR_GAIN body (`getFactionFavorGain`, 2.35) asks whether an install n
 over; if so, whatever fits is bought and installed at any size. ~462k lifetime rep is 150 favor,
 so that install turns the remaining ~2m of the pill's rep from a grind into a donation. Nothing here
 touches `w0r1d_d43m0n` - destroying the node stays the user's call.
+
+### The hacknet subsystem (`scripts/hacknet/`)
+
+One job either side of BitNode 9: buy hacknet units while they pay back, and — once the nodes are
+hacknet SERVERS producing hashes instead of cash — spend the hashes on the batcher's own targets.
+Self-contained like `gang/`: `hacknet/config.js` re-exports two 0 GB constants from
+`scripts/config.js`, and `boot.js` reads three out of it.
+
+**Both halves are TRANSIENTS, not services, and not rpc entries.** `boot.js` runs each once every
+`HACKNET_EVERY` ticks with `runToCompletion` — the contracts shape, nothing held in between.
+`rpc.js` is the obvious answer to 21 `ns.hacknet` names at 0.50 GB each and it is the wrong one:
+an rpc entry sits at 2.60 GB **underneath** every body for the body's whole life, which only pays
+for a RESIDENT caller. These sweeps live a few hundred milliseconds. Measured, two plain files
+peak at 6.60 GB against 9.40 for an entry plus two bodies.
+
+**The two files are split because RAM bills NAMES.** `hashes.js` carries nine hacknet names the
+money sweep never needs; folded together that ~4.50 GB would be charged for the whole
+pre-BitNode-9 game, where `hashCapacity()` is 0 and they can do nothing. boot runs them
+**sequentially**, so the subsystem's peak is the larger (6.60) and not the sum — which is what
+leaves `HOME_RESERVE_GB`'s worst overlap unchanged at 33.30 GB.
+
+**No `get*UpgradeCost` call anywhere.** Five of them at 0.50 GB each, and every one is a pure
+function of `(stat, count, costMult)`. `hacknet/math.js` transcribes the ladders from
+`src/Hacknet/formulas/` at 0 GB and the four cost multipliers arrive in one
+`ns.getHacknetMultipliers()` at 0.25 — 2.25 GB off both entries, and testable besides. The same
+trade `gang/math.js` makes with the gain formulas.
+
+**Every upgrade's effect is an independent multiplicative factor, so a gain is a RATIO on the
+production the game already reports** — `p / unit.level` for a level, and so on. The player
+multiplier and the BitNode multiplier appear in both the before and the after and cancel, which is
+why nothing here reads `ns.getHacknetMultipliers().production`, `ns.formulas.hacknetNodes.*`
+(Formulas.exe) or `ns.getBitNodeMultipliers` (4.00 GB).
+
+**Buying is ranked on PAYBACK, never on price.** Cheapest-first takes whichever ladder happens to
+sit low regardless of what it returns — on a node whose level has run far ahead of its RAM that is
+the wrong rung every time. `PAYBACK_SECONDS` is also the whole off switch: marginal gain does not
+move as the batcher grows, so paybacks blow out on their own and the sweep stops buying without
+anyone deciding it should. `HACKNET_CASH_FRACTION` is priced ONCE per sweep, not per purchase —
+per purchase it would ratchet down as cash fell, and the sweep would spend a different fraction
+depending only on how many rungs it happened to take. `cloud.js` bids for the same wallet at 10%
+and sing's aug batch wants all of it.
+
+**A hash is worth exactly $250k, forever, and that number decides everything on the BN9 side.**
+`HashUpgradesMetadata.tsx` gives Sell for Money `value: 1e6` and BOTH `cost: 4` and
+`costPerLevel: 4`; the rate is flat only because `HashUpgrade.getCost` early-returns on `cost`
+when set — that field's own doc comment reads *"This property overrides the 'costPerLevel'
+property"*. **Overflow is auto-sold at the same rate** (`processAllHacknetServerEarnings` computes
+`wastedHashes / upgrade.cost * upgrade.value`), so spending nothing is a correct null action and
+never a leak — and every other upgrade has to beat the sale price by `HASH_VALUE_MARGIN` before it
+is bought.
+
+**Only two hash upgrades are ever bought, and both reduce to one number: the factor by which the
+batcher's income on that target moves.** Increase Maximum Money is a flat +2% below
+`MONEY_SOFTCAP` and damped above it (`Server.changeMaximumMoney`). Reduce Minimum Security is
+×0.98 floored at 1, and it is COMPUTED rather than skipped because three terms move together as
+minimum security falls — hack chance and money per thread both scale `(100-d)/100`, op time scales
+`2.5*R*d + 500` — giving `income ∝ (100-d)² / (2.5*R*d + 500)`. At `R=1000` that is +3.04% at
+`d=20` and +2.03% at `d=3`, so on a high-minimum-security target it beats the flat +2%. The
+grow-thread improvement is left out, so it UNDERSTATES, which is the safe direction for a spend.
+Contracts, corporation and bladeburner upgrades are deliberately not bought. Income is divided by
+the target count, because nothing here knows the per-target split and over-crediting one target is
+the direction that buys upgrades which do not repay.
+
+**The income read takes `Math.max` of BOTH elements of `ns.getTotalScriptIncome()`.** `[0]` sums
+`onlineMoneyMade / onlineRunningTime` over scripts running RIGHT NOW, and both batchers are
+just-in-time: `hack.js` credits its money and exits microseconds later, so `[0]` is dominated by
+zeros and reads one to two orders of magnitude low. `[1]` is
+`scriptProdSinceLastAug / (playtimeSinceLastAug/1000)`, a real $/s rate that averages in the
+pre-ramp period and so understates. `[0]` alone put every candidate under the sale-price bar and
+made the entire BN9 half silently do nothing, while the log blamed "nothing beats the sale price" —
+a diagnostic naming the wrong cause. A test pins that both elements are consulted.
+
+**One `spendHashes` call per (upgrade, target) pair, not per level.** Raising max money leaves the
+target below its new maximum and lowering minimum security leaves it above its new floor —
+`changeMinimumSecurity` moves `minDifficulty` only, never current security — so both put a
+streaming target off baseline and cost a re-prep. The sweep pays that once.
+
+**Capacity is distinguished from balance, and only one of them buys cache.** A hash store too
+small to HOLD the bundle can never fill however long it waits, so that is the case that upgrades
+the cache; too few hashes right now fills on its own in a minute or two. Eligibility is checked
+BEFORE affordability for exactly that reason — "worth buying but out of reach" and "not worth
+buying" need different answers.
+
+**The targets come from a FILE the running manager publishes.** Both upgrades pay only on a server
+the batcher is actually hitting, and which batcher is up is the user's choice — so whichever
+manager runs writes its list to `TARGETS_MARKER` (`/data/targets.txt`), on its initial pick and on
+every switch, and `boot.js` clears it on both paths where no manager of any system survives: a
+swap that leaves none, and `--no-manager`. Missing or empty means spend nothing, never a default.
+A stale list is inert rather than lossy — `purchaseHashUpgrade` refunds an upgrade the game
+refuses, which a foreign-only upgrade aimed at a purchased server is — but it is still hashes not
+spent where they pay.
+
+**Hacknet servers are kept OUT of both RAM pools.** `calculateHashGainRate` multiplies by
+`ramRatio = 1 - ramUsed/maxRam`, so a hacknet server filled with batch workers earns **literally
+zero hashes** — the cheapest few GB in the fleet, bought at the price of the whole subsystem.
+`ram.js` and `continuous/lib/server.js` skip any host starting with `HACKNET_HOST_PREFIX`, and
+`server.js` does it in BOTH `build()` and `sync()`, which admit hosts independently.
+
+**The identifier tax lands hard here.** 21 `ns.hacknet` functions at 0.50 GB each, charged by bare
+name anywhere in an entry's import closure — so `hacknet/math.js` spells its upgrade kinds as the
+string literals `"level" | "ram" | "core" | "cache"` and never `upgradeLevel`, `numNodes` or
+`hashCost`. `level`, `ram`, `cores`, `cache` and `production` are free and used freely. A local
+named `share` in `planHashes` cost 2.40 GB as `ns.share` before it became `incomeShare`.
 
 ### Invariants that look arbitrary but aren't
 
