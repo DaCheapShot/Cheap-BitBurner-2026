@@ -703,4 +703,29 @@ export const tests = {
     const ram = ramOf("hacknet/hacknet");
     assert(Math.abs(ram - 5.45) < 0.011, `expected 5.45 GB, got ${ram.toFixed(2)}`);
   },
+
+  // 6.60 = 1.60 base + nine ns.hacknet names at 0.50 (numNodes, getNodeStats,
+  // numHashes, hashCapacity, hashCost, getHashUpgradeLevel, getHashUpgrades,
+  // spendHashes, upgradeCache) + 0.50 of 0.10s (getServerMoneyAvailable,
+  // getServerMaxMoney, getServerMinSecurityLevel, getServerRequiredHackingLevel,
+  // getTotalScriptIncome).
+  //
+  // Exactly the ceiling sing/'s largest body sits on. boot runs this after the
+  // money sweep, not beside it, so the subsystem's PEAK is this number and not
+  // the sum.
+  //
+  // getCacheUpgradeCost is absent: the cache ladder is transcribed in math.js,
+  // and it is the one ladder that takes no cost multiplier at all.
+  "hashes.js (hash sweep) costs 6.60 GB": () => {
+    const ram = ramOf("hacknet/hashes");
+    assert(Math.abs(ram - 6.60) < 0.011, `expected 6.60 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // The two sweeps run one after the other under runToCompletion, so what has
+  // to fit beside boot, cloud and a continuous manager on a fresh 32 GB home is
+  // the larger of the two - never their sum.
+  "the hacknet subsystem's peak is one sweep, not both": () => {
+    const peak = Math.max(ramOf("hacknet/hacknet"), ramOf("hacknet/hashes"));
+    assert(peak < 7.0, `hacknet peak is ${peak.toFixed(2)} GB, over the 7.00 budget`);
+  },
 };

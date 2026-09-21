@@ -634,4 +634,25 @@ export const tests = {
     assert(broke.cacheBuy === null, "with no budget there is no cache buy");
     assert(broke.reason.includes("capacity"), `reason was "${broke.reason}"`);
   },
+
+  // The name is resolved through getEnumHelper().nsGetMember, which THROWS on a
+  // miss - so a folded or mistyped upgrade name takes the whole sweep down
+  // rather than quietly skipping one buy. This is the Vigenere lesson: the
+  // contract solver folded one non-ASCII name and read as permanently unsolved
+  // with no error anywhere.
+  "the hash sweep checks the upgrade names against the game's own list": () => {
+    const src = readScript("hacknet/hashes");
+    assert(/getHashUpgrades\s*\(/.test(src),
+      "hashes.js must ask the game for its upgrade names rather than trusting the constants");
+  },
+
+  // ns.read resolves against the server the CALLING SCRIPT runs on
+  // (NetscriptFunctions.ts: `const server = ctx.workerScript.getServer()`), and
+  // /data/targets.txt exists on home alone. Both sweeps are run by boot on home,
+  // so this is safe - but nothing may pass the marker path to a worker.
+  "the target marker is read, never handed to a worker": () => {
+    const src = readScript("hacknet/hashes");
+    assert(!/exec\s*\(/.test(src),
+      "hashes.js must not exec anything - the marker it reads exists on home alone");
+  },
 };

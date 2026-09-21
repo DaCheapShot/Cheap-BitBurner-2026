@@ -1,4 +1,153 @@
+import { planHashes } from "./math.js";
+import {
+  TARGETS_MARKER, HACKNET_CASH_FRACTION,
+  HASH_PRICE, HASH_HORIZON_S, HASH_VALUE_MARGIN, MONEY_SOFTCAP,
+  MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE,
+} from "./config.js";
+
+/**
+ * The hash sweep: ONE pass, then exit. A no-op outside BitNode 9.
+ *
+ * WHY IT IS A SEPARATE FILE FROM hacknet.js. RAM bills NAMES, not call sites.
+ * Folded into the money sweep, these nine hacknet names would cost ~4.50 GB for
+ * the whole pre-BitNode-9 game, where hashCapacity() is 0 and they can do
+ * nothing. Split, this exits in about 20 ms having paid for one read.
+ *
+ * WHY UNSPENT HASHES ARE NOT A LEAK. Overflow is auto-sold at exactly
+ * HASH_PRICE - processAllHacknetServerEarnings computes
+ * `wastedHashes / upgrade.cost * upgrade.value`, the same rate as buying Sell
+ * for Money by hand. So refusing every candidate is a correct outcome, and the
+ * only upgrades worth buying are the ones that are NOT money.
+ *
+ * WHY THE TARGETS COME FROM A FILE. Increase Maximum Money and Reduce Minimum
+ * Security only pay on a server the batcher is actually hitting, and which
+ * batcher is up is the user's choice. Whichever manager runs publishes its own
+ * list; boot clears it when none survives a swap. Missing or empty means spend
+ * nothing, never a default.
+ *
+ * Usage:  run scripts/hacknet/hashes.js              (one sweep; boot does this)
+ *         run scripts/hacknet/hashes.js --dry-run    (plan and print, spend nothing)
+ *
+ * RAM: 1.60 base + numNodes/getNodeStats/numHashes/hashCapacity/hashCost/
+ *      getHashUpgradeLevel/getHashUpgrades/spendHashes/upgradeCache 4.50
+ *      + getServerMoneyAvailable/getServerMaxMoney/getServerMinSecurityLevel/
+ *        getServerRequiredHackingLevel/getTotalScriptIncome 0.50 = 6.60 GB
+ */
+
 /** @param {NS} ns */
 export async function main(ns) {
-  ns.print("hashes: not implemented yet");
+  ns.disableLog("ALL");
+  const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
+  const dry = ns.args.map(String).includes("--dry-run");
+
+  // hashCapacity() returns 0 without hacknet servers, which is every BitNode
+  // but 9 (and SF9 elsewhere). Nothing below can do anything there.
+  const capacity = ns.hacknet.hashCapacity();
+  if (capacity <= 0) return;
+
+  // Asked, not assumed. spendHashes resolves the name through
+  // getEnumHelper().nsGetMember and THROWS on a miss, so a fork that renames an
+  // upgrade would take the sweep down; this turns it into one log line.
+  const offered = new Set(ns.hacknet.getHashUpgrades());
+  for (const name of [MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE]) {
+    if (!offered.has(name)) {
+      log(`WARN: this fork does not offer "${name}" - nothing to spend hashes on`);
+      return;
+    }
+  }
+
+  const hosts = ns.read(TARGETS_MARKER).split("\n").map((s) => s.trim()).filter(Boolean);
+  if (!hosts.length) {
+    log("no targets published - no manager is running, or it has not rescanned yet");
+    return;
+  }
+
+  const targets = hosts.map((host) => ({
+    host,
+    moneyMax: ns.getServerMaxMoney(host),
+    // MINIMUM security, not current: a streaming target sits at its minimum,
+    // and changeMinimumSecurity moves only that.
+    minSec: ns.getServerMinSecurityLevel(host),
+    reqSkill: ns.getServerRequiredHackingLevel(host),
+  }));
+
+  // costPerLevel is derived rather than hardcoded: hashCost(name, 1) at level L
+  // is costPerLevel * (L+1), so one live read keeps the constant current if the
+  // fork ever retunes it.
+  const levels = {};
+  const perLevel = {};
+  for (const name of [MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE]) {
+    levels[name] = ns.hacknet.getHashUpgradeLevel(name);
+    perLevel[name] = ns.hacknet.hashCost(name, 1) / (levels[name] + 1);
+  }
+
+  const owned = ns.hacknet.numNodes();
+  const units = [];
+  for (let i = 0; i < owned; i++) {
+    units.push({ index: i, cache: ns.hacknet.getNodeStats(i).cache ?? 1 });
+  }
+
+  // [0] is the income of every script running NOW, which is what a target's
+  // +2% applies to. [1] is earnings since the last install and is a total, not
+  // a rate for this purpose.
+  const income = ns.getTotalScriptIncome()[0];
+
+  const plan = planHashes(
+    {
+      hashes: ns.hacknet.numHashes(),
+      capacity,
+      levels, perLevel, income, targets, units,
+      budget: ns.getServerMoneyAvailable("home") * HACKNET_CASH_FRACTION,
+      // Only the cache ladder is read out of this, and it is the one ladder
+      // that takes no cost multiplier - passed for the shared signature.
+      mults: { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 },
+    },
+    {
+      HASH_PRICE, HASH_HORIZON_S, HASH_VALUE_MARGIN, MONEY_SOFTCAP,
+      MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE,
+    });
+
+  if (dry) {
+    for (const s of plan.spends) {
+      log(`would spend ${s.hashes} hashes: ${s.upgrade} x${s.count} on ${s.host}`);
+    }
+    if (plan.cacheBuy) log(`would upgrade cache on #${plan.cacheBuy.index} for $${ns.format.number(plan.cacheBuy.price, 2)}`);
+    log(`dry run: ${plan.reason} (income $${ns.format.number(income, 2)}/s over ` +
+        `${targets.length} target(s))`);
+    return;
+  }
+
+  let spent = 0;
+  for (const s of plan.spends) {
+    // One call per pair: raising max money and lowering minimum security both
+    // put a streaming target off baseline, so the re-prep is paid once here
+    // rather than once per level.
+    if (ns.hacknet.spendHashes(s.upgrade, s.host, s.count)) {
+      spent += s.hashes;
+      log(`${s.upgrade} x${s.count} on ${s.host} for ${s.hashes} hashes ` +
+          `($${ns.format.number(s.hashes * HASH_PRICE, 2)} of forgone sales)`);
+    } else {
+      // Refused for a reason the plan could not see - most often the target
+      // stopped being foreign, which is the only ownership the two
+      // server-targeted upgrades accept.
+      log(`WARN: ${s.upgrade} on ${s.host} was refused`);
+    }
+  }
+
+  if (plan.cacheBuy) {
+    const ok = ns.hacknet.upgradeCache(plan.cacheBuy.index, 1);
+    log(ok
+      ? `cache up on #${plan.cacheBuy.index} for $${ns.format.number(plan.cacheBuy.price, 2)} - ${plan.reason}`
+      : `WARN: cache upgrade on #${plan.cacheBuy.index} was refused`);
+  }
+
+  if (!plan.spends.length && !plan.cacheBuy) {
+    // 2 fractional digits, never 0: isInteger suppresses decimals only BELOW
+    // suffixStart, so (n, 0, 1000, true) prints both 1.6m and 2.05m as "2m".
+    // A live gang log read `respect 2m (next recruit at 2m)` while 450k short.
+    log(`no spend: ${plan.reason} (income $${ns.format.number(income, 2)}/s over ` +
+        `${targets.length} target(s), ${ns.format.number(capacity, 2, 1000, true)} capacity)`);
+  } else if (spent) {
+    log(`spent ${spent} hashes - ${plan.reason}`);
+  }
 }
