@@ -328,3 +328,129 @@ export function minSecurityFactor(reqSkill, minSec) {
   const time = (2.5 * reqSkill * minSec + 500) / (2.5 * reqSkill * after + 500);
   return chance * chance * time;
 }
+
+// ------------------------------------------------------------- hash plan ---
+
+/**
+ * What to spend hashes on this sweep.
+ *
+ * Both upgrades reduce to one number - the factor by which the batcher's income
+ * on that target changes - so they are ranked against each other and against
+ * the sale price on the same scale.
+ *
+ *   incomeShare = income / targets.length
+ *   gain$       = (f - 1) * incomeShare * HASH_HORIZON_S
+ *   cost$       = hashes * HASH_PRICE
+ *   buy while gain$ > cost$ * HASH_VALUE_MARGIN, best gain$ per hash first
+ *
+ * WHY INCOME IS DIVIDED BY THE TARGET COUNT. It UNDER-attributes income to any
+ * one target rather than crediting the whole stream to it. Nothing here knows
+ * the per-target split, and over-crediting is the direction that buys upgrades
+ * that do not repay.
+ *
+ * WHY UNSPENT IS FINE. Overflow hashes are auto-sold at exactly HASH_PRICE
+ * (processAllHacknetServerEarnings), so refusing every candidate is a correct
+ * outcome and never a leak. Every branch that buys nothing says which of the
+ * four reasons it was.
+ *
+ * WHY ONE SPEND PER PAIR. Raising max money leaves the target below its new
+ * maximum, and lowering minimum security leaves it above its new floor -
+ * changeMinimumSecurity moves minDifficulty only, never the current security.
+ * Both put a streaming target off baseline and cost a re-prep, so the sweep
+ * pays that once per pair rather than once per level.
+ *
+ * @param {object} state { hashes, capacity, levels, perLevel, income, targets,
+ *                         units, budget, mults }
+ * @param {object} cfg   { HASH_PRICE, HASH_HORIZON_S, HASH_VALUE_MARGIN,
+ *                         MONEY_SOFTCAP, MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE }
+ */
+export function planHashes(state, cfg) {
+  const none = (why) => ({ spends: [], cacheBuy: null, reason: why });
+  if (!state.targets.length) return none("no targets published by any manager");
+
+  const upgrades = [cfg.MAX_MONEY_UPGRADE, cfg.MIN_SECURITY_UPGRADE];
+  // Local copies: each buy changes what the next one is worth, and the level
+  // counters are global per upgrade so they climb across targets too.
+  const live = state.targets.map((t) => ({ ...t }));
+  const levels = { ...state.levels };
+  const counts = new Map();
+  let left = state.hashes;
+  let capacityShort = 0;
+  let balanceShort = 0;
+
+  const factorFor = (upgrade, t) =>
+    upgrade === cfg.MAX_MONEY_UPGRADE
+      ? maxMoneyFactor(t.moneyMax, cfg.MONEY_SOFTCAP)
+      : minSecurityFactor(t.reqSkill, t.minSec);
+
+  // Named for the docstring's `incomeShare`, not `share` - a bare `share` local
+  // is billed 2.40 GB as `ns.share` in every importer (both hacknet entries and
+  // boot.js), the same identifier tax gang/math.js and managerCore.js dodge.
+  const incomeShare = state.income / live.length;
+
+  for (;;) {
+    let best = null;
+    for (const t of live) {
+      for (const upgrade of upgrades) {
+        const f = factorFor(upgrade, t);
+        if (f <= 1) continue;
+        const price = bundlePrice(state.perLevel[upgrade], levels[upgrade], 1);
+        const gain = (f - 1) * incomeShare * cfg.HASH_HORIZON_S;
+        // Eligibility BEFORE affordability, so "worth buying but out of reach"
+        // is distinguishable from "not worth buying" - they need different
+        // answers and only one of them is a reason to buy cache.
+        if (gain <= price * cfg.HASH_PRICE * cfg.HASH_VALUE_MARGIN) continue;
+        if (price > state.capacity) { capacityShort = Math.max(capacityShort, price); continue; }
+        if (price > left) { balanceShort = Math.max(balanceShort, price); continue; }
+        const value = gain / price;
+        if (!best || value > best.value) best = { upgrade, t, price, value };
+      }
+    }
+    if (!best) break;
+
+    left -= best.price;
+    levels[best.upgrade] += 1;
+    const key = `${best.upgrade}|${best.t.host}`;
+    const entry = counts.get(key) ?? { upgrade: best.upgrade, host: best.t.host, count: 0, hashes: 0 };
+    entry.count += 1;
+    entry.hashes += best.price;
+    counts.set(key, entry);
+
+    // Advance the target's own state so the next round prices the upgrade it
+    // would really be buying: max money compounds, minimum security floors at 1.
+    if (best.upgrade === cfg.MAX_MONEY_UPGRADE) {
+      best.t.moneyMax *= maxMoneyFactor(best.t.moneyMax, cfg.MONEY_SOFTCAP);
+    } else {
+      best.t.minSec = Math.max(1, best.t.minSec * 0.98);
+    }
+  }
+
+  const spends = [...counts.values()];
+  if (spends.length) return { spends, cacheBuy: null, reason: `${spends.length} spend(s) planned` };
+
+  // Capacity first: a store too small to HOLD the bundle can never fill, while
+  // a balance too small fills on its own in a minute or two.
+  if (capacityShort > 0) {
+    const cacheBuy = planCache(state);
+    return {
+      spends: [],
+      cacheBuy,
+      reason: cacheBuy
+        ? `hash capacity ${state.capacity} cannot hold a ${capacityShort}-hash buy - upgrading cache`
+        : `hash capacity ${state.capacity} cannot hold a ${capacityShort}-hash buy, and cache does not fit the budget`,
+    };
+  }
+  if (balanceShort > 0) return none(`waiting on hashes: ${state.hashes} of ${balanceShort}`);
+  return none("nothing beats the sale price");
+}
+
+/** The cheapest cache rung that fits the budget: always the lowest cache level. */
+function planCache(state) {
+  let best = null;
+  for (const u of state.units) {
+    const price = stepPrice(true, "cache", u, state.mults);
+    if (!Number.isFinite(price) || price > state.budget) continue;
+    if (!best || price < best.price) best = { index: u.index, price };
+  }
+  return best;
+}

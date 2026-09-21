@@ -478,4 +478,160 @@ export const tests = {
     // changeMinimumSecurity clamps at 1, so there is nothing left to buy there.
     assert(m.minSecurityFactor(1000, 1) === 1, "at the floor the factor is exactly 1");
   },
+
+  // One spendHashes call per {upgrade, target} pair, whatever the level count.
+  // Raising max money leaves the target below its new maximum and lowering
+  // minimum security leaves it above its new floor - both put a streaming
+  // target off baseline and cost a re-prep, so the sweep pays that once.
+  "the hash plan bundles each upgrade-target pair into one spend": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const cfg = {
+      HASH_PRICE: 250000, HASH_HORIZON_S: 3600, HASH_VALUE_MARGIN: 2,
+      MONEY_SOFTCAP: 10e12,
+      MAX_MONEY_UPGRADE: "Increase Maximum Money",
+      MIN_SECURITY_UPGRADE: "Reduce Minimum Security",
+    };
+    const state = {
+      hashes: 100000, capacity: 1e6,
+      levels: { "Increase Maximum Money": 0, "Reduce Minimum Security": 0 },
+      perLevel: { "Increase Maximum Money": 50, "Reduce Minimum Security": 50 },
+      income: 1e9,
+      targets: [{ host: "phantasy", moneyMax: 2.4e9, minSec: 20, reqSkill: 1000 }],
+      units: [{ index: 0, cache: 1 }],
+      budget: 0,
+      mults: { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 },
+    };
+
+    const plan = m.planHashes(state, cfg);
+    assert(plan.spends.length > 0, `expected spends, got none (${plan.reason})`);
+
+    const seen = new Set();
+    for (const s of plan.spends) {
+      const key = `${s.upgrade}|${s.host}`;
+      assert(!seen.has(key), `${key} appears twice - it must be one bundled call`);
+      seen.add(key);
+      assert(s.count >= 1, `${key} has count ${s.count}`);
+    }
+    const total = plan.spends.reduce((n, s) => n + s.hashes, 0);
+    assert(total <= state.hashes, `planned ${total} hashes against a ${state.hashes} balance`);
+  },
+
+  // At R=1000 d=20, Reduce Minimum Security is +3.04% against Increase Maximum
+  // Money's +2% at the same 50-hash tier, so the first buy must be the security
+  // one. This is the whole reason it is computed rather than skipped.
+  "the better upgrade is taken first on a high-security target": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const cfg = {
+      HASH_PRICE: 250000, HASH_HORIZON_S: 3600, HASH_VALUE_MARGIN: 2,
+      MONEY_SOFTCAP: 10e12,
+      MAX_MONEY_UPGRADE: "Increase Maximum Money",
+      MIN_SECURITY_UPGRADE: "Reduce Minimum Security",
+    };
+    const plan = m.planHashes({
+      hashes: 60, capacity: 1e6,
+      levels: { "Increase Maximum Money": 0, "Reduce Minimum Security": 0 },
+      perLevel: { "Increase Maximum Money": 50, "Reduce Minimum Security": 50 },
+      income: 1e9,
+      targets: [{ host: "phantasy", moneyMax: 2.4e9, minSec: 20, reqSkill: 1000 }],
+      units: [{ index: 0, cache: 1 }], budget: 0,
+      mults: { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 },
+    }, cfg);
+
+    assert(plan.spends.length === 1, `expected one spend, got ${plan.spends.length}`);
+    assert(plan.spends[0].upgrade === "Reduce Minimum Security",
+      `expected the security buy first, got ${plan.spends[0].upgrade}`);
+  },
+
+  // Unspent hashes are not waste: overflow is auto-sold at exactly the same
+  // $250k/hash. So "buy nothing" is a correct null action, and a small income
+  // must produce it rather than a bad buy.
+  "a small income buys nothing and blames the sale price": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const cfg = {
+      HASH_PRICE: 250000, HASH_HORIZON_S: 3600, HASH_VALUE_MARGIN: 2,
+      MONEY_SOFTCAP: 10e12,
+      MAX_MONEY_UPGRADE: "Increase Maximum Money",
+      MIN_SECURITY_UPGRADE: "Reduce Minimum Security",
+    };
+    const plan = m.planHashes({
+      hashes: 1e6, capacity: 1e6,
+      levels: { "Increase Maximum Money": 0, "Reduce Minimum Security": 0 },
+      perLevel: { "Increase Maximum Money": 50, "Reduce Minimum Security": 50 },
+      income: 100,
+      targets: [{ host: "n00dles", moneyMax: 1.75e6, minSec: 1, reqSkill: 1 }],
+      units: [{ index: 0, cache: 1 }], budget: 0,
+      mults: { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 },
+    }, cfg);
+
+    assert(plan.spends.length === 0, `expected no spends, got ${plan.spends.length}`);
+    assert(plan.reason.includes("sale"), `reason was "${plan.reason}"`);
+  },
+
+  "no published targets means no server-targeted buys": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const cfg = {
+      HASH_PRICE: 250000, HASH_HORIZON_S: 3600, HASH_VALUE_MARGIN: 2,
+      MONEY_SOFTCAP: 10e12,
+      MAX_MONEY_UPGRADE: "Increase Maximum Money",
+      MIN_SECURITY_UPGRADE: "Reduce Minimum Security",
+    };
+    const plan = m.planHashes({
+      hashes: 1e9, capacity: 1e9,
+      levels: { "Increase Maximum Money": 0, "Reduce Minimum Security": 0 },
+      perLevel: { "Increase Maximum Money": 50, "Reduce Minimum Security": 50 },
+      income: 1e12, targets: [],
+      units: [{ index: 0, cache: 1 }], budget: 0,
+      mults: { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 },
+    }, cfg);
+
+    assert(plan.spends.length === 0, "an empty marker must buy nothing");
+    assert(plan.reason.includes("target"), `reason was "${plan.reason}"`);
+  },
+
+  // hashCapacity is 32 * 2^cache SUMMED over servers - 64 hashes at cache 1,
+  // while Increase Maximum Money at level 50 costs 2,550. So cache is
+  // load-bearing, and a bundle the store cannot HOLD asks for a cache level
+  // rather than a spend. A bundle that fits capacity but not the current
+  // balance simply waits: hashes accumulate and overflow is auto-sold.
+  "capacity too small asks for cache; short of hashes just waits": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const cfg = {
+      HASH_PRICE: 250000, HASH_HORIZON_S: 3600, HASH_VALUE_MARGIN: 2,
+      MONEY_SOFTCAP: 10e12,
+      MAX_MONEY_UPGRADE: "Increase Maximum Money",
+      MIN_SECURITY_UPGRADE: "Reduce Minimum Security",
+    };
+    const base = {
+      levels: { "Increase Maximum Money": 0, "Reduce Minimum Security": 0 },
+      perLevel: { "Increase Maximum Money": 50, "Reduce Minimum Security": 50 },
+      income: 1e9,
+      targets: [{ host: "phantasy", moneyMax: 2.4e9, minSec: 20, reqSkill: 1000 }],
+      units: [{ index: 0, cache: 1 }, { index: 1, cache: 3 }],
+      mults: { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 },
+    };
+
+    // 32 hashes of capacity cannot hold a 50-hash bundle at any balance.
+    const blocked = m.planHashes({ ...base, hashes: 32, capacity: 32, budget: 1e9 }, cfg);
+    assert(blocked.spends.length === 0, "nothing can be bought under capacity");
+    assert(blocked.cacheBuy !== null, "a blocked bundle must ask for cache");
+    // The lowest cache level is the cheapest rung, so that is the unit picked.
+    assert(blocked.cacheBuy.index === 0, `cache bought on unit ${blocked.cacheBuy.index}, expected 0`);
+    assert(blocked.reason.includes("capacity"), `reason was "${blocked.reason}"`);
+
+    // Capacity is fine, the balance is not: wait, do not buy cache.
+    const poor = m.planHashes({ ...base, hashes: 10, capacity: 1e6, budget: 1e9 }, cfg);
+    assert(poor.spends.length === 0, "10 hashes cannot buy a 50-hash bundle");
+    assert(poor.cacheBuy === null, "capacity is not the problem, so no cache buy");
+    assert(poor.reason.includes("hashes"), `reason was "${poor.reason}"`);
+
+    // No cash for cache either: say that, do not pretend the plan is fine.
+    const broke = m.planHashes({ ...base, hashes: 32, capacity: 32, budget: 0 }, cfg);
+    assert(broke.cacheBuy === null, "with no budget there is no cache buy");
+    assert(broke.reason.includes("capacity"), `reason was "${broke.reason}"`);
+  },
 };
