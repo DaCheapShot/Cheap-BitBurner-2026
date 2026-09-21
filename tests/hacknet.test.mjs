@@ -407,4 +407,75 @@ export const tests = {
     assert(unpriced.buys.length === 0,
       `hashes at $1 each must be refused, got ${unpriced.buys.length} buy(s)`);
   },
+
+  // HashUpgrade.getCost: `costPerLevel * 0.5 * count * (count + 2*level + 1)`,
+  // which is the collapsed sum of (level+1) + (level+2) + ... - so a bundle is
+  // priced exactly and the level counter is GLOBAL per upgrade, not per target.
+  "a hash bundle is priced by the collapsed sum": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+
+    // Priced against the repeated single-level form it collapses.
+    for (const [level, count] of [[0, 1], [0, 5], [7, 1], [7, 4], [123, 9]]) {
+      let sum = 0;
+      for (let i = 0; i < count; i++) sum += 50 * (level + i + 1);
+      const got = m.bundlePrice(50, level, count);
+      assert(Math.abs(got - sum) < 1e-9, `level ${level} x${count}: got ${got}, expected ${sum}`);
+    }
+    // The first Increase Maximum Money costs 50 hashes - $12.5m of forgone sales.
+    assert(m.bundlePrice(50, 0, 1) === 50, "the first level costs 50 hashes");
+  },
+
+  // Server.changeMaximumMoney: above the soft cap the step becomes
+  // `1 + (n-1)/Math.log(moneyMax - softCap)/Math.log(8)` - two divisions by
+  // logs, which is what the source does. Transcribed rather than approximated
+  // by refusing to buy above the cap.
+  "the max-money factor is 1.02 until the soft cap damps it": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const softcap = 10e12;
+
+    assert(m.maxMoneyFactor(2.4e9, softcap) === 1.02, "under the cap it is a flat +2%");
+    assert(m.maxMoneyFactor(softcap, softcap) === 1.02, "at the cap exactly it is still +2%");
+
+    const above = 50e12;
+    const expected = 1 + 0.02 / Math.log(above - softcap) / Math.log(8);
+    const got = m.maxMoneyFactor(above, softcap);
+    assert(Math.abs(got - expected) < 1e-12, `above the cap: got ${got}, expected ${expected}`);
+    assert(got < 1.02 && got > 1, `damped factor ${got} should sit between 1 and 1.02`);
+  },
+
+  // src/Hacking.ts. Three terms move together when minimum security falls:
+  //   hack chance      ∝ (100 - d)/100
+  //   money per thread ∝ (100 - d)/100
+  //   op time          ∝ (2.5*R*d + 500)        <- diffFactor is 2.5, not 2.4
+  // so income ∝ (100-d)² / (2.5Rd + 500). The grow-thread improvement is left
+  // out, which understates - the safe direction.
+  "the min-security factor follows chance, threads and time": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+
+    const flat = (R, d) => {
+      const after = Math.max(1, d * 0.98);
+      const chance = (100 - after) / (100 - d);
+      const time = (2.5 * R * d + 500) / (2.5 * R * after + 500);
+      return chance * chance * time;
+    };
+
+    for (const [R, d] of [[1000, 20], [1000, 3], [80, 5], [2500, 40]]) {
+      const got = m.minSecurityFactor(R, d);
+      assert(Math.abs(got - flat(R, d)) < 1e-12, `R=${R} d=${d}: got ${got}, expected ${flat(R, d)}`);
+    }
+
+    // The numbers that justify computing this rather than skipping it: on a
+    // high-minimum-security target it beats Increase Maximum Money's flat +2%
+    // at the same 50-hash tier.
+    assert(Math.abs(m.minSecurityFactor(1000, 20) - 1.0304) < 0.0005,
+      `R=1000 d=20 should be about +3.04%, got ${m.minSecurityFactor(1000, 20)}`);
+    assert(Math.abs(m.minSecurityFactor(1000, 3) - 1.0203) < 0.0005,
+      `R=1000 d=3 should be about +2.03%, got ${m.minSecurityFactor(1000, 3)}`);
+
+    // changeMinimumSecurity clamps at 1, so there is nothing left to buy there.
+    assert(m.minSecurityFactor(1000, 1) === 1, "at the floor the factor is exactly 1");
+  },
 };

@@ -272,3 +272,59 @@ export function planMoney(state, cfg) {
 
   return { buys, spent, reason };
 }
+
+// ----------------------------------------------------------- hash value ---
+
+/**
+ * Hashes for `count` levels of an upgrade starting at `level`.
+ *
+ * HashUpgrade.getCost's collapsed sum of (level+1) + (level+2) + ... The level
+ * counter is GLOBAL per upgrade - hashManager.upgrades[name] - so spreading
+ * purchases across targets does not reset the price, and the two upgrades'
+ * ladders climb independently of one another.
+ */
+export function bundlePrice(perLevel, level, count) {
+  return perLevel * 0.5 * count * (count + 2 * level + 1);
+}
+
+/**
+ * Income factor from one Increase Maximum Money, +2% of max money.
+ *
+ * The soft cap is transcribed from Server.changeMaximumMoney rather than
+ * approximated by refusing to buy above it: `1 + (n-1)/Math.log(aboveCap)/
+ * Math.log(8)`, two divisions by logs, which is what the source does.
+ */
+export function maxMoneyFactor(moneyMax, softcap) {
+  const step = 1.02;
+  if (moneyMax <= softcap) return step;
+  return 1 + (step - 1) / Math.log(moneyMax - softcap) / Math.log(8);
+}
+
+/**
+ * Income factor from one Reduce Minimum Security, x0.98 floored at 1.
+ *
+ * From src/Hacking.ts. Three terms move together as minimum security falls:
+ *
+ *   hack chance       ∝ (100 - d)/100      more batches land
+ *   money per thread  ∝ (100 - d)/100      fewer hack threads buy the same steal
+ *   op time           ∝ (2.5*R*d + 500)    hack; grow x3.2, weaken x4
+ *
+ * so income ∝ (100 - d)² / (2.5*R*d + 500). diffFactor is 2.5, read from
+ * calculateHackingTime - not the 2.4 that is easy to misremember.
+ *
+ * The grow-thread improvement is left out (grow rate also rises as difficulty
+ * falls), so this UNDERSTATES, which is the safe direction for a spend
+ * decision. At R=1000 it is +3.04% at d=20 and +2.03% at d=3 - better than
+ * Increase Maximum Money's flat +2% at the same tier, which is the whole reason
+ * it is computed rather than skipped.
+ *
+ * Server.changeMinimumSecurity clamps minDifficulty at 1, so at the floor there
+ * is nothing left to buy and this returns exactly 1.
+ */
+export function minSecurityFactor(reqSkill, minSec) {
+  const after = Math.max(1, minSec * 0.98);
+  if (after >= minSec) return 1;
+  const chance = (100 - after) / (100 - minSec);
+  const time = (2.5 * reqSkill * minSec + 500) / (2.5 * reqSkill * after + 500);
+  return chance * chance * time;
+}
