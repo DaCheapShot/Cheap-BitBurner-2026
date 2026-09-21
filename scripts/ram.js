@@ -16,6 +16,8 @@
  * manager can stay cheap.
  */
 
+import { HACKNET_HOST_PREFIX } from "./config.js";
+
 // maxRam is a power of two, script RAM is a multiple of 0.05 - float error is
 // tiny but real. Tolerate a sliver so a thread that exactly fits isn't dropped.
 const RAM_EPS = 1e-6;
@@ -140,6 +142,17 @@ export class ServerPool {
 
     for (const host of hosts) {
       if (excluded.has(host)) continue;
+      // A hacknet server's hash rate carries `1 - ramUsed/maxRam` as a plain
+      // factor (calculateHashGainRate), and updateRamUsed recomputes it on every
+      // change - so a hacknet server holding batch workers produces LITERALLY
+      // ZERO hashes. They arrive here unasked: adminRights is set at creation
+      // and Player.createHacknetServer pushes them onto home's network.
+      //
+      // The prefix is reserved by the game - Server's constructor renames any
+      // ordinary server that collides - so this cannot false-positive, and it
+      // costs nothing. Asking instead via the isHacknetServer field of
+      // ns's getServer call is 2.00 GB against this file's 0.35 total.
+      if (host.startsWith(HACKNET_HOST_PREFIX)) continue;
       if (host === "home" && !includeHome) continue;
       if (!ns.hasRootAccess(host)) continue;
       if (ns.getServerMaxRam(host) <= 0) continue;

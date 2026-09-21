@@ -12,6 +12,41 @@ import { loadScripts, readScript, assert } from "./harness.mjs";
  */
 
 export const tests = {
+  // A hacknet server filled with batch workers produces LITERALLY ZERO hashes:
+  // calculateHashGainRate carries `ramRatio = 1 - ramUsed/maxRam` as a plain
+  // factor, and HacknetServer.updateRamUsed recomputes the rate on every change.
+  // They are created with adminRights and pushed onto home's network, so both
+  // pools reach them without being told to.
+  //
+  // makeNs's `hosts` map is hostname -> maxRam, and its scan("home") returns
+  // every other host in it - which is exactly how a hacknet server arrives.
+  "the shotgun pool does not admit a hacknet server": async () => {
+    const { ram: ramMod } = await loadScripts();
+    const { makeNs } = await import("./mockNs.mjs");
+
+    const ns = makeNs({ hosts: { home: 64, "n00dles": 4, "hacknet-server-0": 1024 } });
+    const pool = ramMod.ServerPool.build(ns, { homeReserve: 0 });
+    const hosts = pool.servers.map((s) => s.hostname);
+
+    assert(!hosts.includes("hacknet-server-0"),
+      "the pool admitted hacknet-server-0 - a filled hacknet server earns no hashes");
+    assert(hosts.includes("n00dles"), "ordinary hosts must still be admitted");
+  },
+
+  // Server's own constructor renames any ordinary server whose hostname starts
+  // with "hacknet-node-" or "hacknet-server-", so the namespace is reserved and
+  // the prefix test cannot false-positive. The alternative, ns.getServer(host)
+  // .isHacknetServer, costs 2.00 GB - and ram.js is deliberately 0.35.
+  "the pools test the prefix without paying for getServer": () => {
+    for (const mod of ["ram", "continuous/lib/server"]) {
+      const src = readScript(mod);
+      assert(src.includes("HACKNET_HOST_PREFIX"),
+        `${mod}.js must use the shared prefix constant, not a literal`);
+      assert(!/ns\.getServer\s*\(/.test(src),
+        `${mod}.js must not call ns.getServer - it is 2.00 GB and the prefix answers this`);
+    }
+  },
+
   "config exposes the tunables and the two upgrade names": async () => {
     const mods = await loadScripts();
     const cfg = mods["hacknet/config"];

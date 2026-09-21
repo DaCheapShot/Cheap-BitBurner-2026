@@ -497,6 +497,22 @@ export const tests = {
     assert(pool.get("home").threadsFor(10) === 9, "safety fraction not applied to thread counts");
   },
 
+  // The continuous pool needs the same exclusion, in BOTH of its loops: a
+  // hacknet server bought between rescans would otherwise rejoin on the next
+  // refresh with nothing to stop it. A hacknet server holding batch workers
+  // produces literally zero hashes - calculateHashGainRate carries
+  // `1 - ramUsed/maxRam` as a plain factor and updateRamUsed recomputes on
+  // every change.
+  "the continuous pool does not admit a hacknet server": async () => {
+    const { pool } = await makePool({ home: 64, "n00dles": 4, "hacknet-server-0": 1024 },
+      {}, { homeReserve: 0 });
+    const hosts = pool.servers.map((s) => s.hostname);
+
+    assert(!hosts.includes("hacknet-server-0"),
+      "the continuous pool admitted hacknet-server-0 - a filled hacknet server earns no hashes");
+    assert(hosts.includes("n00dles"), "ordinary hosts must still be admitted");
+  },
+
   // ------------------------------------------------------------- workers ----
 
   "the workers import nothing at all": async () => {

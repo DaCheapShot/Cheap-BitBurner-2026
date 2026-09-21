@@ -1,4 +1,4 @@
-import { RAM_SAFETY_FRACTION } from "scripts/continuous/config";
+import { RAM_SAFETY_FRACTION, HACKNET_HOST_PREFIX } from "scripts/continuous/config";
 
 /**
  * RAM pool primitives for the continuous (streaming) HWGW batcher.
@@ -209,6 +209,8 @@ export class ServerPool {
 
     for (const host of hosts) {
       if (excluded.has(host)) continue;
+      // See scripts/ram.js: a hacknet server holding workers earns no hashes.
+      if (host.startsWith(HACKNET_HOST_PREFIX)) continue;
       if (host === "home" && !includeHome) continue;
       if (!ns.hasRootAccess(host)) continue;
       if (ns.getServerMaxRam(host) <= 0) continue;
@@ -289,6 +291,9 @@ export class ServerPool {
 
     for (const host of ServerPool.scanAll(ns)) {
       if (known.has(host) || excluded.has(host)) continue;
+      // Both loops, or a hacknet server bought between rescans rejoins the pool
+      // on the next refresh with nothing to stop it.
+      if (host.startsWith(HACKNET_HOST_PREFIX)) continue;
       if (host === "home" && opts.includeHome === false) continue;
       if (!ns.hasRootAccess(host)) continue;
       if (ns.getServerMaxRam(host) <= 0) continue;
