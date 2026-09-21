@@ -6,6 +6,7 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
 import { GANG_SERVICE } from "./gang/config.js";
 import { CONTRACTS_SERVICE } from "./contracts/config.js";
 import { SING_SERVICE } from "./sing/config.js";
+import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE, HACKNET_EVERY } from "./hacknet/config.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -54,6 +55,7 @@ import { SING_SERVICE } from "./sing/config.js";
  *         run scripts/boot.js --no-gang           (don't supervise the gang)
  *         run scripts/boot.js --no-contracts      (don't solve coding contracts)
  *         run scripts/boot.js --no-sing           (don't run the singularity supervisor)
+ *         run scripts/boot.js --no-hacknet        (do not buy hacknet nodes or spend hashes)
  *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
  *         run scripts/boot.js --shotgun           (the volley batcher, not the stream)
  *         run scripts/boot.js --targets 5         (continuous only; shotgun ignores it)
@@ -316,6 +318,7 @@ export async function main(ns) {
   const noGang = args.includes("--no-gang");
   const noContracts = args.includes("--no-contracts");
   const noSing = args.includes("--no-sing");
+  const noHacknet = args.includes("--no-hacknet");
   // sing.js holds share off whenever the player is not doing faction work. With
   // sing opted out nothing would ever release that hold, so clear it here.
   if (noSing) ns.write(SHARE_HOLD_MARKER, "", "w");
@@ -361,6 +364,7 @@ export async function main(ns) {
 
   let lastRootStamp = ns.read(ROOT_MARKER);
   let firstPass = true;
+  let ticks = 0;
   // Say "fleet is maxed" once, not every tick - the whole point of this change
   // is to stop boot from producing a line a minute about nothing happening.
   let cloudMaxedLogged = false;
@@ -464,6 +468,28 @@ export async function main(ns) {
       killDuplicates(ns, SING_SERVICE, log);
       ensureService(ns, SING_SERVICE, [], log);
     }
+    // The hacknet, money sweep then hash sweep, every HACKNET_EVERY ticks.
+    //
+    // TRANSIENTS, not services: both exit on their own, so ensureService would
+    // relaunch them every tick forever - the trap CLOUD_DONE_MARKER closes for
+    // cloud and inGang() for the gang. This is the contracts.js shape.
+    //
+    // SEQUENTIAL, not together: the two files carry disjoint sets of the 21
+    // ns.hacknet names, so run one after the other the subsystem's peak is the
+    // larger (6.60 GB) rather than the sum.
+    //
+    // The isUp checks are about STACKING rather than duplicates: a hand-run
+    // --dry-run can still be going, and a second sweep on top of it would plan
+    // against cash the first is about to spend.
+    if (!noHacknet && ticks % HACKNET_EVERY === 0) {
+      if (!isUp(ns, HACKNET_MONEY_SERVICE)) {
+        await runToCompletion(ns, HACKNET_MONEY_SERVICE, [], log);
+      }
+      if (!isUp(ns, HACKNET_HASH_SERVICE)) {
+        await runToCompletion(ns, HACKNET_HASH_SERVICE, [], log);
+      }
+    }
+
     // The contract solver, and it is a TRANSIENT, not a service - one sweep per
     // tick, holding nothing in between. As a resident it pinned 4.10 GB forever
     // to re-read a clock that only matters once every ten minutes.
@@ -480,6 +506,7 @@ export async function main(ns) {
     }
 
     firstPass = false;
+    ticks++;
     if (!once) await ns.sleep(tickMs);
   } while (!once);
 

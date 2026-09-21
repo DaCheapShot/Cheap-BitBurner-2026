@@ -522,6 +522,9 @@ export const tests = {
   // 3.60 -> 3.50: fileExists went with the per-tick Formulas.exe check, which
   // existed only to pick between two continuous files that are now one.
   "boot.js still costs 3.50 GB with the gang service wired in": () => {
+    // Unmoved by the hacknet subsystem: hacknet/config.js is constants only, so
+    // importing it for two path strings and a number adds exactly nothing - the
+    // same reason gang/config.js and contracts/config.js are free to boot.
     const ram = ramOf("boot");
     assert(Math.abs(ram - 3.50) < 0.011, `expected 3.50 GB, got ${ram.toFixed(2)}`);
   },

@@ -1,8 +1,15 @@
 import { loadScripts, assert } from "./harness.mjs";
 
 // Scripts boot runs with runToCompletion - they must EXIT, or the poll loop
-// below spins for the full TRANSIENT_TIMEOUT_MS of real wall time.
-const TRANSIENT = ["scripts/root.js", "scripts/deploy.js", "scripts/contracts/contracts.js"];
+// below spins for the full TRANSIENT_TIMEOUT_MS of real wall time. The two
+// hacknet sweeps run unconditionally on tick 0 (ticks starts at 0, and
+// HACKNET_EVERY divides it), so every runBoot() call exercises them - leaving
+// either out of this list hangs the whole suite for real minutes, not just
+// fails a test.
+const TRANSIENT = [
+  "scripts/root.js", "scripts/deploy.js", "scripts/contracts/contracts.js",
+  "scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js",
+];
 
 /**
  * Drive boot for a fixed number of ticks against a fake network.

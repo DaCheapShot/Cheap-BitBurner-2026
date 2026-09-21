@@ -701,9 +701,14 @@ export const tests = {
     assert(/ns\.write\(\s*TARGETS_MARKER/.test(core),
       "continuous/core.js must WRITE the marker, not just import it");
 
+    // managerCore.js has TWO write sites - the initial target pick and the
+    // later switch - and a single existence check (.test, not a global match)
+    // is satisfied by either alone, so deleting the switch-site write would not
+    // turn this test red. Count both instead.
     const shotgun = readScript("managerCore");
-    assert(/ns\.write\(\s*TARGETS_MARKER/.test(shotgun),
-      "managerCore.js must publish its target too");
+    const shotgunWrites = shotgun.match(/ns\.write\(\s*TARGETS_MARKER/g) ?? [];
+    assert(shotgunWrites.length >= 2,
+      "managerCore.js must publish its target on both pick and switch");
 
     // A stale list has hashes bought for a server nobody is hitting, and hash
     // upgrades do not refund. boot clears it exactly where it decides no manager
@@ -711,5 +716,27 @@ export const tests = {
     const boot = readScript("boot");
     assert(/ns\.write\(\s*TARGETS_MARKER\s*,\s*""/.test(boot),
       "boot.js must clear the marker when no manager survives a swap");
+  },
+
+  // Transients that are SUPPOSED to exit, so ensureService and the inGang()
+  // relaunch trap do not apply - this is the contracts.js shape. isUp is still
+  // checked, not for duplicates but for STACKING: a hand-run --dry-run can be
+  // going, and a second sweep on top would both plan against the same cash.
+  "boot runs both sweeps as transients, on a cadence, and can opt out": () => {
+    const src = readScript("boot");
+
+    assert(src.includes("HACKNET_MONEY_SERVICE") && src.includes("HACKNET_HASH_SERVICE"),
+      "boot must import both service paths from hacknet/config.js");
+    assert(src.includes("--no-hacknet"), "boot must accept --no-hacknet");
+    assert(src.includes("HACKNET_EVERY"), "boot must run the sweeps on a cadence");
+
+    // runToCompletion, never ensureService: a sweep that exits would be
+    // relaunched every tick forever.
+    assert(/runToCompletion\(ns,\s*HACKNET_MONEY_SERVICE/.test(src),
+      "the money sweep must be run with runToCompletion");
+    assert(/runToCompletion\(ns,\s*HACKNET_HASH_SERVICE/.test(src),
+      "the hash sweep must be run with runToCompletion");
+    assert(!/ensureService\(ns,\s*HACKNET_/.test(src),
+      "neither sweep is a service - ensureService would relaunch it every tick forever");
   },
 };
