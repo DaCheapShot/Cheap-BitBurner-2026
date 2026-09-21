@@ -596,7 +596,8 @@ export const tests = {
     for (const e of ["boot", "manager", "capacity", "cloud", "deploy",
                      "root", "sharemode", "connectme", "prep",
                      "continuous/manager", "continuous/servers",
-                     "gang/gang", "contracts/contracts", "sing/sing"]) {
+                     "gang/gang", "contracts/contracts", "sing/sing",
+                     "hacknet/hacknet", "hacknet/hashes"]) {
       for (const mod of closure(e)) entries.add(mod);
     }
 
@@ -684,5 +685,22 @@ export const tests = {
         `${mod}.js costs ${(ram - BASE).toFixed(2)} GB to import; it must be 0 - boot.js and ` +
           `both hacknet sweeps reach it`);
     }
+  },
+
+  // 5.45 = 1.60 base + seven ns.hacknet names at 0.50 (numNodes, getNodeStats,
+  // purchaseNode, upgradeLevel, upgradeRam, upgradeCore, maxNumNodes) + 0.25
+  // getHacknetMultipliers + 0.10 getServerMoneyAvailable.
+  //
+  // The five get*UpgradeCost names are absent on purpose - 2.50 GB of ladder
+  // transcribed into hacknet/math.js at 0 instead, paid for with one 0.25 GB
+  // multiplier read.
+  //
+  // maxNumNodes earns its 0.50: it is the only way to tell nodes from servers
+  // with ZERO units owned (Infinity vs 20, straight off hasHacknetServers), and
+  // the two branches buy different things at different prices - $1,000 against
+  // $50,000 - so the answer cannot be deferred to the first purchase.
+  "hacknet.js (money sweep) costs 5.45 GB": () => {
+    const ram = ramOf("hacknet/hacknet");
+    assert(Math.abs(ram - 5.45) < 0.011, `expected 5.45 GB, got ${ram.toFixed(2)}`);
   },
 };
