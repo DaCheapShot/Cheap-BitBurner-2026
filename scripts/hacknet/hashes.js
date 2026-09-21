@@ -9,9 +9,11 @@ import {
  * The hash sweep: ONE pass, then exit. A no-op outside BitNode 9.
  *
  * WHY IT IS A SEPARATE FILE FROM hacknet.js. RAM bills NAMES, not call sites.
- * Folded into the money sweep, these nine hacknet names would cost ~4.50 GB for
- * the whole pre-BitNode-9 game, where hashCapacity() is 0 and they can do
- * nothing. Split, this exits in about 20 ms having paid for one read.
+ * Seven of the nine hacknet names below are ones the money sweep never needs
+ * (numNodes and getNodeStats are in both), so folding the two files together
+ * would cost 3.50 GB for the whole pre-BitNode-9 game, where hashCapacity() is
+ * 0 and they can do nothing. Split, this exits in about 20 ms having paid for
+ * one read.
  *
  * WHY UNSPENT HASHES ARE NOT A LEAK. Overflow is auto-sold at exactly
  * HASH_PRICE - processAllHacknetServerEarnings computes

@@ -6,8 +6,10 @@
  * getPurchaseNodeCost are 0.50 GB each - 2.50 GB - and every one is a pure
  * function of (stat, count, costMult). The four cost multipliers come from a
  * single ns.getHacknetMultipliers() at 0.25 GB, so transcribing the ladders
- * here saves 2.25 GB off BOTH entries and makes them testable besides. This is
- * the same trade gang/math.js makes with the gain formulas.
+ * here trades the money sweep's four cost functions (2.00) for that one read -
+ * 1.75 net - and saves the hash sweep getCacheUpgradeCost (0.50), which is
+ * 2.25 GB across the two entries, and makes them testable besides. This is the
+ * same trade gang/math.js makes with the gain formulas.
  *
  * Transcribed line for line from src/Hacknet/formulas/HacknetNodes.ts and
  * HacknetServers.ts, constants from src/Hacknet/data/Constants.ts.
@@ -327,7 +329,7 @@ export function maxMoneyFactor(moneyMax, softcap) {
  *
  * The grow-thread improvement is left out (grow rate also rises as difficulty
  * falls), so this UNDERSTATES, which is the safe direction for a spend
- * decision. At R=1000 it is +3.04% at d=20 and +2.03% at d=3 - better than
+ * decision. At R=1000 it is +3.04% at d=20 and +2.04% at d=3 - better than
  * Increase Maximum Money's flat +2% at the same tier, which is the whole reason
  * it is computed rather than skipped.
  *

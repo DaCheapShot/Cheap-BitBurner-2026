@@ -1148,17 +1148,21 @@ an rpc entry sits at 2.60 GB **underneath** every body for the body's whole life
 for a RESIDENT caller. These sweeps live a few hundred milliseconds. Measured, two plain files
 peak at 6.60 GB against 9.40 for an entry plus two bodies.
 
-**The two files are split because RAM bills NAMES.** `hashes.js` carries nine hacknet names the
-money sweep never needs; folded together that ~4.50 GB would be charged for the whole
-pre-BitNode-9 game, where `hashCapacity()` is 0 and they can do nothing. boot runs them
-**sequentially**, so the subsystem's peak is the larger (6.60) and not the sum — which is what
-leaves `HOME_RESERVE_GB`'s worst overlap unchanged at 33.30 GB.
+**The two files are split because RAM bills NAMES.** `hashes.js` carries seven hacknet names the
+money sweep never needs (`numNodes` and `getNodeStats` are in both); folded together that 3.50 GB
+would be charged for the whole pre-BitNode-9 game, where `hashCapacity()` is 0 and they can do
+nothing. boot runs them **sequentially** and gates each on neither sweep being up, so the
+subsystem's peak is the larger (6.60) and not the sum — which is what leaves `HOME_RESERVE_GB`'s
+worst overlap unchanged at 33.30 GB. The gate has to name BOTH files: `runToCompletion` returns
+true on its timeout without killing anything, so a wedged money sweep joined by a hash sweep would
+put the subsystem at 12.05.
 
 **No `get*UpgradeCost` call anywhere.** Five of them at 0.50 GB each, and every one is a pure
 function of `(stat, count, costMult)`. `hacknet/math.js` transcribes the ladders from
 `src/Hacknet/formulas/` at 0 GB and the four cost multipliers arrive in one
-`ns.getHacknetMultipliers()` at 0.25 — 2.25 GB off both entries, and testable besides. The same
-trade `gang/math.js` makes with the gain formulas.
+`ns.getHacknetMultipliers()` at 0.25 — the money sweep trades four cost functions (2.00) for that
+one read and the hash sweep drops `getCacheUpgradeCost` (0.50), 2.25 GB across the two, and
+testable besides. The same trade `gang/math.js` makes with the gain formulas.
 
 **Every upgrade's effect is an independent multiplicative factor, so a gain is a RATIO on the
 production the game already reports** — `p / unit.level` for a level, and so on. The player
@@ -1190,7 +1194,7 @@ batcher's income on that target moves.** Increase Maximum Money is a flat +2% be
 ×0.98 floored at 1, and it is COMPUTED rather than skipped because three terms move together as
 minimum security falls — hack chance and money per thread both scale `(100-d)/100`, op time scales
 `2.5*R*d + 500` — giving `income ∝ (100-d)² / (2.5*R*d + 500)`. At `R=1000` that is +3.04% at
-`d=20` and +2.03% at `d=3`, so on a high-minimum-security target it beats the flat +2%. The
+`d=20` and +2.04% at `d=3`, so on a high-minimum-security target it beats the flat +2%. The
 grow-thread improvement is left out, so it UNDERSTATES, which is the safe direction for a spend.
 Contracts, corporation and bladeburner upgrades are deliberately not bought. Income is divided by
 the target count, because nothing here knows the per-target split and over-crediting one target is
@@ -1220,7 +1224,10 @@ buying" need different answers.
 the batcher is actually hitting, and which batcher is up is the user's choice — so whichever
 manager runs writes its list to `TARGETS_MARKER` (`/data/targets.txt`), on its initial pick and on
 every switch, and `boot.js` clears it on both paths where no manager of any system survives: a
-swap that leaves none, and `--no-manager`. Missing or empty means spend nothing, never a default.
+swap that leaves none, and `--no-manager` with nothing already up. That second clear is gated on
+liveness because `--no-manager` kills nothing — unguarded it blanks the list a live shotgun owns,
+and the shotgun republishes only on a retarget. Missing or empty means spend nothing, never a
+default.
 A stale list is inert rather than lossy — `purchaseHashUpgrade` refunds an upgrade the game
 refuses, which a foreign-only upgrade aimed at a purchased server is — but it is still hashes not
 spent where they pay.

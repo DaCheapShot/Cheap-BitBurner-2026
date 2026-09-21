@@ -264,7 +264,8 @@ function ensureOneManager(ns, wanted, others, args, log) {
     killOrphanWorkers(ns, log);
     // The outgoing manager's targets are nobody's now. A stale list has
     // scripts/hacknet/hashes.js buying Increase Maximum Money for a server the
-    // incoming manager may never touch, and hash upgrades do not refund. The
+    // incoming manager may never touch, and a purchase the game ACCEPTS is not
+    // refunded - refundUpgrade fires only when the effect itself fails. The
     // incoming manager republishes within a rescan; until then, spend nothing.
     ns.write(TARGETS_MARKER, "", "w");
   }
@@ -449,13 +450,21 @@ export async function main(ns) {
     }
     if (!noManager) {
       ensureOneManager(ns, wanted, ALL_MANAGERS.filter((f) => f !== wanted), managerArgs, log);
-    } else if (firstPass) {
-      // --no-manager means no manager will EVER publish targets this run, the
-      // same terminal state ensureOneManager reaches once no manager survives a
-      // swap - so clear the marker the same way, once, rather than leaving a
-      // previous boot's list stale. Without this, scripts/hacknet/hashes.js
-      // keeps buying Increase Maximum Money for a server nobody is hitting, and
-      // hash upgrades do not refund.
+    } else if (firstPass && !ALL_MANAGERS.some((f) => isUp(ns, f))) {
+      // --no-manager with nothing already up means no manager will publish
+      // targets this run - the same terminal state ensureOneManager reaches once
+      // no manager survives a swap, so clear the marker the same way, once,
+      // rather than leaving a previous boot's list stale.
+      //
+      // THE LIVENESS CHECK IS LOAD-BEARING. --no-manager kills nothing:
+      // killDuplicates for managers lives inside ensureOneManager, which this
+      // branch skips. So a boot run beside a live batcher - which is the point
+      // of the flag - would blank the list that manager owns. managerCore
+      // publishes only on its initial pick and on a retarget, so a stable target
+      // never republishes and hashes.js would report "no targets published - no
+      // manager is running" for the life of that manager, with one running. The
+      // continuous side republishes every rescan and would self-heal; the
+      // shotgun would not.
       ns.write(TARGETS_MARKER, "", "w");
     }
     // The gang supervisor. Gated on inGang() rather than started unconditionally
@@ -493,7 +502,11 @@ export async function main(ns) {
       if (!isUp(ns, HACKNET_MONEY_SERVICE)) {
         await runToCompletion(ns, HACKNET_MONEY_SERVICE, [], log);
       }
-      if (!isUp(ns, HACKNET_HASH_SERVICE)) {
+      // BOTH services, not just this one: runToCompletion RETURNS TRUE on its
+      // timeout without killing anything, so a wedged money sweep would be
+      // joined rather than waited for and the subsystem's peak would become
+      // 5.45 + 6.60 = 12.05 instead of the larger of the two.
+      if (!isUp(ns, HACKNET_MONEY_SERVICE) && !isUp(ns, HACKNET_HASH_SERVICE)) {
         await runToCompletion(ns, HACKNET_HASH_SERVICE, [], log);
       }
     }
