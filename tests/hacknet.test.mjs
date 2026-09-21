@@ -690,4 +690,26 @@ export const tests = {
     assert(!/exec\s*\(/.test(src),
       "hashes.js must not exec anything - the marker it reads exists on home alone");
   },
+
+  // Whichever batcher is up publishes what it is working. Hash upgrades only
+  // pay on a server the batcher is actually hitting, and which system runs is
+  // the user's choice - so the reader must not have to know which.
+  "both managers publish their targets and boot clears the marker": () => {
+    const core = readScript("continuous/core");
+    assert(core.includes("TARGETS_MARKER"),
+      "continuous/core.js must publish its admitted targets");
+    assert(/ns\.write\(\s*TARGETS_MARKER/.test(core),
+      "continuous/core.js must WRITE the marker, not just import it");
+
+    const shotgun = readScript("managerCore");
+    assert(/ns\.write\(\s*TARGETS_MARKER/.test(shotgun),
+      "managerCore.js must publish its target too");
+
+    // A stale list has hashes bought for a server nobody is hitting, and hash
+    // upgrades do not refund. boot clears it exactly where it decides no manager
+    // of any system survived the swap.
+    const boot = readScript("boot");
+    assert(/ns\.write\(\s*TARGETS_MARKER\s*,\s*""/.test(boot),
+      "boot.js must clear the marker when no manager survives a swap");
+  },
 };

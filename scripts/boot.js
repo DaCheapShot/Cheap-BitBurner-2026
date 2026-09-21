@@ -1,6 +1,6 @@
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
          WORKER_LIST,
-         DEPLOY_LIST, DEPLOY_MANIFEST, SHARE_HOLD_MARKER } from "./config.js";
+         DEPLOY_LIST, DEPLOY_MANIFEST, SHARE_HOLD_MARKER, TARGETS_MARKER } from "./config.js";
 // The gang supervisor's path. Same kind of import as the line above - that file
 // is constants only, no ns call anywhere in it, so this is 0 GB.
 import { GANG_SERVICE } from "./gang/config.js";
@@ -258,7 +258,14 @@ function ensureOneManager(ns, wanted, others, args, log) {
   // this whenever a manager is killed would be wrong - killDuplicates keeps a
   // survivor whose own volley is in flight, and its workers are indistinguishable
   // from the dead one's without reading batch ids out of their argv.
-  if (swapped && !isUp(ns, wanted)) killOrphanWorkers(ns, log);
+  if (swapped && !isUp(ns, wanted)) {
+    killOrphanWorkers(ns, log);
+    // The outgoing manager's targets are nobody's now. A stale list has
+    // scripts/hacknet/hashes.js buying Increase Maximum Money for a server the
+    // incoming manager may never touch, and hash upgrades do not refund. The
+    // incoming manager republishes within a rescan; until then, spend nothing.
+    ns.write(TARGETS_MARKER, "", "w");
+  }
 
   return isUp(ns, wanted) || ensureService(ns, wanted, args, log);
 }
