@@ -513,6 +513,31 @@ export const tests = {
     assert(hosts.includes("n00dles"), "ordinary hosts must still be admitted");
   },
 
+  // The OTHER loop, and it needs its own test: build() and sync() admit hosts
+  // independently, so a guard in one is invisible to a test that only exercises
+  // the other. Proven the hard way - with only the build() test present, the
+  // sync() guard could be deleted and all 498 tests still passed.
+  //
+  // This is the scenario the guard exists for: a hacknet server BOUGHT BETWEEN
+  // RESCANS, which build() never saw. makeNs's scan and getServerMaxRam both
+  // read the live `hosts` map, so adding to it mid-test is exactly that.
+  "the continuous pool does not re-admit a hacknet server on sync": async () => {
+    const hosts = { home: 64, "n00dles": 4 };
+    const { pool } = await makePool(hosts, {}, { homeReserve: 0 });
+    const names = () => pool.servers.map((s) => s.hostname);
+    assert(!names().includes("hacknet-server-0"), "the fixture must start without one");
+
+    hosts["hacknet-server-0"] = 1024;
+    hosts["joesguns"] = 16;
+    pool.sync();
+
+    assert(!names().includes("hacknet-server-0"),
+      "sync() re-admitted hacknet-server-0 - build()'s guard alone does not cover a server bought between rescans");
+    // The positive control. Without it this test would also pass if sync() had
+    // simply stopped admitting anything at all.
+    assert(names().includes("joesguns"), "sync() must still admit an ordinary new host");
+  },
+
   // ------------------------------------------------------------- workers ----
 
   "the workers import nothing at all": async () => {
