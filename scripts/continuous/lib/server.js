@@ -1,4 +1,4 @@
-import { RAM_SAFETY_FRACTION } from "scripts/continuous/config";
+import { RAM_SAFETY_FRACTION, HACKNET_HOST_PREFIX } from "scripts/continuous/config";
 
 /**
  * RAM pool primitives for the continuous (streaming) HWGW batcher.
@@ -209,6 +209,8 @@ export class ServerPool {
 
     for (const host of hosts) {
       if (excluded.has(host)) continue;
+      // See scripts/ram.js: a hacknet server holding workers earns no hashes.
+      if (host.startsWith(HACKNET_HOST_PREFIX)) continue;
       if (host === "home" && !includeHome) continue;
       if (!ns.hasRootAccess(host)) continue;
       if (ns.getServerMaxRam(host) <= 0) continue;
@@ -231,6 +233,12 @@ export class ServerPool {
   }
 
   /** Every hostname reachable from home, home included. */
+  // Hacknet servers are filtered out of the RESULT, not out of the walk - see
+  // scripts/ram.js's copy for why, and for the live BitNode 9 failure that put
+  // the filter here rather than only at pool admission. Short version: most
+  // callers of this are target rankers, not pools, and getNormalServer THROWS
+  // on a hacknet server, so a missed filter is a dead manager rather than a bad
+  // ranking.
   static scanAll(ns) {
     const seen = new Set(["home"]);
     const queue = ["home"];
@@ -242,7 +250,7 @@ export class ServerPool {
         }
       }
     }
-    return [...seen];
+    return [...seen].filter((h) => !h.startsWith(HACKNET_HOST_PREFIX));
   }
 
   refresh(deep = false) {
@@ -289,6 +297,9 @@ export class ServerPool {
 
     for (const host of ServerPool.scanAll(ns)) {
       if (known.has(host) || excluded.has(host)) continue;
+      // Both loops, or a hacknet server bought between rescans rejoins the pool
+      // on the next refresh with nothing to stop it.
+      if (host.startsWith(HACKNET_HOST_PREFIX)) continue;
       if (host === "home" && opts.includeHome === false) continue;
       if (!ns.hasRootAccess(host)) continue;
       if (ns.getServerMaxRam(host) <= 0) continue;

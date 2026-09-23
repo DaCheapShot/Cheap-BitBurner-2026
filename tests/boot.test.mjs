@@ -1,8 +1,15 @@
 import { loadScripts, assert } from "./harness.mjs";
 
 // Scripts boot runs with runToCompletion - they must EXIT, or the poll loop
-// below spins for the full TRANSIENT_TIMEOUT_MS of real wall time.
-const TRANSIENT = ["scripts/root.js", "scripts/deploy.js", "scripts/contracts/contracts.js"];
+// below spins for the full TRANSIENT_TIMEOUT_MS of real wall time. The two
+// hacknet sweeps run unconditionally on tick 0 (ticks starts at 0, and
+// HACKNET_EVERY divides it), so every runBoot() call exercises them - leaving
+// either out of this list hangs the whole suite for real minutes, not just
+// fails a test.
+const TRANSIENT = [
+  "scripts/root.js", "scripts/deploy.js", "scripts/contracts/contracts.js",
+  "scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js",
+];
 
 /**
  * Drive boot for a fixed number of ticks against a fake network.
@@ -87,6 +94,38 @@ const ORPHANS = [
 const SHOTGUN = ["--shotgun"];
 
 export const tests = {
+  // --no-manager KILLS NOTHING: killDuplicates for managers lives inside
+  // ensureOneManager, which that branch skips. So the marker clear on it has to
+  // be gated on liveness, or a boot run beside a live batcher - which is the
+  // whole point of the flag - blanks the target list its manager owns.
+  // managerCore publishes only on its initial pick and on a retarget, so a
+  // stable target never republishes: hashes.js would then report "no targets
+  // published - no manager is running" for the life of that manager, with one
+  // running, and the BitNode 9 half would do nothing. Behavioural rather than a
+  // source regex, so deleting the guard reddens this.
+  "--no-manager leaves a live manager's published targets alone": async () => {
+    const r = await runBoot({
+      args: ["--no-manager"],
+      running: ["scripts/manager.js"],
+      files: { "/data/targets.txt": "phantasy\n" },
+      ticks: 1,
+    });
+    assert(r.store["/data/targets.txt"] === "phantasy\n",
+      `a live manager's targets were cleared: ${JSON.stringify(r.store["/data/targets.txt"])}`);
+  },
+
+  // The positive control for the test above: with no manager of any system up,
+  // nothing will publish this run, so a previous boot's list is stale and the
+  // clear must still happen. Without this, "never clear" would pass.
+  "--no-manager with no manager running clears a stale target list": async () => {
+    const r = await runBoot({
+      args: ["--no-manager"],
+      files: { "/data/targets.txt": "phantasy\n" },
+      ticks: 1,
+    });
+    assert(r.store["/data/targets.txt"] === "",
+      `a stale target list survived with no manager up: ${JSON.stringify(r.store["/data/targets.txt"])}`);
+  },
   // Two boots with different flags each read the OTHER's manager as a rival and
   // kill it, every tick, forever - a live run swapped shotgun and continuous
   // once a minute, killing 262 threads of workers each time. The newest boot is

@@ -80,6 +80,25 @@ export function makeNs(o = {}) {
 
   const srv = (h) => servers[h] ?? {};
 
+  // The game REFUSES the whole getNormalServer family on a hacknet server.
+  // NetscriptHelpers.tsx's getNormalServer throws "Cannot be executed on
+  // <host>. The server must not be a hacknet server." and 23 functions route
+  // through it - the four getServer* readers below, the three op times, the
+  // analyze calls, hack/grow/weaken, nuke and every port opener.
+  //
+  // This mock used to hand back a default instead, and that is exactly why a
+  // whole-network walk that forgot to filter the hacknet passed 507 tests and
+  // then killed the live continuous manager on its first BitNode 9 startup.
+  // "Mocks must reproduce the game's real semantics or they give false
+  // confidence" - the rule was already written down; this is the case it was
+  // written for.
+  const normal = (h) => {
+    if (String(h).startsWith("hacknet-server-")) {
+      throw new Error(`Cannot be executed on ${h}. The server must not be a hacknet server.`);
+    }
+    return srv(h);
+  };
+
   const ns = {
     _hosts: hosts, _used: used, _servers: servers, _files: files,
     _port: port, _droppedReports: () => dropped, _log: [],
@@ -143,19 +162,19 @@ export function makeNs(o = {}) {
     getServerUsedRam: (h) => used[h] ?? 0,
     getScriptRam: (f) => (f.includes("hack") ? 1.7 : 1.75),
 
-    getServerMaxMoney: (h) => srv(h).moneyMax ?? 0,
-    getServerMoneyAvailable: (h) => srv(h).moneyAvailable ?? 0,
-    getServerMinSecurityLevel: (h) => srv(h).minDifficulty ?? 1,
-    getServerSecurityLevel: (h) => srv(h).hackDifficulty ?? 1,
-    getServerRequiredHackingLevel: (h) => srv(h).requiredHackingSkill ?? 1,
+    getServerMaxMoney: (h) => normal(h).moneyMax ?? 0,
+    getServerMoneyAvailable: (h) => normal(h).moneyAvailable ?? 0,
+    getServerMinSecurityLevel: (h) => normal(h).minDifficulty ?? 1,
+    getServerSecurityLevel: (h) => normal(h).hackDifficulty ?? 1,
+    getServerRequiredHackingLevel: (h) => normal(h).requiredHackingSkill ?? 1,
     getHackingLevel: () => o.hackingLevel ?? 9999,
 
-    getWeakenTime: (h) => srv(h).weakenTime ?? 2000,
-    getGrowTime: (h) => srv(h).growTime ?? 1600,
-    getHackTime: (h) => srv(h).hackTime ?? 500,
+    getWeakenTime: (h) => normal(h).weakenTime ?? 2000,
+    getGrowTime: (h) => normal(h).growTime ?? 1600,
+    getHackTime: (h) => normal(h).hackTime ?? 500,
 
-    hackAnalyze: (h) => srv(h).hackPercentPerThread ?? 0.0037,
-    growthAnalyze: (h, mult) => Math.log(mult) / Math.log(srv(h).growBase ?? 1.0018),
+    hackAnalyze: (h) => normal(h).hackPercentPerThread ?? 0.0037,
+    growthAnalyze: (h, mult) => Math.log(mult) / Math.log(normal(h).growBase ?? 1.0018),
     weakenAnalyze: (t) => 0.05 * t,
     hackAnalyzeSecurity: (t) => 0.002 * t,
     growthAnalyzeSecurity: (t) => 0.004 * t,

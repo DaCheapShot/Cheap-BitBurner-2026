@@ -497,6 +497,87 @@ export const tests = {
     assert(pool.get("home").threadsFor(10) === 9, "safety fraction not applied to thread counts");
   },
 
+  // The continuous pool needs the same exclusion, in BOTH of its loops: a
+  // hacknet server bought between rescans would otherwise rejoin on the next
+  // refresh with nothing to stop it. A hacknet server holding batch workers
+  // produces literally zero hashes - calculateHashGainRate carries
+  // `1 - ramUsed/maxRam` as a plain factor and updateRamUsed recomputes on
+  // every change.
+  "the continuous pool does not admit a hacknet server": async () => {
+    const { pool } = await makePool({ home: 64, "n00dles": 4, "hacknet-server-0": 1024 },
+      {}, { homeReserve: 0 });
+    const hosts = pool.servers.map((s) => s.hostname);
+
+    assert(!hosts.includes("hacknet-server-0"),
+      "the continuous pool admitted hacknet-server-0 - a filled hacknet server earns no hashes");
+    assert(hosts.includes("n00dles"), "ordinary hosts must still be admitted");
+  },
+
+  // The OTHER loop, and it needs its own test: build() and sync() admit hosts
+  // independently, so a guard in one is invisible to a test that only exercises
+  // the other. Proven the hard way - with only the build() test present, the
+  // sync() guard could be deleted and all 498 tests still passed.
+  //
+  // This is the scenario the guard exists for: a hacknet server BOUGHT BETWEEN
+  // RESCANS, which build() never saw. makeNs's scan and getServerMaxRam both
+  // read the live `hosts` map, so adding to it mid-test is exactly that.
+  "the continuous pool does not re-admit a hacknet server on sync": async () => {
+    const hosts = { home: 64, "n00dles": 4 };
+    const { pool } = await makePool(hosts, {}, { homeReserve: 0 });
+    const names = () => pool.servers.map((s) => s.hostname);
+    assert(!names().includes("hacknet-server-0"), "the fixture must start without one");
+
+    hosts["hacknet-server-0"] = 1024;
+    hosts["joesguns"] = 16;
+    pool.sync();
+
+    assert(!names().includes("hacknet-server-0"),
+      "sync() re-admitted hacknet-server-0 - build()'s guard alone does not cover a server bought between rescans");
+    // The positive control. Without it this test would also pass if sync() had
+    // simply stopped admitting anything at all.
+    assert(names().includes("joesguns"), "sync() must still admit an ordinary new host");
+  },
+
+  // The two pool guards above are the LAST line, not the only one. The walk
+  // itself must not hand a hacknet server to anyone, because most of its
+  // callers are not pools - they are target rankers, and the whole
+  // getNormalServer family THROWS on a hacknet server rather than returning a
+  // useless number. Live BitNode 9, first startup:
+  //
+  //   getServerRequiredHackingLevel: Cannot be executed on hacknet-server-0.
+  //   The server must not be a hacknet server.
+  //     continuous/lib/target.js:33@candidates
+  //
+  // The manager died AT STARTUP, so boot restarted it into the same wall once a
+  // minute for the life of the node.
+  "scanAll does not hand out a hacknet server": async () => {
+    const { mods } = await loadContinuous();
+    const ns = makeNs({ hosts: { home: 64, "n00dles": 4, "hacknet-server-0": 1024 } });
+
+    const seen = mods["lib/server"].ServerPool.scanAll(ns);
+    assert(!seen.includes("hacknet-server-0"),
+      "scanAll returned hacknet-server-0 - every caller that is not a pool will throw on it");
+    assert(seen.includes("n00dles") && seen.includes("home"), "scanAll dropped an ordinary host");
+  },
+
+  // Behavioural, against a mock that throws exactly as the game does, because
+  // this is the call that actually died. The shotgun's twin is pinned in
+  // tests/hacknet.test.mjs - both trees carried the same unguarded line.
+  "target ranking survives a hacknet server on the network": async () => {
+    const { mods } = await loadContinuous();
+    const ns = makeNs({
+      hosts: { home: 64, "n00dles": 4, "hacknet-server-0": 1024 },
+      servers: {
+        "n00dles": { moneyMax: 1e9, requiredHackingSkill: 1 },
+        "hacknet-server-0": { moneyMax: 0, requiredHackingSkill: 1 },
+      },
+    });
+
+    const found = mods["lib/target"].candidates(ns);
+    assert(!found.includes("hacknet-server-0"), "candidates() ranked a hacknet server");
+    assert(found.includes("n00dles"), "candidates() dropped the real target");
+  },
+
   // ------------------------------------------------------------- workers ----
 
   "the workers import nothing at all": async () => {

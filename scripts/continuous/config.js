@@ -47,6 +47,9 @@ export {
   SHARE_MAX_FRACTION, shareFractionFrom,
   SHARE_HOLD_MARKER, effectiveShareFraction, shareHeld,
   WORKER_FILES, WORKER_LIST, WORKER_RAM_FALLBACK,
+  // Values a second party reads without knowing which batcher is up: the
+  // hacknet reads the target list, and both pools skip hacknet servers.
+  TARGETS_MARKER, HACKNET_HOST_PREFIX,
 } from "scripts/config.js";
 
 // -------------------------------------------------------------- batching ----

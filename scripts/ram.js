@@ -16,6 +16,8 @@
  * manager can stay cheap.
  */
 
+import { HACKNET_HOST_PREFIX } from "./config.js";
+
 // maxRam is a power of two, script RAM is a multiple of 0.05 - float error is
 // tiny but real. Tolerate a sliver so a thread that exactly fits isn't dropped.
 const RAM_EPS = 1e-6;
@@ -140,6 +142,17 @@ export class ServerPool {
 
     for (const host of hosts) {
       if (excluded.has(host)) continue;
+      // A hacknet server's hash rate carries `1 - ramUsed/maxRam` as a plain
+      // factor (calculateHashGainRate), and updateRamUsed recomputes it on every
+      // change - so a hacknet server holding batch workers produces LITERALLY
+      // ZERO hashes. They arrive here unasked: adminRights is set at creation
+      // and Player.createHacknetServer pushes them onto home's network.
+      //
+      // The prefix is reserved by the game - Server's constructor renames any
+      // ordinary server that collides - so this cannot false-positive, and it
+      // costs nothing. Asking instead via the isHacknetServer field of
+      // ns's getServer call is 2.00 GB against this file's 0.35 total.
+      if (host.startsWith(HACKNET_HOST_PREFIX)) continue;
       if (host === "home" && !includeHome) continue;
       if (!ns.hasRootAccess(host)) continue;
       if (ns.getServerMaxRam(host) <= 0) continue;
@@ -149,7 +162,28 @@ export class ServerPool {
     return new ServerPool(servers);
   }
 
-  /** Every hostname reachable from home, home included. */
+  /**
+   * Every hostname reachable from home, home included - MINUS the hacknet.
+   *
+   * THE FILTER BELONGS HERE, not only at pool admission where it started. Most
+   * callers of this walk are not pools: they are target rankers, and the whole
+   * getNormalServer family THROWS on a hacknet server rather than returning a
+   * useless number - all 23 of getServerRequiredHackingLevel,
+   * getServerMaxMoney, the op times, the analyze calls, hack/grow/weaken, nuke
+   * and every port opener. So a missing filter is not a bad ranking, it is a
+   * dead manager:
+   *
+   *   getServerRequiredHackingLevel: Cannot be executed on hacknet-server-0.
+   *   The server must not be a hacknet server.
+   *
+   * which killed the continuous manager on its first BitNode 9 startup, and had
+   * boot restart it into the same wall once a minute. prepper.js carried the
+   * identical line, so the shotgun was dead the same way.
+   *
+   * Filtered on the way OUT rather than during the walk: nothing hangs off a
+   * hacknet server today, but dropping one from the queue would silently orphan
+   * anything that ever did.
+   */
   static scanAll(ns) {
     const seen = new Set(["home"]);
     const queue = ["home"];
@@ -161,7 +195,7 @@ export class ServerPool {
         }
       }
     }
-    return [...seen];
+    return [...seen].filter((h) => !h.startsWith(HACKNET_HOST_PREFIX));
   }
 
   refresh() {

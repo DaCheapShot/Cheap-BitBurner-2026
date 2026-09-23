@@ -25,6 +25,7 @@ import {
   SHARE_HOLD_MARKER,
   effectiveShareFraction,
   shareHeld,
+  TARGETS_MARKER,
 } from "./config.js";
 import {
   analyzeBatch, batchOk, batchOutcome, restoreStats, crossBatchOrder, moneyTrail,
@@ -753,6 +754,9 @@ export async function runVolley(ns, math) {
   // target chosen at launch goes stale within minutes.
   const pinnedTarget = tIdx >= 0 ? args[tIdx + 1] : null;
   let target = pinnedTarget ?? await pickTarget(ns, math);
+  // The shotgun works one target at a time, so its list is one line. Same
+  // contract as the continuous manager's - see scripts/config.js.
+  ns.write(TARGETS_MARKER, target ?? "", "w");
   if (!target) {
     ns.tprint("ERROR: no rooted, money-bearing target found. Pass --target <host>.");
     return;
@@ -832,6 +836,7 @@ export async function runVolley(ns, math) {
               `(${fmtMoney(bestMoney)}), ${(bestMoney / currentMoney).toFixed(1)}x richer`,
           );
           target = best;
+          ns.write(TARGETS_MARKER, target, "w");
           // The new server is unprepped and its timings differ; carrying either
           // over would judge it by the old target's behaviour.
           strikes = 0;

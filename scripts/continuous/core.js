@@ -39,6 +39,7 @@ import {
   STEAL_FRACTION,
   STREAM_TICK_MS,
   TARGET_RAM_BUDGET,
+  TARGETS_MARKER,
   WORKER_FILES,
   WORKER_RAM_FALLBACK,
 } from "scripts/continuous/config";
@@ -815,6 +816,14 @@ export function rescan(ns, math, opts) {
   }
 
   const admitted = plan ? plan.admitted : [];
+  // Publish what this batcher is working, richest first, for anything that has
+  // to aim at the same servers without knowing which system is up -
+  // scripts/hacknet/hashes.js is the only reader today. ns.write is 0 GB.
+  //
+  // Written every rescan rather than only on a change: a reader that started
+  // mid-run would otherwise see the list from before it existed, and rewriting
+  // an identical file costs nothing.
+  ns.write(TARGETS_MARKER, admitted.map((p) => p.host).join("\n"), "w");
   const slice = plan ? plan.slice : budget;
   const want = new Set(admitted.map((p) => p.host));
   if (verbose && totals.length > 1) {

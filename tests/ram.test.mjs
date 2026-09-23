@@ -82,6 +82,26 @@ const COST = {
   hasTorRouter: 0.05,
   // probe is this fork's ns.dnet.probe.
   probe: 0.2, disableLog: 0,
+  // ns.hacknet, every entry priced off RamCostConstants.Hacknet = 0.5 - the
+  // table in RamCostGenerator.ts sets all 21 to the same constant.
+  //
+  // This is the widest 0.5 GB namespace in the API and the names are ordinary
+  // English: a local called `level`, `cache` or `production` is free, but one
+  // called `numNodes`, `hashCost` or `upgradeLevel` costs half a gigabyte in
+  // the file that writes it and in every importer. hacknet/math.js is 0 GB and
+  // is imported by both entries, so a slip there is charged twice.
+  numNodes: 0.5, maxNumNodes: 0.5, purchaseNode: 0.5, getPurchaseNodeCost: 0.5,
+  getNodeStats: 0.5, upgradeLevel: 0.5, upgradeRam: 0.5, upgradeCore: 0.5,
+  upgradeCache: 0.5, getLevelUpgradeCost: 0.5, getRamUpgradeCost: 0.5,
+  getCoreUpgradeCost: 0.5, getCacheUpgradeCost: 0.5, numHashes: 0.5,
+  hashCost: 0.5, spendHashes: 0.5, hashCapacity: 0.5, getHashUpgrades: 0.5,
+  getHashUpgradeLevel: 0.5, getStudyMult: 0.5, getTrainingMult: 0.5,
+  // The four hacknet cost multipliers in one read, which is what lets the five
+  // get*UpgradeCost names above (2.50 GB) stay out of both entries: the cost
+  // ladders are transcribed into hacknet/math.js at 0 GB instead.
+  getHacknetMultipliers: 0.25,
+  // The batcher's income, for valuing a hash upgrade against the sale price.
+  getTotalScriptIncome: 0.1,
   // Not functions. RamCalculations.ts resolves a ref named `window` or
   // `document` to RamCostConstants.Dom and adds it, whatever the ref really is.
   window: 25, document: 25,
@@ -502,6 +522,9 @@ export const tests = {
   // 3.60 -> 3.50: fileExists went with the per-tick Formulas.exe check, which
   // existed only to pick between two continuous files that are now one.
   "boot.js still costs 3.50 GB with the gang service wired in": () => {
+    // Unmoved by the hacknet subsystem: hacknet/config.js is constants only, so
+    // importing it for two path strings and a number adds exactly nothing - the
+    // same reason gang/config.js and contracts/config.js are free to boot.
     const ram = ramOf("boot");
     assert(Math.abs(ram - 3.50) < 0.011, `expected 3.50 GB, got ${ram.toFixed(2)}`);
   },
@@ -576,7 +599,8 @@ export const tests = {
     for (const e of ["boot", "manager", "capacity", "cloud", "deploy",
                      "root", "sharemode", "connectme", "prep",
                      "continuous/manager", "continuous/servers",
-                     "gang/gang", "contracts/contracts", "sing/sing"]) {
+                     "gang/gang", "contracts/contracts", "sing/sing",
+                     "hacknet/hacknet", "hacknet/hashes"]) {
       for (const mod of closure(e)) entries.add(mod);
     }
 
@@ -648,5 +672,63 @@ export const tests = {
     }
     assert(bad.length === 0,
       `re-exports must use "scripts/<path>.js" - the RAM calculator does not resolve them: ${bad.join(", ")}`);
+  },
+
+  // config.js is imported by boot.js as well as by both sweeps, so one billed
+  // identifier in it would be charged to boot - which is pinned at 3.50. math.js
+  // is imported by both entries, so a slip there is charged twice.
+  //
+  // The hazard here is unusually high: ns.hacknet has 21 names at 0.50 GB each
+  // and they are ordinary English words for exactly the things this code talks
+  // about. `upgradeLevel` as a local is 0.50 GB; `level` is free.
+  "the hacknet subsystem's shared modules are free to import": () => {
+    for (const mod of ["hacknet/config", "hacknet/math"]) {
+      const ram = ramOf(mod);
+      assert(Math.abs(ram - BASE) < 0.011,
+        `${mod}.js costs ${(ram - BASE).toFixed(2)} GB to import; it must be 0 - boot.js and ` +
+          `both hacknet sweeps reach it`);
+    }
+  },
+
+  // 5.45 = 1.60 base + seven ns.hacknet names at 0.50 (numNodes, getNodeStats,
+  // purchaseNode, upgradeLevel, upgradeRam, upgradeCore, maxNumNodes) + 0.25
+  // getHacknetMultipliers + 0.10 getServerMoneyAvailable.
+  //
+  // The five get*UpgradeCost names are absent on purpose - 2.50 GB of ladder
+  // transcribed into hacknet/math.js at 0 instead, paid for with one 0.25 GB
+  // multiplier read.
+  //
+  // maxNumNodes earns its 0.50: it is the only way to tell nodes from servers
+  // with ZERO units owned (Infinity vs 20, straight off hasHacknetServers), and
+  // the two branches buy different things at different prices - $1,000 against
+  // $50,000 - so the answer cannot be deferred to the first purchase.
+  "hacknet.js (money sweep) costs 5.45 GB": () => {
+    const ram = ramOf("hacknet/hacknet");
+    assert(Math.abs(ram - 5.45) < 0.011, `expected 5.45 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // 6.60 = 1.60 base + nine ns.hacknet names at 0.50 (numNodes, getNodeStats,
+  // numHashes, hashCapacity, hashCost, getHashUpgradeLevel, getHashUpgrades,
+  // spendHashes, upgradeCache) + 0.50 of 0.10s (getServerMoneyAvailable,
+  // getServerMaxMoney, getServerMinSecurityLevel, getServerRequiredHackingLevel,
+  // getTotalScriptIncome).
+  //
+  // Exactly the ceiling sing/'s largest body sits on. boot runs this after the
+  // money sweep, not beside it, so the subsystem's PEAK is this number and not
+  // the sum.
+  //
+  // getCacheUpgradeCost is absent: the cache ladder is transcribed in math.js,
+  // and it is the one ladder that takes no cost multiplier at all.
+  "hashes.js (hash sweep) costs 6.60 GB": () => {
+    const ram = ramOf("hacknet/hashes");
+    assert(Math.abs(ram - 6.60) < 0.011, `expected 6.60 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // The two sweeps run one after the other under runToCompletion, so what has
+  // to fit beside boot, cloud and a continuous manager on a fresh 32 GB home is
+  // the larger of the two - never their sum.
+  "the hacknet subsystem's peak is one sweep, not both": () => {
+    const peak = Math.max(ramOf("hacknet/hacknet"), ramOf("hacknet/hashes"));
+    assert(peak < 7.0, `hacknet peak is ${peak.toFixed(2)} GB, over the 7.00 budget`);
   },
 };

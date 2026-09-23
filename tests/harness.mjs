@@ -41,6 +41,13 @@ const NESTED = [
   "sing/sing.js",
   // The fire-and-forget backdoor, a real file rather than a body: ns only in main().
   "sing/backdoor.js",
+  // The hacknet subsystem. math.js is pure and holds every decision - the same
+  // split as gang/math.js and contracts/solvers.js. The two entries hold ns
+  // calls only inside main(), so Node can load and PARSE them.
+  "hacknet/config.js",
+  "hacknet/math.js",
+  "hacknet/hacknet.js",
+  "hacknet/hashes.js",
 ];
 
 /** Every .js under scripts/, as posix paths relative to it. */

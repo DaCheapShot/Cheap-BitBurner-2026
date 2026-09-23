@@ -1,11 +1,12 @@
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
          WORKER_LIST,
-         DEPLOY_LIST, DEPLOY_MANIFEST, SHARE_HOLD_MARKER } from "./config.js";
+         DEPLOY_LIST, DEPLOY_MANIFEST, SHARE_HOLD_MARKER, TARGETS_MARKER } from "./config.js";
 // The gang supervisor's path. Same kind of import as the line above - that file
 // is constants only, no ns call anywhere in it, so this is 0 GB.
 import { GANG_SERVICE } from "./gang/config.js";
 import { CONTRACTS_SERVICE } from "./contracts/config.js";
 import { SING_SERVICE } from "./sing/config.js";
+import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE, HACKNET_EVERY } from "./hacknet/config.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -54,6 +55,7 @@ import { SING_SERVICE } from "./sing/config.js";
  *         run scripts/boot.js --no-gang           (don't supervise the gang)
  *         run scripts/boot.js --no-contracts      (don't solve coding contracts)
  *         run scripts/boot.js --no-sing           (don't run the singularity supervisor)
+ *         run scripts/boot.js --no-hacknet        (do not buy hacknet nodes or spend hashes)
  *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
  *         run scripts/boot.js --shotgun           (the volley batcher, not the stream)
  *         run scripts/boot.js --targets 5         (continuous only; shotgun ignores it)
@@ -258,7 +260,15 @@ function ensureOneManager(ns, wanted, others, args, log) {
   // this whenever a manager is killed would be wrong - killDuplicates keeps a
   // survivor whose own volley is in flight, and its workers are indistinguishable
   // from the dead one's without reading batch ids out of their argv.
-  if (swapped && !isUp(ns, wanted)) killOrphanWorkers(ns, log);
+  if (swapped && !isUp(ns, wanted)) {
+    killOrphanWorkers(ns, log);
+    // The outgoing manager's targets are nobody's now. A stale list has
+    // scripts/hacknet/hashes.js buying Increase Maximum Money for a server the
+    // incoming manager may never touch, and a purchase the game ACCEPTS is not
+    // refunded - refundUpgrade fires only when the effect itself fails. The
+    // incoming manager republishes within a rescan; until then, spend nothing.
+    ns.write(TARGETS_MARKER, "", "w");
+  }
 
   return isUp(ns, wanted) || ensureService(ns, wanted, args, log);
 }
@@ -309,6 +319,7 @@ export async function main(ns) {
   const noGang = args.includes("--no-gang");
   const noContracts = args.includes("--no-contracts");
   const noSing = args.includes("--no-sing");
+  const noHacknet = args.includes("--no-hacknet");
   // sing.js holds share off whenever the player is not doing faction work. With
   // sing opted out nothing would ever release that hold, so clear it here.
   if (noSing) ns.write(SHARE_HOLD_MARKER, "", "w");
@@ -354,6 +365,7 @@ export async function main(ns) {
 
   let lastRootStamp = ns.read(ROOT_MARKER);
   let firstPass = true;
+  let ticks = 0;
   // Say "fleet is maxed" once, not every tick - the whole point of this change
   // is to stop boot from producing a line a minute about nothing happening.
   let cloudMaxedLogged = false;
@@ -438,6 +450,22 @@ export async function main(ns) {
     }
     if (!noManager) {
       ensureOneManager(ns, wanted, ALL_MANAGERS.filter((f) => f !== wanted), managerArgs, log);
+    } else if (firstPass && !ALL_MANAGERS.some((f) => isUp(ns, f))) {
+      // --no-manager with nothing already up means no manager will publish
+      // targets this run - the same terminal state ensureOneManager reaches once
+      // no manager survives a swap, so clear the marker the same way, once,
+      // rather than leaving a previous boot's list stale.
+      //
+      // THE LIVENESS CHECK IS LOAD-BEARING. --no-manager kills nothing:
+      // killDuplicates for managers lives inside ensureOneManager, which this
+      // branch skips. So a boot run beside a live batcher - which is the point
+      // of the flag - would blank the list that manager owns. managerCore
+      // publishes only on its initial pick and on a retarget, so a stable target
+      // never republishes and hashes.js would report "no targets published - no
+      // manager is running" for the life of that manager, with one running. The
+      // continuous side republishes every rescan and would self-heal; the
+      // shotgun would not.
+      ns.write(TARGETS_MARKER, "", "w");
     }
     // The gang supervisor. Gated on inGang() rather than started unconditionally
     // because the script exits immediately without a gang, and ensureService
@@ -457,6 +485,32 @@ export async function main(ns) {
       killDuplicates(ns, SING_SERVICE, log);
       ensureService(ns, SING_SERVICE, [], log);
     }
+    // The hacknet, money sweep then hash sweep, every HACKNET_EVERY ticks.
+    //
+    // TRANSIENTS, not services: both exit on their own, so ensureService would
+    // relaunch them every tick forever - the trap CLOUD_DONE_MARKER closes for
+    // cloud and inGang() for the gang. This is the contracts.js shape.
+    //
+    // SEQUENTIAL, not together: the two files carry disjoint sets of the 21
+    // ns.hacknet names, so run one after the other the subsystem's peak is the
+    // larger (6.60 GB) rather than the sum.
+    //
+    // The isUp checks are about STACKING rather than duplicates: a hand-run
+    // --dry-run can still be going, and a second sweep on top of it would plan
+    // against cash the first is about to spend.
+    if (!noHacknet && ticks % HACKNET_EVERY === 0) {
+      if (!isUp(ns, HACKNET_MONEY_SERVICE)) {
+        await runToCompletion(ns, HACKNET_MONEY_SERVICE, [], log);
+      }
+      // BOTH services, not just this one: runToCompletion RETURNS TRUE on its
+      // timeout without killing anything, so a wedged money sweep would be
+      // joined rather than waited for and the subsystem's peak would become
+      // 5.45 + 6.60 = 12.05 instead of the larger of the two.
+      if (!isUp(ns, HACKNET_MONEY_SERVICE) && !isUp(ns, HACKNET_HASH_SERVICE)) {
+        await runToCompletion(ns, HACKNET_HASH_SERVICE, [], log);
+      }
+    }
+
     // The contract solver, and it is a TRANSIENT, not a service - one sweep per
     // tick, holding nothing in between. As a resident it pinned 4.10 GB forever
     // to re-read a clock that only matters once every ten minutes.
@@ -473,6 +527,7 @@ export async function main(ns) {
     }
 
     firstPass = false;
+    ticks++;
     if (!once) await ns.sleep(tickMs);
   } while (!once);
 
