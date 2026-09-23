@@ -233,6 +233,12 @@ export class ServerPool {
   }
 
   /** Every hostname reachable from home, home included. */
+  // Hacknet servers are filtered out of the RESULT, not out of the walk - see
+  // scripts/ram.js's copy for why, and for the live BitNode 9 failure that put
+  // the filter here rather than only at pool admission. Short version: most
+  // callers of this are target rankers, not pools, and getNormalServer THROWS
+  // on a hacknet server, so a missed filter is a dead manager rather than a bad
+  // ranking.
   static scanAll(ns) {
     const seen = new Set(["home"]);
     const queue = ["home"];
@@ -244,7 +250,7 @@ export class ServerPool {
         }
       }
     }
-    return [...seen];
+    return [...seen].filter((h) => !h.startsWith(HACKNET_HOST_PREFIX));
   }
 
   refresh(deep = false) {

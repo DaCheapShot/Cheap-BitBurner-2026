@@ -538,6 +538,46 @@ export const tests = {
     assert(names().includes("joesguns"), "sync() must still admit an ordinary new host");
   },
 
+  // The two pool guards above are the LAST line, not the only one. The walk
+  // itself must not hand a hacknet server to anyone, because most of its
+  // callers are not pools - they are target rankers, and the whole
+  // getNormalServer family THROWS on a hacknet server rather than returning a
+  // useless number. Live BitNode 9, first startup:
+  //
+  //   getServerRequiredHackingLevel: Cannot be executed on hacknet-server-0.
+  //   The server must not be a hacknet server.
+  //     continuous/lib/target.js:33@candidates
+  //
+  // The manager died AT STARTUP, so boot restarted it into the same wall once a
+  // minute for the life of the node.
+  "scanAll does not hand out a hacknet server": async () => {
+    const { mods } = await loadContinuous();
+    const ns = makeNs({ hosts: { home: 64, "n00dles": 4, "hacknet-server-0": 1024 } });
+
+    const seen = mods["lib/server"].ServerPool.scanAll(ns);
+    assert(!seen.includes("hacknet-server-0"),
+      "scanAll returned hacknet-server-0 - every caller that is not a pool will throw on it");
+    assert(seen.includes("n00dles") && seen.includes("home"), "scanAll dropped an ordinary host");
+  },
+
+  // Behavioural, against a mock that throws exactly as the game does, because
+  // this is the call that actually died. The shotgun's twin is pinned in
+  // tests/hacknet.test.mjs - both trees carried the same unguarded line.
+  "target ranking survives a hacknet server on the network": async () => {
+    const { mods } = await loadContinuous();
+    const ns = makeNs({
+      hosts: { home: 64, "n00dles": 4, "hacknet-server-0": 1024 },
+      servers: {
+        "n00dles": { moneyMax: 1e9, requiredHackingSkill: 1 },
+        "hacknet-server-0": { moneyMax: 0, requiredHackingSkill: 1 },
+      },
+    });
+
+    const found = mods["lib/target"].candidates(ns);
+    assert(!found.includes("hacknet-server-0"), "candidates() ranked a hacknet server");
+    assert(found.includes("n00dles"), "candidates() dropped the real target");
+  },
+
   // ------------------------------------------------------------- workers ----
 
   "the workers import nothing at all": async () => {

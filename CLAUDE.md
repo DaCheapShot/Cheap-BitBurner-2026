@@ -1240,11 +1240,33 @@ A stale list is inert rather than lossy — `purchaseHashUpgrade` refunds an upg
 refuses, which a foreign-only upgrade aimed at a purchased server is — but it is still hashes not
 spent where they pay.
 
-**Hacknet servers are kept OUT of both RAM pools.** `calculateHashGainRate` multiplies by
-`ramRatio = 1 - ramUsed/maxRam`, so a hacknet server filled with batch workers earns **literally
-zero hashes** — the cheapest few GB in the fleet, bought at the price of the whole subsystem.
-`ram.js` and `continuous/lib/server.js` skip any host starting with `HACKNET_HOST_PREFIX`, and
-`server.js` does it in BOTH `build()` and `sync()`, which admit hosts independently.
+**Hacknet servers are filtered out of `ServerPool.scanAll` ITSELF**, in both trees — not only at
+pool admission, which is where the guard started and which was not enough. Two separate reasons,
+and the second is the expensive one:
+
+- A hacknet server filled with batch workers earns **literally zero hashes**:
+  `calculateHashGainRate` multiplies by `ramRatio = 1 - ramUsed/maxRam`. That is what the pool
+  guards protect, and they stay — `server.js` does it in BOTH `build()` and `sync()`, which admit
+  hosts independently.
+- **Most callers of the walk are not pools.** `continuous/lib/target.js`, `prepper.js` and
+  `capacity.js` rank targets off it, and the whole `getNormalServer` family **throws** on a
+  hacknet server rather than returning a useless number — all 23 of `getServerRequiredHackingLevel`,
+  `getServerMaxMoney`, the three op times, the analyze calls, `hack`/`grow`/`weaken`, `nuke` and
+  every port opener (`NetscriptHelpers.tsx`). So a missing filter is not a bad ranking, it is a
+  **dead manager**: `getServerRequiredHackingLevel: Cannot be executed on hacknet-server-0` killed
+  the continuous manager at startup on the first BitNode 9 run, and boot restarted it into the same
+  wall once a minute. `prepper.js` carried the identical line, so the shotgun was dead the same way.
+
+The filter is applied to the RESULT, not during the walk: nothing hangs off a hacknet server today,
+but dropping one from the queue would silently orphan anything that ever did. `root.js` needs no
+guard — hacknet servers report `hasRootAccess` true, so its walk counts them as already rooted and
+never reaches `nuke`.
+
+**The mock throws where the game throws, and that is why this bug shipped.** `tests/mockNs.mjs`
+returned a default for `getServerRequiredHackingLevel` on a hacknet server, so an unfiltered
+whole-network walk passed 507 tests. It now reproduces `getNormalServer`'s refusal for the whole
+family — the rule *"mocks must reproduce the game's real semantics or they give false confidence"*
+already existed; this is the case it was written for.
 
 **The identifier tax lands hard here.** 21 `ns.hacknet` functions at 0.50 GB each, charged by bare
 name anywhere in an entry's import closure — so `hacknet/math.js` spells its upgrade kinds as the

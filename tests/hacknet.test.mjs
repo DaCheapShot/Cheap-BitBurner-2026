@@ -33,6 +33,54 @@ export const tests = {
     assert(hosts.includes("n00dles"), "ordinary hosts must still be admitted");
   },
 
+  // The pool guards above are the LAST line, not the only one. The network walk
+  // itself must not hand a hacknet server to anyone, because most consumers of
+  // it are not pools: they are target rankers, and the whole getNormalServer
+  // family THROWS on a hacknet server rather than returning a useless number.
+  //
+  // Live BitNode 9, first startup:
+  //   getServerRequiredHackingLevel: Cannot be executed on hacknet-server-0.
+  //   The server must not be a hacknet server.
+  //     continuous/lib/target.js:33@candidates
+  // The manager died at startup, so boot restarted it into the same wall once a
+  // minute for the life of the node.
+  // The continuous copy of this is in tests/continuous.test.mjs, beside its own
+  // pool guards - that tree has its own module loader.
+  "the shotgun's scanAll does not hand out a hacknet server": async () => {
+    const { ram: ramMod } = await loadScripts();
+    const { makeNs } = await import("./mockNs.mjs");
+    const ns = makeNs({ hosts: { home: 64, "n00dles": 4, "hacknet-server-0": 1024 } });
+
+    const seen = ramMod.ServerPool.scanAll(ns);
+    assert(!seen.includes("hacknet-server-0"),
+      "scanAll returned hacknet-server-0 - every caller that is not a pool will throw on it");
+    assert(seen.includes("n00dles") && seen.includes("home"), "scanAll dropped an ordinary host");
+  },
+
+  // Behavioural, against a mock that throws exactly as the game does, because
+  // this is the call that actually died. Both batchers rank targets off the same
+  // walk and BOTH carried the same unguarded line - prepper.js:155 and
+  // continuous/lib/target.js:33 - so one of them passing proves nothing about
+  // the other. The continuous half is pinned in tests/continuous.test.mjs.
+  "the shotgun's target ranking survives a hacknet server": async () => {
+    const mods = await loadScripts();
+    const { makeNs } = await import("./mockNs.mjs");
+    const ns = makeNs({
+      hosts: { home: 64, "n00dles": 4, "hacknet-server-0": 1024 },
+      servers: {
+        "n00dles": { moneyMax: 1e9, requiredHackingSkill: 1 },
+        "hacknet-server-0": { moneyMax: 0, requiredHackingSkill: 1 },
+      },
+    });
+
+    // The shotgun asks its math backend for max money in one round trip, so the
+    // stub only has to answer for whatever survived the walk.
+    const math = { maxMoneyOfAll: async (_ns, hs) => Object.fromEntries(hs.map((h) => [h, 1e9])) };
+    const ranked = await mods.prepper.rankTargets(ns, math);
+    assert(!ranked.includes("hacknet-server-0"), "the shotgun ranked a hacknet server");
+    assert(ranked.includes("n00dles"), "the shotgun dropped the real target");
+  },
+
   // Server's own constructor renames any ordinary server whose hostname starts
   // with "hacknet-node-" or "hacknet-server-", so the namespace is reserved and
   // the prefix test cannot false-positive. The alternative, ns.getServer(host)
