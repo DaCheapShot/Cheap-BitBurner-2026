@@ -208,6 +208,14 @@ export function planMoney(state, cfg) {
   const buys = [];
   let spent = 0;
   let reason = "nothing left inside the payback threshold";
+  // The best-paying candidate SEEN, whether or not it cleared the bar. When a
+  // sweep buys nothing this is the rung the user is looking at in the Hacknet
+  // UI, and its payback against PAYBACK_SECONDS is the only figure that
+  // explains the refusal. Without it the log reads as "cannot afford" beside a
+  // $500 price tag and a nine-figure wallet - which is exactly how a live
+  // BitNode 4 run was read. Ranked, not just the first: the refusal is about
+  // the BEST rung failing, so naming a worse one would misattribute it.
+  let nearest = null;
 
   for (;;) {
     let best = null;
@@ -231,7 +239,9 @@ export function planMoney(state, cfg) {
       const fresh = freshProduction(isServer, units[0]) * perUnit;
       if (fresh > 0) {
         const payback = nextPrice / fresh;
-        if (payback < cfg.PAYBACK_SECONDS) best = { kind: "unit", index: -1, price: nextPrice, payback };
+        const cand = { kind: "unit", index: -1, price: nextPrice, payback };
+        if (!nearest || payback < nearest.payback) nearest = cand;
+        if (payback < cfg.PAYBACK_SECONDS) best = cand;
       }
     }
 
@@ -247,6 +257,7 @@ export function planMoney(state, cfg) {
         const gain = stepGain(isServer, kind, units[i]) * perUnit;
         if (gain <= 0) continue;
         const payback = price / gain;
+        if (!nearest || payback < nearest.payback) nearest = { kind, index: i, price, payback };
         if (payback >= cfg.PAYBACK_SECONDS) continue;
         if (!best || payback < best.payback) best = { kind, index: i, price, payback };
       }
@@ -283,9 +294,16 @@ export function planMoney(state, cfg) {
   // threshold nothing was ever compared against.
   if (startedWithNothing && buys.length === 1 && buys[0].kind === "unit") {
     reason = "bought the first unit - waiting for a production reading before sizing the next buy";
+  } else if (!buys.length && !nearest) {
+    // Nothing was even RANKED. Every owned unit reports 0 production, so no
+    // gain can be sized and no price can ever pay back - which is this
+    // BitNode's HacknetNodeMoney multiplier at 0 (BitNode 8 sets it there), not
+    // a threshold anything was measured against. Blaming the threshold here
+    // would name a cause that was never consulted.
+    reason = "every owned unit produces 0 - this BitNode's hacknet earns nothing at all";
   }
 
-  return { buys, spent, reason };
+  return { buys, spent, reason, nearest };
 }
 
 // ----------------------------------------------------------- hash value ---

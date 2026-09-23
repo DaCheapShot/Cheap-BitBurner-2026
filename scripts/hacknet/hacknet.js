@@ -72,8 +72,23 @@ export async function main(ns) {
   if (!plan.buys.length) {
     // A sweep that buys nothing says WHY, with the figures. "0 bought" is the
     // ordinary state once the batcher is large and would otherwise be unreadable.
+    //
+    // The NEAREST rung is named with its payback against the bar, because the
+    // budget figures alone read as "cannot afford" - and the refusal is never
+    // about affordability. A live BitNode 4 run asked this directly: the UI
+    // offered a $500 level upgrade against $1.12q of cash, and the line said
+    // only "nothing left inside the payback threshold". BitNode 4 sets
+    // HacknetNodeMoney to 0.05, so a fresh node earns $0.075/s and that $500
+    // rung pays back in 1h51m against a 1h bar. That number is the whole
+    // answer, and it was the one thing the log did not print.
+    const near = plan.nearest
+      ? ` - nearest is ${plan.nearest.kind}${plan.nearest.index >= 0 ? ` on #${plan.nearest.index}` : ""}` +
+        ` at $${ns.format.number(plan.nearest.price, 2)}, paying back in ` +
+        `${ns.format.time(plan.nearest.payback * 1000)} against a ` +
+        `${ns.format.time(PAYBACK_SECONDS * 1000)} bar`
+      : "";
     log(`no buys: ${plan.reason} (budget $${ns.format.number(budget, 2)} of ` +
-        `$${ns.format.number(money, 2)}, ${owned} ${isServer ? "server" : "node"}(s))`);
+        `$${ns.format.number(money, 2)}, ${owned} ${isServer ? "server" : "node"}(s))${near}`);
     return;
   }
 

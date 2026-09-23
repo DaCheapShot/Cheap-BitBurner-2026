@@ -369,6 +369,65 @@ export const tests = {
     assert(plan.reason.includes("payback"), `reason was "${plan.reason}"`);
   },
 
+  // A refusal has to carry the number that caused it. This is the live BitNode
+  // 4 case: HacknetNodeMoney is 0.05, so a fresh node makes $0.075/s and the
+  // $500 level rung pays back in 6667s against a 3600s bar. With $1.12q in the
+  // wallet the old line read as "cannot afford a $500 upgrade", which is a
+  // diagnostic naming the wrong cause - the one failure mode this repo pays
+  // most for. Behavioural, so deleting the tracking reddens it.
+  "a refused sweep reports the nearest rung and its payback": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const mults = { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 };
+    const cfg = { PAYBACK_SECONDS: 3600, HASH_PRICE: 250000 };
+
+    // A brand new node as BitNode 4 reports it: level 1, 1 GB, 1 core.
+    const unit = { level: 1, ram: 1, cores: 1, production: 1.5 * 0.05 };
+    const plan = m.planMoney({ isServer: false, units: [unit], budget: 5.6e13, mults }, cfg);
+
+    assert(plan.buys.length === 0, `expected no buys, got ${JSON.stringify(plan.buys)}`);
+    assert(plan.nearest, "a refusal must name the nearest candidate it scored");
+    // The level rung is both the cheapest and the best-paying one here, and the
+    // point of ranking is that those are not the same question.
+    assert(plan.nearest.kind === "level",
+      `nearest should be the level rung, got ${plan.nearest.kind}`);
+    assert(plan.nearest.price === 500, `nearest price should be $500, got ${plan.nearest.price}`);
+    assert(Math.abs(plan.nearest.payback - 6667) < 1,
+      `nearest payback should be ~6667s, got ${plan.nearest.payback}`);
+    assert(plan.nearest.payback > cfg.PAYBACK_SECONDS,
+      "the nearest candidate must be one that FAILED the bar");
+  },
+
+  // Production of exactly 0 is BitNode 8 (HacknetNodeMoney: 0), where no rung
+  // can ever pay back at any price. Nothing is ranked at all, so blaming the
+  // payback threshold would name a cause that was never consulted.
+  "a BitNode where the hacknet earns nothing says so, not 'payback'": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const mults = { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 };
+    const cfg = { PAYBACK_SECONDS: 3600, HASH_PRICE: 250000 };
+
+    const unit = { level: 1, ram: 1, cores: 1, production: 0 };
+    const plan = m.planMoney({ isServer: false, units: [unit], budget: 1e12, mults }, cfg);
+
+    assert(plan.buys.length === 0, `expected no buys, got ${JSON.stringify(plan.buys)}`);
+    assert(plan.nearest === null, "nothing can be ranked when production is 0");
+    assert(!plan.reason.includes("payback"),
+      `reason must not blame the threshold: "${plan.reason}"`);
+    assert(plan.reason.includes("0"), `reason was "${plan.reason}"`);
+  },
+
+  // The figure only helps if the entry actually prints it.
+  "the money sweep prints the nearest rung's payback when it buys nothing": async () => {
+    const src = readScript("hacknet/hacknet");
+    assert(/plan\.nearest/.test(src),
+      "hacknet.js must report plan.nearest on a no-buy sweep");
+    assert(/ns\.format\.time\(\s*plan\.nearest\.payback \* 1000\s*\)/.test(src),
+      "the payback must be printed through ns.format.time, the game's own formatter");
+    assert(/ns\.format\.time\(\s*PAYBACK_SECONDS \* 1000\s*\)/.test(src),
+      "the bar it failed must be printed beside it");
+  },
+
   // With nothing owned there is no production to derive a fresh unit's rate
   // from, so the first one is bought unconditionally within the budget. It is
   // $1,000 for a node and $50,000 for a server, and in BitNode 9 no servers

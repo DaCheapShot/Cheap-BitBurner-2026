@@ -1179,6 +1179,14 @@ per purchase it would ratchet down as cash fell, and the sweep would spend a dif
 depending only on how many rungs it happened to take. `cloud.js` bids for the same wallet at 10%
 and sing's aug batch wants all of it.
 
+**A refused sweep names the NEAREST rung and its payback against the bar**, because the budget
+figures alone read as "cannot afford" and the refusal is never about affordability. In BitNode 4
+`HacknetNodeMoney` is 0.05, so a fresh node earns $0.075/s and the $500 level rung pays back in
+1h51m against the 1h bar — the sweep is right to refuse it beside $1.12q of cash, and the old log
+said only "nothing left inside the payback threshold", which reads as the opposite. Production of
+exactly 0 (BitNode 8 sets that multiplier to 0) ranks nothing at all and gets its own reason
+rather than blaming a threshold nothing was measured against.
+
 **A hash is worth exactly $250k, forever, and that number decides everything on the BN9 side.**
 `HashUpgradesMetadata.tsx` gives Sell for Money `value: 1e6` and BOTH `cost: 4` and
 `costPerLevel: 4`; the rate is flat only because `HashUpgrade.getCost` early-returns on `cost`
