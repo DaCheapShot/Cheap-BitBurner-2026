@@ -77,3 +77,17 @@ export const MONEY_SOFTCAP = 10e12;
  */
 export const MAX_MONEY_UPGRADE = "Increase Maximum Money";
 export const MIN_SECURITY_UPGRADE = "Reduce Minimum Security";
+
+/**
+ * The fallback: turn hashes into cash when nothing else is worth buying.
+ *
+ * WHY THIS IS NOT REDUNDANT WITH THE AUTO-SALE. The game auto-sells only the
+ * OVERFLOW - storeHashes() caps the balance at capacity and returns the
+ * remainder, and only that remainder is paid out. Everything at or below
+ * capacity simply sits, and a hacknet server's capacity is
+ * `32 * 2^cache` (HacknetServer.updateHashCapacity), so a cache-1 server parks
+ * 64 hashes = $16m that nothing will ever collect while there are no targets to
+ * spend on. Selling at the same $250k/hash releases it, and money compounds
+ * into home RAM where a parked hash does not.
+ */
+export const SELL_MONEY_UPGRADE = "Sell for Money";

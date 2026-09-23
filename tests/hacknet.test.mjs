@@ -712,6 +712,77 @@ export const tests = {
     assert(plan.reason.includes("sale"), `reason was "${plan.reason}"`);
   },
 
+  // Hashes nothing is going to spend are sold, because the game auto-sells only
+  // the OVERFLOW: storeHashes() caps the balance at capacity and pays out just
+  // the remainder, so everything at or below capacity sits forever. A cache-1
+  // server holds 32 * 2^1 = 64 hashes, which is $16m a server parked for the
+  // whole of a fresh BitNode 9's first prep, when no manager has published a
+  // target yet and money is what home RAM costs 5x of.
+  //
+  // The sale rate is identical to the auto-sale rate, so this is the same money
+  // collected now rather than never - never a discount taken for liquidity.
+  "hashes are sold when there is nothing worth buying": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const cfg = {
+      HASH_PRICE: 250000, HASH_SALE_COST: 4, HASH_HORIZON_S: 3600,
+      HASH_VALUE_MARGIN: 2, MONEY_SOFTCAP: 10e12,
+      MAX_MONEY_UPGRADE: "Increase Maximum Money",
+      MIN_SECURITY_UPGRADE: "Reduce Minimum Security",
+    };
+    const base = {
+      hashes: 63, capacity: 64,
+      levels: { [cfg.MAX_MONEY_UPGRADE]: 0, [cfg.MIN_SECURITY_UPGRADE]: 0 },
+      perLevel: { [cfg.MAX_MONEY_UPGRADE]: 50, [cfg.MIN_SECURITY_UPGRADE]: 50 },
+      units: [{ index: 0, cache: 1 }], budget: 1e12,
+      mults: { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 },
+    };
+
+    // No manager has published anything - the live case.
+    const idle = m.planHashes({ ...base, income: 1e9, targets: [] }, cfg);
+    assert(idle.sell === 15, `expected 15 sales of 4 hashes from 63, got ${idle.sell}`);
+    assert(!idle.spends.length, "nothing may be bought without a target");
+
+    // Targets exist but the batcher earns too little for any upgrade to clear
+    // the sale price - sell for the same reason.
+    const poor = m.planHashes(
+      { ...base, income: 1, targets: [{ host: "n00dles", moneyMax: 1e6, minSec: 3, reqSkill: 1 }] }, cfg);
+    assert(poor.reason.includes("sale price"), `reason was "${poor.reason}"`);
+    assert(poor.sell === 15, `a target nothing beats should still sell, got ${poor.sell}`);
+  },
+
+  // The two branches that must NOT sell: both mean a purchase IS worth making
+  // and is only out of reach, so the balance is being saved toward it. Selling
+  // there funds the cache upgrade and then leaves nothing to fill the larger
+  // store with, which is a slow loop that never buys the upgrade it planned.
+  "hashes being saved for a worthwhile buy are never sold": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const cfg = {
+      HASH_PRICE: 250000, HASH_SALE_COST: 4, HASH_HORIZON_S: 3600,
+      HASH_VALUE_MARGIN: 2, MONEY_SOFTCAP: 10e12,
+      MAX_MONEY_UPGRADE: "Increase Maximum Money",
+      MIN_SECURITY_UPGRADE: "Reduce Minimum Security",
+    };
+    const targets = [{ host: "phantasy", moneyMax: 1e9, minSec: 20, reqSkill: 1000 }];
+    const state = {
+      levels: { [cfg.MAX_MONEY_UPGRADE]: 0, [cfg.MIN_SECURITY_UPGRADE]: 0 },
+      perLevel: { [cfg.MAX_MONEY_UPGRADE]: 50, [cfg.MIN_SECURITY_UPGRADE]: 50 },
+      income: 1e12, targets, units: [{ index: 0, cache: 1 }], budget: 1e12,
+      mults: { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 },
+    };
+
+    // Short of hashes, store big enough: fills on its own in a minute or two.
+    const waiting = m.planHashes({ ...state, hashes: 20, capacity: 4096 }, cfg);
+    assert(waiting.reason.includes("waiting on hashes"), `reason was "${waiting.reason}"`);
+    assert(!waiting.sell, `sold ${waiting.sell} while saving up for a real buy`);
+
+    // Store too small to ever HOLD the bundle: cache is the answer, not a sale.
+    const cramped = m.planHashes({ ...state, hashes: 20, capacity: 32 }, cfg);
+    assert(cramped.cacheBuy, `expected a cache buy, reason was "${cramped.reason}"`);
+    assert(!cramped.sell, `sold ${cramped.sell} while upgrading cache to hold the bundle`);
+  },
+
   "no published targets means no server-targeted buys": async () => {
     const mods = await loadScripts();
     const m = mods["hacknet/math"];

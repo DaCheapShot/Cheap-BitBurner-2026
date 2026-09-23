@@ -381,10 +381,15 @@ export function minSecurityFactor(reqSkill, minSec) {
  * the per-target split, and over-crediting is the direction that buys upgrades
  * that do not repay.
  *
- * WHY UNSPENT IS FINE. Overflow hashes are auto-sold at exactly HASH_PRICE
- * (processAllHacknetServerEarnings), so refusing every candidate is a correct
- * outcome and never a leak. Every branch that buys nothing says which of the
- * four reasons it was.
+ * WHY REFUSING EVERY CANDIDATE IS CORRECT, AND WHY IT IS NOT THE WHOLE ANSWER.
+ * Overflow hashes are auto-sold at exactly HASH_PRICE
+ * (processAllHacknetServerEarnings), so an upgrade that cannot beat that rate
+ * is one worth refusing. But it is the OVERFLOW alone: storeHashes() caps the
+ * balance at capacity and pays out only the remainder, so a balance below
+ * capacity sits indefinitely. Hence `sell` - the two branches where nothing is
+ * worth buying at any balance turn the store into cash at the same rate, and
+ * the two where a purchase is merely out of reach hold it. Every branch that
+ * buys nothing says which of the four reasons it was.
  *
  * WHY ONE SPEND PER PAIR. Raising max money leaves the target below its new
  * maximum, and lowering minimum security leaves it above its new floor -
@@ -398,8 +403,23 @@ export function minSecurityFactor(reqSkill, minSec) {
  *                         MONEY_SOFTCAP, MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE }
  */
 export function planHashes(state, cfg) {
-  const none = (why) => ({ spends: [], cacheBuy: null, reason: why });
-  if (!state.targets.length) return none("no targets published by any manager");
+  const none = (why, sell = 0) => ({ spends: [], cacheBuy: null, sell, reason: why });
+
+  /**
+   * How many Sell-for-Money purchases the balance covers, each HASH_SALE_COST
+   * hashes for HASH_SALE_VALUE.
+   *
+   * Only ever called on the two outcomes where NOTHING is going to be bought.
+   * The game auto-sells the overflow alone - storeHashes() caps at capacity and
+   * pays out only the remainder - so everything at or below capacity sits
+   * forever, which at `32 * 2^cache` per server is 64 hashes and $16m a server
+   * parked while no manager has published a target. The rate is identical
+   * either way, so this is not a discount taken for liquidity; it is the same
+   * money, collected now rather than never.
+   */
+  const sellable = () => Math.floor(state.hashes / cfg.HASH_SALE_COST);
+
+  if (!state.targets.length) return none("no targets published by any manager", sellable());
 
   const upgrades = [cfg.MAX_MONEY_UPGRADE, cfg.MIN_SECURITY_UPGRADE];
   // Local copies: each buy changes what the next one is worth, and the level
@@ -466,22 +486,28 @@ export function planHashes(state, cfg) {
   }
 
   const spends = [...counts.values()];
-  if (spends.length) return { spends, cacheBuy: null, reason: `${spends.length} spend(s) planned` };
+  if (spends.length) return { spends, cacheBuy: null, sell: 0, reason: `${spends.length} spend(s) planned` };
 
   // Capacity first: a store too small to HOLD the bundle can never fill, while
   // a balance too small fills on its own in a minute or two.
   if (capacityShort > 0) {
     const cacheBuy = planCache(state);
+    // No sale here, and none in the balanceShort branch below either: both mean
+    // a purchase IS worth making and is merely out of reach, so the hashes are
+    // being saved toward it. Selling them would fund the cache upgrade and then
+    // leave nothing to fill the larger store with - the two branches that DO
+    // sell are the ones where nothing is worth buying at any balance.
     return {
       spends: [],
       cacheBuy,
+      sell: 0,
       reason: cacheBuy
         ? `hash capacity ${state.capacity} cannot hold a ${capacityShort}-hash buy - upgrading cache`
         : `hash capacity ${state.capacity} cannot hold a ${capacityShort}-hash buy, and cache does not fit the budget`,
     };
   }
   if (balanceShort > 0) return none(`waiting on hashes: ${state.hashes} of ${balanceShort}`);
-  return none("nothing beats the sale price");
+  return none("nothing beats the sale price", sellable());
 }
 
 /** The cheapest cache rung that fits the budget: always the lowest cache level. */

@@ -1,8 +1,8 @@
 import { planHashes } from "./math.js";
 import {
   TARGETS_MARKER, HACKNET_CASH_FRACTION,
-  HASH_PRICE, HASH_HORIZON_S, HASH_VALUE_MARGIN, MONEY_SOFTCAP,
-  MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE,
+  HASH_PRICE, HASH_SALE_COST, HASH_HORIZON_S, HASH_VALUE_MARGIN, MONEY_SOFTCAP,
+  MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE, SELL_MONEY_UPGRADE,
 } from "./config.js";
 
 /**
@@ -15,11 +15,20 @@ import {
  * 0 and they can do nothing. Split, this exits in about 20 ms having paid for
  * one read.
  *
- * WHY UNSPENT HASHES ARE NOT A LEAK. Overflow is auto-sold at exactly
- * HASH_PRICE - processAllHacknetServerEarnings computes
+ * WHY REFUSING EVERY CANDIDATE IS STILL CORRECT, AND WHAT IT DOES NOT COVER.
+ * The OVERFLOW is auto-sold at exactly HASH_PRICE -
+ * processAllHacknetServerEarnings computes
  * `wastedHashes / upgrade.cost * upgrade.value`, the same rate as buying Sell
- * for Money by hand. So refusing every candidate is a correct outcome, and the
- * only upgrades worth buying are the ones that are NOT money.
+ * for Money by hand - so no upgrade is worth buying unless it beats that rate,
+ * and the only ones worth buying are the ones that are NOT money.
+ *
+ * But only the overflow. storeHashes() caps the balance at capacity and pays
+ * out just the remainder, so everything at or BELOW capacity sits, and a
+ * hacknet server's capacity is `32 * 2^cache` - 64 hashes, $16m a server,
+ * parked for as long as nothing spends it. That is the whole of a fresh
+ * BitNode 9's first prep, when no manager has published a target yet. So the
+ * sweep sells when nothing is worth buying, at the same rate, and the balance
+ * is only held when a real purchase is being saved for.
  *
  * WHY THE TARGETS COME FROM A FILE. Increase Maximum Money and Reduce Minimum
  * Security only pay on a server the batcher is actually hitting, and which
@@ -51,18 +60,19 @@ export async function main(ns) {
   // getEnumHelper().nsGetMember and THROWS on a miss, so a fork that renames an
   // upgrade would take the sweep down; this turns it into one log line.
   const offered = new Set(ns.hacknet.getHashUpgrades());
-  for (const name of [MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE]) {
+  for (const name of [MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE, SELL_MONEY_UPGRADE]) {
     if (!offered.has(name)) {
       log(`WARN: this fork does not offer "${name}" - nothing to spend hashes on`);
       return;
     }
   }
 
+  // NO EARLY RETURN on an empty list. There is nothing to BUY without targets,
+  // but the hashes already in the store are still worth selling - and that is
+  // exactly the state a fresh BitNode 9 sits in for its whole first prep, with
+  // the hacknet producing and no manager having rescanned yet. planHashes
+  // decides; this reads the file and hands it over either way.
   const hosts = ns.read(TARGETS_MARKER).split("\n").map((s) => s.trim()).filter(Boolean);
-  if (!hosts.length) {
-    log("no targets published - no manager is running, or it has not rescanned yet");
-    return;
-  }
 
   const targets = hosts.map((host) => ({
     host,
@@ -111,7 +121,7 @@ export async function main(ns) {
       mults: { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 },
     },
     {
-      HASH_PRICE, HASH_HORIZON_S, HASH_VALUE_MARGIN, MONEY_SOFTCAP,
+      HASH_PRICE, HASH_SALE_COST, HASH_HORIZON_S, HASH_VALUE_MARGIN, MONEY_SOFTCAP,
       MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE,
     });
 
@@ -120,12 +130,17 @@ export async function main(ns) {
       log(`would spend ${s.hashes} hashes: ${s.upgrade} x${s.count} on ${s.host}`);
     }
     if (plan.cacheBuy) log(`would upgrade cache on #${plan.cacheBuy.index} for $${ns.format.number(plan.cacheBuy.price, 2)}`);
+    if (plan.sell) {
+      log(`would sell ${plan.sell * HASH_SALE_COST} hashes for ` +
+          `$${ns.format.number(plan.sell * HASH_SALE_COST * HASH_PRICE, 2)}`);
+    }
     log(`dry run: ${plan.reason} (income $${ns.format.number(income, 2)}/s over ` +
         `${targets.length} target(s))`);
     return;
   }
 
   let spent = 0;
+  let sold = 0;
   for (const s of plan.spends) {
     // One call per pair: raising max money and lowering minimum security both
     // put a streaming target off baseline, so the re-prep is paid once here
@@ -149,7 +164,23 @@ export async function main(ns) {
       : `WARN: cache upgrade on #${plan.cacheBuy.index} was refused`);
   }
 
-  if (!plan.spends.length && !plan.cacheBuy) {
+  // The fallback, and the reason the no-targets case no longer returns early:
+  // hashes at or below capacity are never auto-sold, so with nothing to buy
+  // they sit. One call, whatever the count - Sell for Money takes a count and
+  // pays value * count, and its cost is flat, so there is no ladder to walk.
+  if (plan.sell > 0) {
+    const hashes = plan.sell * HASH_SALE_COST;
+    if (ns.hacknet.spendHashes(SELL_MONEY_UPGRADE, "", plan.sell)) {
+      sold = hashes;
+      log(`sold ${hashes} hashes for $${ns.format.number(hashes * HASH_PRICE, 2)} - ${plan.reason}`);
+    } else {
+      // The balance moved between the plan and the call - the game credits
+      // production continuously, so this can only ever be a stale read down.
+      log(`WARN: selling ${hashes} hashes was refused - replanning next sweep`);
+    }
+  }
+
+  if (!plan.spends.length && !plan.cacheBuy && !sold) {
     // 2 fractional digits, never 0: isInteger suppresses decimals only BELOW
     // suffixStart, so (n, 0, 1000, true) prints both 1.6m and 2.05m as "2m".
     // A live gang log read `respect 2m (next recruit at 2m)` while 450k short.

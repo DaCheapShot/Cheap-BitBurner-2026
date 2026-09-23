@@ -1191,10 +1191,27 @@ rather than blaming a threshold nothing was measured against.
 `HashUpgradesMetadata.tsx` gives Sell for Money `value: 1e6` and BOTH `cost: 4` and
 `costPerLevel: 4`; the rate is flat only because `HashUpgrade.getCost` early-returns on `cost`
 when set — that field's own doc comment reads *"This property overrides the 'costPerLevel'
-property"*. **Overflow is auto-sold at the same rate** (`processAllHacknetServerEarnings` computes
-`wastedHashes / upgrade.cost * upgrade.value`), so spending nothing is a correct null action and
-never a leak — and every other upgrade has to beat the sale price by `HASH_VALUE_MARGIN` before it
-is bought.
+property"*. **The OVERFLOW is auto-sold at the same rate** (`processAllHacknetServerEarnings`
+computes `wastedHashes / upgrade.cost * upgrade.value`), so every other upgrade has to beat the
+sale price by `HASH_VALUE_MARGIN` before it is bought.
+
+**Only the overflow, though, and that is why the sweep sells.** `storeHashes()` caps the balance
+at capacity and pays out just the remainder, so everything at or *below* capacity sits — and a
+hacknet server's capacity is `32 * 2^cache` (`HacknetServer.updateHashCapacity`), 64 hashes at
+cache 1, **$16m parked per server** that nothing will ever collect while there is nothing to spend
+on. That is the whole of a fresh BitNode 9's first prep, where `CloudServerLimit` is 0 and
+`HomeComputerRamCost` is 5x, so cash is the binding constraint. So `planHashes` returns a `sell`
+count on the two outcomes where **nothing is worth buying at any balance** — no targets published,
+and nothing beats the sale price — and `hashes.js` takes it in one `spendHashes("Sell for Money")`
+call, the cost being flat so there is no ladder to walk. The rate is identical to the auto-sale, so
+this is the same money collected now rather than never, never a discount taken for liquidity.
+
+**The two branches that must NOT sell are the ones where a purchase is merely out of reach**:
+`waiting on hashes` (the store fills on its own in a minute or two) and the capacity-short branch
+that buys cache. Both mean the balance is being *saved* toward something that beats the sale price,
+and selling there funds the cache upgrade and then leaves nothing to fill the larger store with — a
+loop that never buys the upgrade it planned. Tests pin both directions: disabling the sale reddens
+one, extending it to the saving-up branch reddens the other.
 
 **Only two hash upgrades are ever bought, and both reduce to one number: the factor by which the
 batcher's income on that target moves.** Increase Maximum Money is a flat +2% below
