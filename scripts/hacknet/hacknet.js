@@ -92,11 +92,31 @@ export async function main(ns) {
     return;
   }
 
-  if (dry) {
-    for (const buy of plan.buys) {
-      log(`would buy ${buy.kind}${buy.index >= 0 ? ` on #${buy.index}` : ""} ` +
-          `for $${ns.format.number(buy.price, 2)}`);
+  // One line per (host, kind), in the order first bought: a sweep can take the
+  // same rung a dozen times and a line per rung would bury the summary. A new
+  // unit is named for the index the game will give it - numNodes() at purchase.
+  const prefix = isServer ? "hacknet-server-" : "hacknet-node-";
+  const describe = (buys) => {
+    const lines = new Map();
+    let fresh = owned;
+    for (const buy of buys) {
+      const host = prefix + (buy.kind === "unit" ? fresh++ : buy.index);
+      const key = `${host} ${buy.kind}`;
+      const l = lines.get(key) ?? { host, kind: buy.kind, n: 0, price: 0, payback: 0 };
+      l.n++;
+      l.price += buy.price;
+      // The first unit has no payback - nothing owned to derive a rate from.
+      l.payback = Math.max(l.payback, buy.payback ?? 0);
+      lines.set(key, l);
     }
+    return [...lines.values()].map((l) =>
+      `  ${l.host}: ${l.kind === "unit" ? "purchased" : `${l.kind} +${l.n}`} ` +
+      `for $${ns.format.number(l.price, 2)}` +
+      (l.payback > 0 ? `, payback ${ns.format.time(l.payback * 1000)}` : ""));
+  };
+
+  if (dry) {
+    for (const line of describe(plan.buys)) log(`would buy ${line.trim()}`);
     log(`dry run: ${plan.buys.length} buy(s), $${ns.format.number(plan.spent, 2)} of a ` +
         `$${ns.format.number(budget, 2)} budget - ${plan.reason}`);
     return;
@@ -125,4 +145,5 @@ export async function main(ns) {
 
   log(`bought ${done} of ${plan.buys.length} for $${ns.format.number(spent, 2)} ` +
       `of a $${ns.format.number(budget, 2)} budget - ${plan.reason}`);
+  for (const line of describe(plan.buys.slice(0, done))) log(line);
 }
