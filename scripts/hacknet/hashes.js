@@ -101,7 +101,7 @@ export async function main(ns) {
 
   const inc = ns.getTotalScriptIncome();
   // [0] sums onlineMoneyMade/onlineRunningTime over scripts running RIGHT NOW
-  // (NetscriptFunctions.ts) - and both batchers are just-in-time, so hack.js
+  // (NetscriptFunctions.ts) - and the batcher is just-in-time, so hack.js
   // credits its money and exits microseconds later. [0] is therefore dominated
   // by zeros and reads one to two orders of magnitude low. [1] is
   // scriptProdSinceLastAug / (playtimeSinceLastAug/1000), a real $/s rate - it

@@ -14,7 +14,7 @@
  *
  * CONTRACTS are imported, below. Those are values a second party reads without
  * knowing which batcher is up - sharemode.js and share.js, the shared worker
- * files, the home both managers live on - so a copy here was never free to
+ * files, the home the manager lives on - so a copy here was never free to
  * diverge. It was a second place to forget, pinned by a test.
  *
  * Import style throughout this folder is absolute-from-root and extensionless:
@@ -32,14 +32,14 @@
 // ------------------------------------------------------------- contracts ----
 
 /**
- * Shared with the shotgun, defined once in scripts/config.js.
+ * Defined once in scripts/config.js, because a second party reads them.
  *
  * The share protocol (marker, gate port, worker, fraction bounds and the parser)
  * is written by sharemode.js and peeked by share.js, neither of which knows
  * which batcher is running; a different port here left `sharemode.js on`
- * looking broken under continuous. The batch workers are ONE set of files for
- * both systems - their code was identical and the report port was always an
- * argument - so boot's orphan kill covers either system with one list.
+ * looking broken under continuous. The batch workers are the same files the
+ * retired shotgun ran - the report port was always an argument - so boot's
+ * orphan kill covers a stale shotgun's batches with the same list.
  */
 export {
   BATCH_OPS, OP_WORKER, HOME_RESERVE_GB, PORT_CAPACITY,

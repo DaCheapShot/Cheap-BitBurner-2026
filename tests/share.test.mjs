@@ -183,9 +183,9 @@ export const tests = {
   // ---------------------------------------------------------------- plan ----
 
   "the wanted thread count is a fraction of the whole fleet": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     const ns = poolNs();
-    const pool = prepper.buildWorkerPool(ns);
+    const pool = server.ServerPool.build(ns);
     const usable = pool.usableRam;
     const p = share.planShare(pool, 4.0, 0.25, 0);
     assert(p.want === Math.floor((usable * 0.25) / 4.0), `want was ${p.want} of ${usable}GB usable`);
@@ -196,20 +196,20 @@ export const tests = {
   // almost none of it depending where in a cycle you ask, so a fraction of it
   // would size share differently every time it was asked.
   "the size does not move when the pool is busy": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     const ns = poolNs();
-    const idle = share.planShare(prepper.buildWorkerPool(ns), 4.0, 0.25, 0).want;
+    const idle = share.planShare(server.ServerPool.build(ns), 4.0, 0.25, 0).want;
     ns._used.p0 = 4000; // a volley in flight
-    const busy = share.planShare(prepper.buildWorkerPool(ns), 4.0, 0.25, 0).want;
+    const busy = share.planShare(server.ServerPool.build(ns), 4.0, 0.25, 0).want;
     assert(idle === busy, `want moved with free RAM: ${idle} idle vs ${busy} busy`);
   },
 
   // Asking for the same fraction repeatedly must be idempotent, or every cycle
   // would add another quarter of the pool until nothing was left for hacking.
   "asking twice for the same fraction adds nothing the second time": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     const ns = poolNs();
-    const pool = prepper.buildWorkerPool(ns);
+    const pool = server.ServerPool.build(ns);
     const { want } = share.planShare(pool, 4.0, 0.25, 0);
     assert(share.planShare(pool, 4.0, 0.25, want).deficit === 0,
       "a satisfied want must ask for nothing");
@@ -218,17 +218,17 @@ export const tests = {
   // Turning share down is the job of the WORKERS - they poll the marker and
   // exit. The manager owning a shrink would mean owning ns.kill (0.50 GB) too.
   "an over-supply is never turned into a negative deficit": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     const ns = poolNs();
-    const pool = prepper.buildWorkerPool(ns);
+    const pool = server.ServerPool.build(ns);
     const p = share.planShare(pool, 4.0, 0.10, 999999);
     assert(p.deficit === 0, `deficit should floor at 0, got ${p.deficit}`);
   },
 
   "share off wants no threads at all, however much RAM is free": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     const ns = poolNs();
-    const pool = prepper.buildWorkerPool(ns);
+    const pool = server.ServerPool.build(ns);
     assert(share.planShare(pool, 4.0, 0, 0).want === 0, "fraction 0 wants nothing");
     assert(share.planShare(pool, 0, 0.25, 0).want === 0, "an unknown thread cost wants nothing");
   },
@@ -241,9 +241,9 @@ export const tests = {
   // Home still goes first, but only for the rounding remainder - the core bonus
   // it buys is ln(1.4375)/25 = 1.45 points even if EVERY thread sat there.
   "share is spread proportionally, not poured into the biggest host": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     const ns = poolNs();
-    const pool = prepper.buildWorkerPool(ns);
+    const pool = server.ServerPool.build(ns);
 
     const res = share.topUpShare(ns, pool, 4.0, 0.25, 0);
     assert(res.placements[0].host === "home", `home should lead, got ${res.placements[0].host}`);
@@ -264,14 +264,14 @@ export const tests = {
   // can be missing share.js. Every exec off home returned 0, share ran on one
   // host out of the network, and the log blamed a busy pool.
   "a fleet missing the worker is named, not silently under-shared": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     // Bare keys in the mock exist everywhere; a host-prefixed key exists only
     // there. So hack.js is fleet-wide and share.js reached home alone.
     const ns = makeNs({
       hosts: { home: 1024, p0: 4096, p1: 2048 },
       files: { "/scripts/hack.js": "x", "home:/scripts/share.js": "ns.share()" },
     });
-    const pool = prepper.buildWorkerPool(ns);
+    const pool = server.ServerPool.build(ns);
 
     const res = share.topUpShare(ns, pool, 4.0, 0.25, 0);
     assert(res.noFile.includes("p0") && res.noFile.includes("p1"),
@@ -286,13 +286,13 @@ export const tests = {
   // Pass 2. Honouring the requested fraction matters more than the pool's shape,
   // and SHARE_MAX_FRACTION still bounds the total.
   "hosts that cannot take their quota spill onto the ones that can": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     const ns = makeNs({
       hosts: { home: 1024, p0: 4096, p1: 2048 },
       files: { "/scripts/hack.js": "x", "home:/scripts/share.js": "ns.share()",
                "p0:/scripts/share.js": "ns.share()" },
     });
-    const pool = prepper.buildWorkerPool(ns);
+    const pool = server.ServerPool.build(ns);
 
     // p1 cannot run it, so its quota has to come from home and p0.
     const res = share.topUpShare(ns, pool, 4.0, 0.25, 0);
@@ -311,9 +311,9 @@ export const tests = {
   },
 
   "the top-up hands the same bytes to only one host": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     const ns = poolNs({ home: 64, p0: 128 });
-    const pool = prepper.buildWorkerPool(ns);
+    const pool = server.ServerPool.build(ns);
 
     const res = share.topUpShare(ns, pool, 4.0, 0.90, 0);
     for (const p of res.placements) {
@@ -330,9 +330,9 @@ export const tests = {
   // `pending`: these bytes would be subtracted once as used and again as
   // reserved, and the next prep wave sized against a pool short by all of share.
   "the top-up leaves no reservation behind": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     const ns = poolNs();
-    const pool = prepper.buildWorkerPool(ns);
+    const pool = server.ServerPool.build(ns);
 
     const res = share.topUpShare(ns, pool, 4.0, 0.25, 0);
     assert(res.launched > 0, "nothing was launched, so this proves nothing");
@@ -345,14 +345,14 @@ export const tests = {
   // worker to all 68 hosts - a diagnostic naming the wrong cause, which is worse
   // than no diagnostic because it is acted on.
   "a host that HAS the worker but refuses the exec is reported separately": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     const ns = poolNs();
     const realExec = ns.exec;
     // Every host has share.js; p0 refuses anyway.
     ns.exec = (file, host, ...rest) =>
       (host === "p0" && String(file).includes("share") ? 0 : realExec(file, host, ...rest));
 
-    const res = share.topUpShare(ns, prepper.buildWorkerPool(ns), 4.0, 0.25, 0);
+    const res = share.topUpShare(ns, server.ServerPool.build(ns), 4.0, 0.25, 0);
 
     assert(res.noFile.length === 0,
       `share.js is on every host, so nothing should be reported missing: ${JSON.stringify(res.noFile)}`);
@@ -369,12 +369,12 @@ export const tests = {
   // deploy.js has not reached every host the moment a server is bought, and exec
   // returns 0 there. One unreachable host must not stop the rest of the fleet.
   "a host that cannot run the worker is skipped, not fatal": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     const ns = poolNs();
     const realExec = ns.exec;
     ns.exec = (file, host, ...rest) => (host === "home" ? 0 : realExec(file, host, ...rest));
 
-    const res = share.topUpShare(ns, prepper.buildWorkerPool(ns), 4.0, 0.25, 0);
+    const res = share.topUpShare(ns, server.ServerPool.build(ns), 4.0, 0.25, 0);
     assert(res.launched > 0, "the rest of the fleet should still share");
     assert(!res.placements.some((p) => p.host === "home"),
       "home refused the exec, so it must not be recorded as placed");
@@ -382,14 +382,14 @@ export const tests = {
 
   // The whole point of the census: workers outlive the manager that started them.
   "a restarted manager adopts the running workers instead of doubling them": async () => {
-    const { "continuous/lib/share": share, prepper } = await loadScripts();
+    const { "continuous/lib/share": share, "continuous/lib/server": server } = await loadScripts();
     const ns = poolNs();
 
-    const first = share.topUpShare(ns, prepper.buildWorkerPool(ns), 4.0, 0.25, 0);
+    const first = share.topUpShare(ns, server.ServerPool.build(ns), 4.0, 0.25, 0);
     assert(first.launched > 0, "the first manager launched nothing");
 
     // Fresh pool, fresh census - exactly what a restarted manager sees.
-    const pool = prepper.buildWorkerPool(ns);
+    const pool = server.ServerPool.build(ns);
     const alive = share.shareCensus(ns, pool.servers.map((s) => s.hostname)).threads;
     assert(alive === first.launched, `census saw ${alive} of ${first.launched} live threads`);
 

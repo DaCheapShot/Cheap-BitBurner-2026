@@ -358,8 +358,7 @@ export function planThreads(math, snap, rawSteal, opts = {}) {
  * planThreads instead would mean turning a thread count into a fraction and
  * letting the floor above turn it back, and at the boundary that does not
  * round-trip - a probe for h threads can come back as h-1 and the search reads
- * it as "does not fit". The shotgun's managerCore.js carries the same split for
- * the same reason.
+ * it as "does not fit".
  *
  * @param {number} hack thread count, already >= 1
  * @param {number} perThread math.hackFractionPerThread(snap), passed in so a

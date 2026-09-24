@@ -32,9 +32,9 @@
  *
  * argv: [0] gate port number
  *
- * Launched by the manager, never by hand - see managerCore.topUpShare. The
- * manager owns the RAM pool, and anything else exec-ing into it races the volley
- * it has already planned.
+ * Launched by the manager, never by hand - see serviceShare in
+ * continuous/lib/share.js. The manager owns the RAM pool, and anything else
+ * exec-ing into it races the batches it has already planned.
  */
 
 /** @param {NS} ns */

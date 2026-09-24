@@ -12,81 +12,12 @@ import { loadScripts, readScript, assert } from "./harness.mjs";
  */
 
 export const tests = {
-  // A hacknet server filled with batch workers produces LITERALLY ZERO hashes:
-  // calculateHashGainRate carries `ramRatio = 1 - ramUsed/maxRam` as a plain
-  // factor, and HacknetServer.updateRamUsed recomputes the rate on every change.
-  // They are created with adminRights and pushed onto home's network, so both
-  // pools reach them without being told to.
-  //
-  // makeNs's `hosts` map is hostname -> maxRam, and its scan("home") returns
-  // every other host in it - which is exactly how a hacknet server arrives.
-  "the shotgun pool does not admit a hacknet server": async () => {
-    const { ram: ramMod } = await loadScripts();
-    const { makeNs } = await import("./mockNs.mjs");
-
-    const ns = makeNs({ hosts: { home: 64, "n00dles": 4, "hacknet-server-0": 1024 } });
-    const pool = ramMod.ServerPool.build(ns, { homeReserve: 0 });
-    const hosts = pool.servers.map((s) => s.hostname);
-
-    assert(!hosts.includes("hacknet-server-0"),
-      "the pool admitted hacknet-server-0 - a filled hacknet server earns no hashes");
-    assert(hosts.includes("n00dles"), "ordinary hosts must still be admitted");
-  },
-
-  // The pool guards above are the LAST line, not the only one. The network walk
-  // itself must not hand a hacknet server to anyone, because most consumers of
-  // it are not pools: they are target rankers, and the whole getNormalServer
-  // family THROWS on a hacknet server rather than returning a useless number.
-  //
-  // Live BitNode 9, first startup:
-  //   getServerRequiredHackingLevel: Cannot be executed on hacknet-server-0.
-  //   The server must not be a hacknet server.
-  //     continuous/lib/target.js:33@candidates
-  // The manager died at startup, so boot restarted it into the same wall once a
-  // minute for the life of the node.
-  // The continuous copy of this is in tests/continuous.test.mjs, beside its own
-  // pool guards - that tree has its own module loader.
-  "the shotgun's scanAll does not hand out a hacknet server": async () => {
-    const { ram: ramMod } = await loadScripts();
-    const { makeNs } = await import("./mockNs.mjs");
-    const ns = makeNs({ hosts: { home: 64, "n00dles": 4, "hacknet-server-0": 1024 } });
-
-    const seen = ramMod.ServerPool.scanAll(ns);
-    assert(!seen.includes("hacknet-server-0"),
-      "scanAll returned hacknet-server-0 - every caller that is not a pool will throw on it");
-    assert(seen.includes("n00dles") && seen.includes("home"), "scanAll dropped an ordinary host");
-  },
-
-  // Behavioural, against a mock that throws exactly as the game does, because
-  // this is the call that actually died. Both batchers rank targets off the same
-  // walk and BOTH carried the same unguarded line - prepper.js:155 and
-  // continuous/lib/target.js:33 - so one of them passing proves nothing about
-  // the other. The continuous half is pinned in tests/continuous.test.mjs.
-  "the shotgun's target ranking survives a hacknet server": async () => {
-    const mods = await loadScripts();
-    const { makeNs } = await import("./mockNs.mjs");
-    const ns = makeNs({
-      hosts: { home: 64, "n00dles": 4, "hacknet-server-0": 1024 },
-      servers: {
-        "n00dles": { moneyMax: 1e9, requiredHackingSkill: 1 },
-        "hacknet-server-0": { moneyMax: 0, requiredHackingSkill: 1 },
-      },
-    });
-
-    // The shotgun asks its math backend for max money in one round trip, so the
-    // stub only has to answer for whatever survived the walk.
-    const math = { maxMoneyOfAll: async (_ns, hs) => Object.fromEntries(hs.map((h) => [h, 1e9])) };
-    const ranked = await mods.prepper.rankTargets(ns, math);
-    assert(!ranked.includes("hacknet-server-0"), "the shotgun ranked a hacknet server");
-    assert(ranked.includes("n00dles"), "the shotgun dropped the real target");
-  },
-
   // Server's own constructor renames any ordinary server whose hostname starts
   // with "hacknet-node-" or "hacknet-server-", so the namespace is reserved and
   // the prefix test cannot false-positive. The alternative, ns.getServer(host)
-  // .isHacknetServer, costs 2.00 GB - and ram.js is deliberately 0.35.
-  "the pools test the prefix without paying for getServer": () => {
-    for (const mod of ["ram", "continuous/lib/server"]) {
+  // .isHacknetServer, costs 2.00 GB - and the pool is deliberately cheap.
+  "the pool tests the prefix without paying for getServer": () => {
+    for (const mod of ["continuous/lib/server"]) {
       const src = readScript(mod);
       assert(src.includes("HACKNET_HOST_PREFIX"),
         `${mod}.js must use the shared prefix constant, not a literal`);
@@ -889,28 +820,18 @@ export const tests = {
   // Whichever batcher is up publishes what it is working. Hash upgrades only
   // pay on a server the batcher is actually hitting, and which system runs is
   // the user's choice - so the reader must not have to know which.
-  "both managers publish their targets and boot clears the marker": () => {
+  "the manager publishes its targets and boot clears the marker": () => {
     const core = readScript("continuous/core");
     assert(core.includes("TARGETS_MARKER"),
       "continuous/core.js must publish its admitted targets");
     assert(/ns\.write\(\s*TARGETS_MARKER/.test(core),
       "continuous/core.js must WRITE the marker, not just import it");
 
-    // managerCore.js has TWO write sites - the initial target pick and the
-    // later switch - and a single existence check (.test, not a global match)
-    // is satisfied by either alone, so deleting the switch-site write would not
-    // turn this test red. Count both instead.
-    const shotgun = readScript("managerCore");
-    const shotgunWrites = shotgun.match(/ns\.write\(\s*TARGETS_MARKER/g) ?? [];
-    assert(shotgunWrites.length >= 2,
-      "managerCore.js must publish its target on both pick and switch");
-
     // A stale list has hashes bought for a server nobody is hitting, and hash
     // upgrades do not refund. boot clears it on BOTH paths where no manager of
     // any system survives: mid-run (a swap) and never-at-all (--no-manager).
-    // Counted rather than .test-ed for the same reason as managerCore's two
-    // sites above - a single occurrence would still pass if either clear site
-    // were deleted.
+    // Counted rather than .test-ed: a single occurrence would still pass if
+    // either clear site were deleted.
     const boot = readScript("boot");
     const bootClears = boot.match(/ns\.write\(\s*TARGETS_MARKER\s*,\s*""/g) ?? [];
     assert(bootClears.length >= 2,

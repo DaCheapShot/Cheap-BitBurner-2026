@@ -438,7 +438,7 @@ export function planHashes(state, cfg) {
 
   // Named for the docstring's `incomeShare`, not `share` - a bare `share` local
   // is billed 2.40 GB as `ns.share` in every importer (both hacknet entries and
-  // boot.js), the same identifier tax gang/math.js and managerCore.js dodge.
+  // boot.js), the same identifier tax gang/math.js dodges.
   const incomeShare = state.income / live.length;
 
   for (;;) {

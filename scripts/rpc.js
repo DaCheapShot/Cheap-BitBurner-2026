@@ -32,7 +32,8 @@
 /**
  * Reply ports start here, and each CALLER gets RPC_PORT_BASE + its own pid.
  *
- * Ports 1-4 are taken (shotgun reports, share gate, continuous reports, gang),
+ * Ports 1-4 are taken (1 left unused for stale shotgun workers, share gate,
+ * continuous reports, gang),
  * and a single shared reply port would let two resident callers read each
  * other's answers - a wrong number, silently, which is the worst failure class
  * in this repo. Any positive integer is a legal port: CONSTANTS.NumNetscriptPorts
