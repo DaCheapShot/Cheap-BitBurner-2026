@@ -1,6 +1,7 @@
-import { buildWorkerPool, shareRam } from "./prepper.js";
+import { ServerPool } from "scripts/continuous/lib/server";
 import {
-  SHARE_MARKER, SHARE_PORT, SHARE_FRACTION, SHARE_MAX_FRACTION,
+  SHARE_MARKER, SHARE_PORT, SHARE_FRACTION, SHARE_MAX_FRACTION, SHARE_WORKER,
+  SHARE_RAM_FALLBACK, HOME_RESERVE_GB,
   shareFractionFrom, shareBonusFor, SHARE_HOLD_MARKER, shareHeld,
 } from "./config.js";
 
@@ -25,13 +26,13 @@ import {
  * changed from the terminal: editing config.js means waiting on the filesync
  * extension, which is the least reliable link in this whole setup.
  *
- * RAM: 1.60 base + prepper.js 2.00 + getSharePower 0.20 = 3.80 GB
- *      (ns.read, ns.write and ns.tprint are all 0 GB)
+ * RAM: see tests/ram.test.mjs (ns.read, ns.write and ns.tprint are all 0 GB)
  *
- * It imports the manager's own buildWorkerPool rather than measuring the
- * network itself, which is most of that cost. Worth it: a status screen that
- * reports a different pool from the one the manager will actually divide is a
- * diagnostic that lies, and this repo has already been burned by exactly that.
+ * It builds the pool with the continuous manager's own ServerPool and home
+ * reserve rather than measuring the network itself, which is most of that
+ * cost. Worth it: a status screen that reports a different pool from the one
+ * the manager will actually divide is a diagnostic that lies, and this repo has
+ * already been burned by exactly that.
  * This is a hand-run tool on home, so the GB does not compete with anything.
  */
 
@@ -103,9 +104,9 @@ export async function main(ns) {
     ns.tprint(
       wanted === 0
         ? `share mode OFF. Every share thread exits within 10s; the manager ` +
-          `reclaims the RAM on its next cycle.`
+          `reclaims the RAM on its next rescan.`
         : `share mode ON at ${pct(wanted)} of the pool${clamped}. The manager picks ` +
-          `this up at the top of its next cycle.`,
+          `this up on its next rescan.`,
     );
     return;
   }
@@ -115,8 +116,8 @@ export async function main(ns) {
   // thread counts by an intelligence bonus and by home's core count before
   // taking the log, and neither is visible to shareBonusFor.
   const power = ns.getSharePower();
-  const pool = buildWorkerPool(ns);
-  const ram = shareRam(ns);
+  const pool = ServerPool.build(ns, { homeReserve: HOME_RESERVE_GB });
+  const ram = ns.getScriptRam(SHARE_WORKER, "home") || SHARE_RAM_FALLBACK;
 
   ns.tprint(
     `\nshare mode: ${current > 0 ? `ON at ${pct(current)} of the pool` : "OFF"}` +

@@ -1085,9 +1085,9 @@ export const tests = {
     assert(faction.ns._files[SHARE_HOLD_MARKER] === "", "faction work must release it");
   },
 
-  // One reader for both managers, or a hold reaches one batcher and not the other.
-  "both managers read share through the hold": () => {
-    for (const f of ["managerCore", "continuous/lib/share"]) {
+  // The manager's one share reader must honour the hold.
+  "the manager reads share through the hold": () => {
+    for (const f of ["continuous/lib/share"]) {
       const src = readScript(f).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
       assert(/effectiveShareFraction\(ns\.read\(SHARE_MARKER\),\s*holdText\)/.test(src),
         `${f}.js must read share through effectiveShareFraction`);

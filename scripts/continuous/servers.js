@@ -15,8 +15,8 @@ import {
  * Per-target state report: prepped or not, money, security, and the steal
  * fraction the continuous batcher's own calculator would pick right now.
  *
- * Launches nothing, allocates nothing, touches no port - safe to run beside a
- * manager of either system.
+ * Launches nothing, allocates nothing, touches no port - safe to run beside
+ * the manager.
  *
  *   run scripts/continuous/servers.js                 one pass, then exit
  *   run scripts/continuous/servers.js --loop           redraw every 5s

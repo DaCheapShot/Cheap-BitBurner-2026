@@ -21,9 +21,9 @@ import { RAM_SAFETY_FRACTION, HACKNET_HOST_PREFIX } from "scripts/continuous/con
  * harness's pool report, a future census) gets to stay cheap.
  *
  * ---------------------------------------------------------------------------
- * How this differs from scripts/ram.js, and why it has to
+ * How this differs from the retired shotgun's pool, and why it has to
  *
- * The shotgun refreshes its pool at cycle start, when NOTHING is in flight, so
+ * The shotgun refreshed its pool at cycle start, when NOTHING is in flight, so
  * `pending` and the game's own used RAM can never describe the same worker.
  * A stream has workers in flight permanently, so that separation has to be
  * maintained by hand:
@@ -209,7 +209,16 @@ export class ServerPool {
 
     for (const host of hosts) {
       if (excluded.has(host)) continue;
-      // See scripts/ram.js: a hacknet server holding workers earns no hashes.
+      // A hacknet server's hash rate carries `1 - ramUsed/maxRam` as a plain
+      // factor (calculateHashGainRate), and updateRamUsed recomputes it on every
+      // change - so a hacknet server holding batch workers produces LITERALLY
+      // ZERO hashes. They arrive here unasked: adminRights is set at creation
+      // and Player.createHacknetServer pushes them onto home's network.
+      //
+      // The prefix is reserved by the game - Server's constructor renames any
+      // ordinary server that collides - so this cannot false-positive, and it
+      // costs nothing. Asking instead via the isHacknetServer field of ns's
+      // getServer call is 2.00 GB.
       if (host.startsWith(HACKNET_HOST_PREFIX)) continue;
       if (host === "home" && !includeHome) continue;
       if (!ns.hasRootAccess(host)) continue;
@@ -233,12 +242,24 @@ export class ServerPool {
   }
 
   /** Every hostname reachable from home, home included. */
-  // Hacknet servers are filtered out of the RESULT, not out of the walk - see
-  // scripts/ram.js's copy for why, and for the live BitNode 9 failure that put
-  // the filter here rather than only at pool admission. Short version: most
-  // callers of this are target rankers, not pools, and getNormalServer THROWS
-  // on a hacknet server, so a missed filter is a dead manager rather than a bad
-  // ranking.
+  //
+  // MINUS the hacknet. THE FILTER BELONGS HERE, not only at pool admission where
+  // it started. Most callers of this walk are not pools: they are target
+  // rankers, and the whole getNormalServer family THROWS on a hacknet server
+  // rather than returning a useless number - all 23 of
+  // getServerRequiredHackingLevel, getServerMaxMoney, the op times, the analyze
+  // calls, hack/grow/weaken, nuke and every port opener. So a missing filter is
+  // not a bad ranking, it is a dead manager:
+  //
+  //   getServerRequiredHackingLevel: Cannot be executed on hacknet-server-0.
+  //   The server must not be a hacknet server.
+  //
+  // which killed this manager on its first BitNode 9 startup, and had boot
+  // restart it into the same wall once a minute.
+  //
+  // Filtered on the way OUT rather than during the walk: nothing hangs off a
+  // hacknet server today, but dropping one from the queue would silently orphan
+  // anything that ever did.
   static scanAll(ns) {
     const seen = new Set(["home"]);
     const queue = ["home"];
@@ -375,7 +396,7 @@ export class ServerPool {
    * This is a WEAKER remedy than simulating placement. It models per-host
    * flooring, which is exactly the failure above, but not four ops competing
    * for the same hosts nor fragmentation shifting as batches land. If "no room"
-   * survives this, capacity.js already has simulateStream for the real thing.
+   * survives this, simulating placement is the real fix.
    *
    * Deliberately based on CAPACITY, not on freeRam: a budget computed from free
    * RAM shrinks as the streams fill it, which would evict the very streams

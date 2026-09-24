@@ -18,12 +18,10 @@ import {
  *   ns.getPortHandle 0
  *
  * ---------------------------------------------------------------------------
- * ONE COPY, BOTH BATCHERS
+ * RULES LEARNED THE EXPENSIVE WAY
  *
- * scripts/managerCore.js imports shareCensus, planShare and topUpShare from
- * here. They began as a port of the shotgun's, which learned every rule below
- * the expensive way; the two copies had become identical, so the shotgun's was
- * deleted. serviceShare stays per batcher - its logging and cadence differ.
+ * These began as a port of the retired shotgun's share code, which learned
+ * every rule below the expensive way.
  * A "cleaner" version of any one of these rules is a bug that already happened:
  *
  *   - placement is PROPORTIONAL, not biggest-host-first
@@ -35,7 +33,7 @@ import {
  * ---------------------------------------------------------------------------
  * What is deliberately NOT here
  *
- * ns.getSharePower (0.20 GB). managerCore reads it because the game counts a
+ * ns.getSharePower (0.20 GB). The shotgun read it because the game counts a
  * worker's threads only from its first ns.share() call, so a number derived
  * from the thread count overstates on the cycle that launches. The census below
  * reads ns.ps, which counts PROCESSES THAT ARE STILL RUNNING - so the failure
@@ -260,10 +258,10 @@ export function topUpShare(ns, pool, ramPerThread, fraction, alive, aliveByHost 
  * released, so a budget taken first would price RAM that share is about to take
  * and the calculator would commit a steal fraction it cannot place.
  *
- * One call site is enough here, unlike the shotgun's two. managerCore needs a
- * second hook inside prep because a shotgun prep BLOCKS for up to ten minutes,
- * so a toggle would look broken until it finished. Continuous rescans on a
- * fixed timer regardless of what prep is doing.
+ * One call site is enough. The retired shotgun needed a second hook inside prep
+ * because its prep BLOCKED for up to ten minutes, so a toggle would look broken
+ * until it finished. Continuous rescans on a fixed timer regardless of what
+ * prep is doing.
  *
  * Silent when share is off and nothing is running, which is the normal case for
  * the whole early game.

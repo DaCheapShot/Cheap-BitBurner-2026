@@ -15,9 +15,10 @@ const SCRIPTS = path.resolve(import.meta.dirname, "..", "scripts");
  */
 const NESTED = [
   "continuous/config.js",
-  // managerCore.js imports the share functions from here, so the shotgun and
-  // the continuous batcher run one copy of them.
+  // The share census, planner and top-up; tests/share.test.mjs drives them directly.
   "continuous/lib/share.js",
+  // The pool the share tests plan against - the continuous manager's own.
+  "continuous/lib/server.js",
   // The gang subsystem's pure modules. gang/math.js is where every gang
   // decision is made and it holds no ns call, so it is testable directly -
   // which is the point of putting the decisions there rather than in the

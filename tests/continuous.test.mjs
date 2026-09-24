@@ -561,8 +561,7 @@ export const tests = {
   },
 
   // Behavioural, against a mock that throws exactly as the game does, because
-  // this is the call that actually died. The shotgun's twin is pinned in
-  // tests/hacknet.test.mjs - both trees carried the same unguarded line.
+  // this is the call that actually died.
   "target ranking survives a hacknet server on the network": async () => {
     const { mods } = await loadContinuous();
     const ns = makeNs({
@@ -4218,7 +4217,7 @@ export const tests = {
   // So they are IMPORTED, not copied. This pins that a copy does not creep
   // back: a local `export const SHARE_PORT` would shadow nothing and diverge
   // silently, which is how the copies were kept in step before - by this test.
-  "the share protocol and workers are the shotgun's, not a copy": async () => {
+  "the share protocol and workers are scripts/config.js's, not a copy": async () => {
     const { sources } = await loadContinuous();
     const src = stripComments(sources.get("config.js"));
     for (const key of ["SHARE_MARKER", "SHARE_PORT", "SHARE_WORKER", "SHARE_FRACTION",

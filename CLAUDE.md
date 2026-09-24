@@ -45,9 +45,8 @@ Everything runs from the in-game terminal. `boot.js` is the entry point and supe
 
 ```
 run scripts/boot.js                     # root -> deploy -> cloud -> continuous batcher
-run scripts/boot.js --shotgun           # the volley batcher instead
 run scripts/boot.js --target omega-net  # pin the manager's target instead of auto-picking
-run scripts/boot.js --targets 5         # continuous only; the shotgun ignores it
+run scripts/boot.js --targets 5         # cap how many targets the manager runs
 run scripts/boot.js --once --no-cloud
 run scripts/boot.js --no-formulas       # force the *Analyze math path
 run scripts/boot.js --no-contracts      # do not solve coding contracts
@@ -55,11 +54,11 @@ run scripts/boot.js --no-sing           # do not run the singularity supervisor
 run scripts/boot.js --no-hacknet        # do not buy hacknet nodes or spend hashes
 ```
 
-**Boot chooses between TWO batchers**, and the choice is a flag, not a marker - retype it if
-you restart boot. `scripts/continuous/` is the default and the better earner. `--shotgun` runs
-`scripts/manager.js`. Neither has a formulas BUILD: each manager's math module uses
-Formulas.exe when owned, and the continuous one re-checks every rescan, so buying the program
-upgrades the running process. There is no calibration step any more: the per-thread security
+**There is one batcher**, `scripts/continuous/`. A second, the volley-firing "shotgun"
+(`scripts/manager.js` and its `managerCore`/`prepper`/`math`/`verify`/`ram`/`prep`/`capacity`
+modules), was removed as the worse earner; its lessons survive in the comments that cite it.
+There is no formulas BUILD: the manager's math module uses Formulas.exe when owned and
+re-checks every rescan, so buying the program upgrades the running process. There is no calibration step any more: the per-thread security
 constants are measured by one `rpc.js` call at manager startup - see `rpc.js` below.
 
 Individual pieces, useful when diagnosing:
@@ -67,10 +66,7 @@ Individual pieces, useful when diagnosing:
 ```
 run scripts/root.js                     # open ports + NUKE everything reachable
 run scripts/deploy.js                   # scp workers home -> every rooted host
-run scripts/capacity.js --steal 0.05    # RAM/target/batch-size analysis, launches nothing
-run scripts/manager.js --dry-run        # plan a volley and print it
-run scripts/manager.js --once --verbose # one volley, measured vs planned outcome
-run scripts/prep.js --target <host>     # prep one target without the manager
+run scripts/continuous/servers.js       # per-target state + the steal the calculator would pick
 run scripts/connectme.js CSEC           # print the connect chain to a host
 run scripts/connectme.js --factions     # routes + backdoor status for faction servers
 run scripts/sharemode.js                # share status: power, pool, what each fraction buys
@@ -91,27 +87,24 @@ node tests/run.mjs                      # run the test suite
 
 **Only one process may own the RAM pool and the report port.** `port.read()` removes the
 message and `Server.pending` is per-process memory, so a second owner steals reports and
-over-commits the same RAM. There are **two** manager files — `manager.js` and
-`continuous/manager.js` — and they are alternatives, not services. Only one may run. (It was
-four: each system's formulas/analyze pair collapsed into one file when its math module took
-both backends. The retired `manager-formulas.js` files are still killed as rivals — filesync
-never deletes from the game, so a stale copy can still be running.) Do not run `prep.js` alongside any of them —
-prep runs *inside* the manager. `boot.js` enforces this by killing every rival before it starts
-the one it wants (duplicates of the same file: lowest PID wins).
+over-commits the same RAM. `continuous/manager.js` is the only manager file, but **retired
+managers are still rivals**: `manager.js` (the shotgun) and both `manager-formulas.js` files are
+gone from disk, and filesync never deletes from the game, so a stale copy can still be running.
+`boot.js` kills every one before starting the manager (`RETIRED_MANAGERS`; duplicates of the
+manager itself: lowest PID wins).
 
-The continuous side guards itself too: `findRivals` in `continuous/core.js` **aborts** rather
-than starting beside any other manager, and does not kill the rival — which system runs is the
-user's decision. That is why boot has to clear the others first: a survivor does not make the
-incoming manager degrade, it makes it exit, and boot would restart it into the same wall once a
-minute forever.
+The manager guards itself too: `findRivals` in `continuous/core.js` **aborts** rather than
+starting beside any other manager, and does not kill the rival. That is why boot has to clear
+them first: a survivor does not make the incoming manager degrade, it makes it exit, and boot
+would restart it into the same wall once a minute forever.
 
-A swap between the two systems must also clear the outgoing system's workers. Both batchers exec
-the **same** `scripts/{hack,grow,weaken}.js` and tell reports apart by the port in argv, so one
-kill list covers either. They were separate files once, and a list covering only the incoming
-system's left the outgoing one's batches running network-wide.
+Killing a retired manager must also clear its workers. The shotgun exec'd the **same**
+`scripts/{hack,grow,weaken}.js` (reports told apart by the port in argv), so `killOrphanWorkers`'
+one list covers its in-flight batches. Port 1, its report port, is left unused for the same
+reason.
 
-`capacity.js` is safe to run beside the manager: it allocates and releases only within its own
-process and never touches the port.
+`continuous/servers.js` is safe to run beside the manager: it launches nothing and never touches
+the port.
 
 ## Getting code into the game
 
@@ -165,13 +158,11 @@ Several fixes in this repo's history exist because a live run disagreed with a p
 simulation. Tests check syntax, isolation (the two math backends never reach each other),
 RAM accounting, and contract equivalence — but in-game runs are the real gate.
 
-`tests/volley.test.mjs` executes a whole `run()` cycle against a mock that applies each op to a
-simulated server. It is the only test that RUNS the manager rather than calling its parts, and it
-exists because two runtime `ReferenceError`s reached the live game past a clean `node --check` —
-a call site updated without its import, and a `const` in the verbose block shadowing an outer name
-so an earlier read of it hit the temporal dead zone. Both were on the `--verbose` path. A
-shadowing lint was tried and rejected: matching on indentation flags 14 benign redeclarations
-across `scripts/` because it cannot tell a nested block from a different function.
+A clean `node --check` is not a runtime check. The retired shotgun shipped two runtime
+`ReferenceError`s past one — a call site updated without its import, and a `const` in a verbose
+block shadowing an outer name so an earlier read hit the temporal dead zone. A shadowing lint was
+tried and rejected: matching on indentation flags 14 benign redeclarations across `scripts/`
+because it cannot tell a nested block from a different function.
 
 ## RAM is the design constraint
 
@@ -196,8 +187,7 @@ after, anywhere in the import closure:
 | `times.hack`, `ram.grow`, `threads.weaken1` | 0.40 GB — the three worker ops |
 
 Those five lines were real, and together they cost `continuous/manager-formulas.js` 39.00 of
-its 48.00 GB — enough that it would not start on a fresh BitNode's 32 GB home while the shotgun
-ran fine. String and template literals are free (`Literal` nodes), and so are non-computed
+its 48.00 GB — enough that it would not start on a fresh BitNode's 32 GB home. String and template literals are free (`Literal` nodes), and so are non-computed
 object keys (`{ hack: 1.70 }`), because acorn-walk's `Property` visitor only walks a computed
 key. `tests/ram.test.mjs` models all of this and has a guard test naming the expensive
 collisions; it is the only thing standing between this repo and a 25 GB variable.
@@ -205,41 +195,22 @@ collisions; it is the only thing standing between this repo and a 25 GB variable
 - `config.js` is genuinely free to import: it has no `ns` call and mentions
   `hack`/`grow`/`weaken` only as object keys.
   Keep it that way — one billed `ns` call in `config.js` taxes every script in the repo.
-- `verify.js` has no `ns` call either but still costs **0.25 GB** to import, because it reads
-  `.hack` and `.grow` off result objects. Nothing to fix; know it before budgeting.
-- `ram.js` deliberately touches only four cheap functions and **no analyze functions**.
+- `continuous/lib/server.js` (the pool) deliberately touches only four cheap functions and
+  **no analyze functions**.
 - Constants that are linear in threads are measured once, at startup, by a single `rpc.js` call
-  in `mathAnalyze.prepare()`. This keeps `weakenAnalyze`, `hackAnalyzeSecurity` and
+  in `math.prepare()`. This keeps `weakenAnalyze`, `hackAnalyzeSecurity` and
   `growthAnalyzeSecurity` (1 GB each) out of the manager for the 1.00 GB `ns.run` costs.
   `calibrate.js`, `calib.js` and `/data/calib.json` did the same job with a cached file and a
   6.20 GB recurring transient, and are gone.
-- **`growthAnalyze` is exactly logarithmic in its multiplier**, which is why one reading per
-  snapshot replaces every call. `ServerHelpers.ts`: `numCycleForGrowth(server, growth) =
-  Math.log(growth) / calculateServerGrowthLog(...)` - the divisor does not depend on `growth`,
-  and nothing rounds or clamps. So `snapshot()` fetches `growthLogK` once and
-  `growThreadsToRestore` answers any multiplier from it locally, with the number a live call
-  would have given at that security. This is the identity `calibrate.js` used, measured per
-  snapshot instead of cached per session - so there is no drifted-host case left to guard.
-- `hackAnalyze` still moves with hacking level, and reacting to that is the point - it is read
-  in `snapshot()`, so it is exactly as live as the snapshot the planner is working from.
-- **The whole analyze backend now costs 1.00 GB, all of it `ns.run`.** Every `*Analyze` name
-  appears only inside an `rpc` body, which is a string literal to the calculator. Two round
-  trips per cycle buy that, not seven: `snapshot()` bundles the four `getServer*` fields, the
-  three op times, `hackAnalyze` and `growthLogK` into one call, and `maxMoneyOfAll` asks about
-  the whole rooted network in another. Everything downstream reads the snapshot and stays
-  **synchronous**, which is what kept this from cascading `async` through `managerCore` and
-  `prepper`.
-- **One module holds BOTH backends for 1.00 GB**, where analyze alone cost 2.55 and formulas
-  2.50. `ns.formulas.*` was always 0 GB — what cost 2.50 was `getServer` and `getPlayer`, the
-  two reads that fetch the objects to hand it. Those objects survive JSON: `helpers.server()`
-  checks only that 14 plain data keys are present, and `helpers.person()` likewise, so
-  `snapshot()` fetches them through `rpc` and the formulas calls run resident on the
-  round-tripped objects.
+- `ns.formulas.*` is 0 GB — what costs is `getServer` and `getPlayer`, the two reads that fetch
+  the objects to hand it. Those objects survive JSON (`helpers.server()` checks only that 14
+  plain data keys are present, `helpers.person()` likewise), which is what lets a caller fetch
+  them through `rpc` when it does not need them hot.
 
 Worker scripts pay their cost **per thread**, so `hack.js` / `grow.js` / `weaken.js` contain
 nothing beyond one op and one port write. `share.js` follows the same rule and pays the most for
 breaking it: `ns.share` is 2.40 GB, so the worker costs **4.00 GB per thread** and one stray
-import of `ram.js` would add 0.35 GB to every one of tens of thousands of them.
+import of the pool module would add 0.35 GB to every one of tens of thousands of them.
 
 ### Escaping the name tax: `rpc.js`
 
@@ -264,7 +235,7 @@ Four things about it are load-bearing:
   port would let two resident callers read each other's answers — a wrong number, silently. Any
   positive integer is a legal port (`NumNetscriptPorts` is `Number.MAX_SAFE_INTEGER`), so keying
   by pid is free and cannot collide.
-- **A body may `import` the repo's 0 GB pure modules** (`config.js`, `verify.js`, `gang/math.js`);
+- **A body may `import` the repo's 0 GB pure modules** (`config.js`, `gang/math.js`);
   `rpc.js` hoists the import lines out of `main`, where they would be a syntax error. That is what
   keeps logic out of strings — a body stays a few `ns` calls around a real import.
 - **Every quiet failure is made loud.** `ns.run` returns a bare 0 for BOTH "no free RAM on home"
@@ -292,25 +263,21 @@ rejected, because no check can read it and it would mint a file per distinct val
 
 ### Two math backends, one module
 
-`scripts/math.js` holds both and picks per PROCESS, in `prepare()`: formulas when the program
-is owned, analyze otherwise, and analyze always under `--no-formulas`, which it reads straight
-off `ns.args`. Buying Formulas mid-run no longer needs a manager swap.
+`scripts/continuous/lib/math.js` holds both and picks per PROCESS: formulas when the program is
+owned, analyze otherwise, and analyze always under `--no-formulas`, which it reads straight off
+`ns.args`. Buying Formulas mid-run needs no manager swap.
 
 **This used to be forbidden**, and the rule that forbade it was right at the time: a script
-reachable from both paid for both, so there were twin math modules, twin managers, twin preps,
-a `tests/isolation.test.mjs` to keep them apart and a swap in `boot.js` between the files. All
-of that is deleted. What changed is that neither backend costs anything resident any more —
-see the `rpc.js` section above.
+reachable from both paid for both, so there were twin math modules, twin managers, a
+`tests/isolation.test.mjs` to keep them apart and a swap in `boot.js` between the files. All of
+that is deleted.
 
 `growThreadsToRestore(snap, from, to, atSecurity)` is where the two paths differ. Formulas
-honours `atSecurity` by cloning the server object; analyze cannot, because `growthLogK` was
-measured at the snapshot's security. That asymmetry is deliberate and tested — do not "fix" it
-into an equivalence. It is now a difference between two MODES of one module rather than two
-files, which makes it easier to tidy away by accident, so `tests/math.test.mjs` pins it with
-two separate module instances.
+honours `atSecurity` by cloning the server object; analyze cannot, because its growth reading
+was taken at the snapshot's security. That asymmetry is deliberate and tested
+(`tests/continuous.test.mjs`) — do not "fix" it into an equivalence.
 
-**`scripts/continuous/lib/math.js` did the same for the continuous tree**, with one difference
-forced by the stream: its hot path cannot go through `rpc.js`. `dispatch()` snapshots every
+Its hot path cannot go through `rpc.js`, because it is a stream. `dispatch()` snapshots every
 cadence tick and the launch loop reads op times per op, so `hackAnalyze`, `hackAnalyzeChance`,
 `growthAnalyze` and the op-time getters stay resident. Only the constants — the three security
 figures and a 64-entry core-bonus table from `weakenAnalyze(1, c)` — go through one rpc call.
@@ -330,22 +297,15 @@ editor's RAM panel when one moves.
 | module | role | cost |
 |---|---|---|
 | `config.js` | every tunable, shared so nothing drifts | 0 |
-| `verify.js` | landing analysis — the definition of "landed correctly" | 0.25 |
-| `ram.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
 | `rpc.js` | run a body in a throwaway script, get its value back | 1.00 |
-| `prepper.js` | prep as a module (manager runs it in-process) | 2.40 |
-| `math.js` | both math backends, reached entirely through `rpc.js` | 1.00 |
-| `managerCore.js` | the volley loop + share top-up, math-free | 2.80 |
-| `manager.js` | entry: core + math (the only shotgun entry) | 5.40 |
-| `prep.js` | entry: prepper + math | 5.00 |
-| `boot.js` | supervisor, picks the batcher | 3.50 |
+| `boot.js` | supervisor, kills retired managers | 3.50 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
 | `deploy.js` | scp workers home → every rooted host | 2.50 |
 | `share.js` | one `ns.share()` loop | 4.00 **per thread** |
-| `sharemode.js` | the share toggle | 4.20 (game: 2.45 - `ramOf` counts every name in an imported module; the game counts only the names imported) |
-| `continuous/manager.js` | entry: continuous core + `lib/math.js`, both backends | 11.55 |
-| `gang/config.js` | gang tunables, paths, STAT_KEYS | 0 |
+| `sharemode.js` | the share toggle, on the manager's own `ServerPool` | 2.25 |
+| `continuous/lib/server.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
+| `continuous/manager.js` | entry: continuous core + `lib/math.js`, both backends | 11.55 || `gang/config.js` | gang tunables, paths, STAT_KEYS | 0 |
 | `gang/math.js` | the game's gain formulas + every gang decision | 0 |
 | `gang/gang.js` | entry: resident supervisor; every gang call is an rpc body | 2.60 |
 | ↳ tick body | transient: recruit, tasks, wanted governor | 11.60 |
@@ -370,7 +330,7 @@ editor's RAM panel when one moves.
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
-carries 3.00 GB of live *Analyze reads the shotgun routes through `rpc.js` (a stream cannot),
+carries 3.00 GB of live *Analyze reads a non-streaming caller could route through `rpc.js`,
 and 2.00 GB for `ns.getServer`, shared by `continuous/lib/cores.js` and the snapshot.
 
 `connectme.js` (3.85) prints the terminal `connect` chain to a host. It trims the
@@ -383,48 +343,6 @@ it grants no faction. `fulcrumassets` is excluded: Fulcrum also requires employm
 and company rep, so its backdoor never invites on its own. `w0r1d_d43m0n` is off the
 network until The Red Pill is installed (`Prestige.ts` links it to `The-Cave` there),
 so unreachable rows are dropped rather than reported as an error.
-
-`capacity.js` (8.15) is the surviving diagnostic. It ranks targets by real throughput, which
-the manager does not do — `pickTarget` chooses the richest *hackable* server, not the most
-profitable one. `prep.js` is a manual entry point to
-logic the supervisor otherwise drives.
-
-### Prep, and why it fans out
-
-A prep wave is sized by **need, not capacity**. Growing past max money does nothing and
-weakening below minimum security does nothing, so `planPrepWave` asks for exactly the threads
-required and no more. One target therefore cannot use more than a sliver of the pool: a server
-carrying 50 excess security wants `50 / 0.05 = 1000` weaken threads, about 1.75TB of a 3267TB
-pool — while the manager blocks on that wave for a whole weaken window earning nothing.
-
-`prepGroup` spends the remainder prepping the next targets down `rankTargets`, up to
-`PREP_FANOUT`. Two rules make it safe, and both look arbitrary:
-
-- **The primary is launched before any extra is planned.** Its placements are already reserved,
-  so extras can only ever be sized against leftovers. Reordering this would let an extra take RAM
-  the primary wanted, making prep of the one server we are blocked on slower.
-- **An extra whose weaken window exceeds the primary's is skipped.** Every placement releases
-  together at the end of the cycle, so a slower wave would hold the cycle open past the
-  primary's landing. The primary is the richest target and usually the slowest, so this rejects
-  few candidates.
-
-Fanning out is safe in a way a speculative volley would not be: grow and weaken can only move a
-server *toward* prepped. There is no partial-failure mode that loses money the way a batch that
-hacks but fails to grow does.
-
-`launchPrepWave` and `awaitWaves` are split for the same reason: `port.read()` REMOVES the
-message, so two drain loops on one port destroy each other's reports. There is one drain for all
-in-flight waves, matching on batch id.
-
-Volley cycles are deliberately left alone — a volley already consumes nearly the whole pool.
-
-### The volley loop
-
-Each cycle: measure free RAM across the rooted network → pick a steal fraction → compute how
-many complete Hack-Weaken-Grow-Weaken batches fit in RAM *and* inside one weaken window →
-launch the whole volley at once → drain reports while it lands → recompute and fire again.
-Recomputing every cycle is the design, not overhead: it self-corrects as hacking level, op
-times and RAM change.
 
 ### Share mode
 
@@ -468,12 +386,9 @@ curve is the whole reason share takes a capped fraction rather than "whatever is
 
   Two claims that look alike and are not: `exec` returned non-zero, and the worker is still
   running. Only the second one matters, and only `shareCensus` measures it.
-- `managerCore.js` tops the thread count up against the volley's own pool, before the volley is
-  sized, then `refresh()`es — so the RAM share took is simply gone from what the volley sees.
-  It does the same per prep cycle through `prepGroup`'s `onCycle` hook, because prep is when the
-  pool is most idle and a prep can hold the manager for ten minutes, so deferring a toggle until
-  prep finished would make the toggle look broken. The top-up is idempotent, so running it from
-  both places costs nothing.
+- The manager's `serviceShare` (`continuous/lib/share.js`) tops the thread count up once per
+  rescan, **before the RAM budget is computed** — so the RAM share took is simply gone from what
+  the calculator sees. The top-up is idempotent.
 
 `shareCensus` reads `ns.ps` per host and is what makes a manager restart safe: share workers
 outlive the process that started them, so a manager that did not count them would launch a
@@ -492,8 +407,7 @@ shape.
 **`deploy.js` only runs when `root.js` roots something new, so adding a worker file never
 triggers it.** The whole fleet can be missing `share.js`, and the first live run was: every
 `exec` off home returned 0, share ran on one host out of the network, and the log blamed a busy
-pool. `topUpShare` checks `fileExists` per host — free, since `prepper.js` already pays for it —
-and reports **`noFile` and `refused` as separate causes**.
+pool. `topUpShare` checks `fileExists` per host (0.10 GB) and reports **`noFile` and `refused` as separate causes**.
 
 Keeping them apart is the point, and merging them cost two live runs. The first version blamed a
 busy pool when the file was missing; the second told the user to run `deploy.js` on a fleet where
@@ -504,28 +418,23 @@ next log diagnoses itself instead of costing another round trip.
 
 ### The continuous batcher (`scripts/continuous/`)
 
-The default. It replaces the volley with a **stream**: batches are dispatched at a cadence and
-each op is `exec`ed just in time for its own landing, so an op holds RAM for its own duration
-rather than for the whole weaken window. Measured at $947m/s average on a live save with `bad 0`
-and 10–11 ms of jitter against a 100 ms spacer.
+The only batcher. It replaced the retired shotgun's volley with a **stream**: batches are
+dispatched at a cadence and each op is `exec`ed just in time for its own landing, so an op holds
+RAM for its own duration rather than for the whole weaken window. Measured at $947m/s average on
+a live save with `bad 0` and 10–11 ms of jitter against a 100 ms spacer.
 
-**Self-contained in LOGIC, shared in CONTRACTS.** The rule this replaced banned imports across
-the trees outright; what it was protecting is RAM, and `tests/ram.test.mjs` guards that directly.
-What crosses now, and nothing else:
+**Self-contained in LOGIC, shared in CONTRACTS.** What crosses between `scripts/continuous/` and
+`scripts/`, and nothing else:
 
 - `continuous/config.js` re-exports the contracts from `scripts/config.js` — the share protocol,
-  the worker paths, `HOME_RESERVE_GB`, `PORT_CAPACITY`. Values a second party reads without
-  knowing which batcher is up. **Tuning stays local**, including values that match today
-  (`GROW_MARGIN`, `SPACER_MS`, the tolerances): coupling those would retune both batchers at once.
-- **One set of batch workers.** The two trees' copies were identical code, and each system
-  passes its own report port as an argument.
-- `managerCore.js` imports `shareCensus` / `planShare` / `topUpShare` from
-  `continuous/lib/share.js`. The copies had become identical; `serviceShare` stays per batcher.
-- `scripts/rpc.js` may be imported from here.
+  the worker paths, `HOME_RESERVE_GB`, `PORT_CAPACITY`. Values a second party (`sharemode.js`,
+  `share.js`, `boot.js`, the hacknet) reads. **Tuning stays local** to `continuous/config.js`.
+- **The batch workers** `scripts/{hack,grow,weaken}.js`, taking the report port as an argument.
+- `scripts/rpc.js` may be imported from here, and `sharemode.js` imports `lib/server.js`.
 
-It keeps its own deploy (a bought server never fires `deploy.js`'s trigger), its own math
-backends and its own report port (3, not 1 — a killed shotgun leaves reports in flight for a
-whole window, and on a shared port they would be credited to batch ids that never existed here).
+It keeps its own deploy (a bought server never fires `deploy.js`'s trigger) and its own report
+port (3, not 1 — a killed shotgun leaves reports in flight for a whole window, and on a shared
+port they would be credited to batch ids that never existed here).
 
 Both test loaders mirror the whole of `scripts/` through `mirrorScripts` in `tests/harness.mjs`,
 which rewrites both import spellings (`"./x.js"` and `"scripts/x"`). A cross-tree import will not
@@ -615,8 +524,8 @@ Repairs are serviced before never-streamed targets — a stopped stream is a tar
 admitted that earns nothing until it is back on baseline.
 
 **Share works here too**, through `lib/share.js` — the same marker, the same port 2, the same
-`sharemode.js` — and the same code: the shotgun imports its census, planner and top-up from
-here. Every rule in it is one the shotgun learned expensively: proportional placement, both passes planned before anything execs,
+`sharemode.js`. Every rule in it is one the retired shotgun learned expensively: proportional
+placement, both passes planned before anything execs,
 `noFile` and `refused` kept apart, and nothing routed through `pool.allocate` (a reservation is
 released at cycle end and a share worker is not, so the same bytes would be subtracted twice).
 It is called once per rescan and **before the RAM budget is computed** — a budget taken first
@@ -1056,9 +965,9 @@ next pass retries; once nothing is left the pass stops for the life of the proce
 **Share follows faction work.** The share bonus is in the three faction formulas in
 `src/PersonObjects/formulas/reputation.ts` and nowhere else - company work never reads it - so
 share during the gym, crime or company work is batcher RAM spent on nothing. `sing.js` writes
-`SHARE_HOLD_MARKER` on each change: `"hold"`, or `""` while faction work runs. Both managers read
-share through `effectiveShareFraction(marker, hold)` in `scripts/config.js`, so the hold reaches
-both batchers or neither, and the user's fraction in `/data/share.txt` survives it. A missing or
+`SHARE_HOLD_MARKER` on each change: `"hold"`, or `""` while faction work runs. The manager reads
+share through `effectiveShareFraction(marker, hold)` in `scripts/config.js`, and the user's
+fraction in `/data/share.txt` survives it. A missing or
 empty hold file is no hold, so without sing share behaves exactly as before - and the two ways
 sing can stop while holding both release it: a parked `sing.js` clears it, and so does
 `boot.js --no-sing`.
@@ -1226,7 +1135,7 @@ the target count, because nothing here knows the per-target split and over-credi
 the direction that buys upgrades which do not repay.
 
 **The income read takes `Math.max` of BOTH elements of `ns.getTotalScriptIncome()`.** `[0]` sums
-`onlineMoneyMade / onlineRunningTime` over scripts running RIGHT NOW, and both batchers are
+`onlineMoneyMade / onlineRunningTime` over scripts running RIGHT NOW, and the batcher is
 just-in-time: `hack.js` credits its money and exits microseconds later, so `[0]` is dominated by
 zeros and reads one to two orders of magnitude low. `[1]` is
 `scriptProdSinceLastAug / (playtimeSinceLastAug/1000)`, a real $/s rate that averages in the
@@ -1246,18 +1155,17 @@ BEFORE affordability for exactly that reason — "worth buying but out of reach"
 buying" need different answers.
 
 **The targets come from a FILE the running manager publishes.** Both upgrades pay only on a server
-the batcher is actually hitting, and which batcher is up is the user's choice — so whichever
-manager runs writes its list to `TARGETS_MARKER` (`/data/targets.txt`), on its initial pick and on
-every switch, and `boot.js` clears it on both paths where no manager of any system survives: a
-swap that leaves none, and `--no-manager` with nothing already up. That second clear is gated on
-liveness because `--no-manager` kills nothing — unguarded it blanks the list a live shotgun owns,
-and the shotgun republishes only on a retarget. Missing or empty means spend nothing, never a
-default.
+the batcher is actually hitting, so the manager writes its list to `TARGETS_MARKER`
+(`/data/targets.txt`) every rescan, and `boot.js` clears it on both paths where no manager
+survives: a swap away from a retired manager that leaves none, and `--no-manager` with nothing
+already up. That second clear is gated on liveness because `--no-manager` kills nothing —
+unguarded it blanks the list a live manager owns until its next rescan. Missing or empty means
+spend nothing, never a default.
 A stale list is inert rather than lossy — `purchaseHashUpgrade` refunds an upgrade the game
 refuses, which a foreign-only upgrade aimed at a purchased server is — but it is still hashes not
 spent where they pay.
 
-**Hacknet servers are filtered out of `ServerPool.scanAll` ITSELF**, in both trees — not only at
+**Hacknet servers are filtered out of `ServerPool.scanAll` ITSELF** — not only at
 pool admission, which is where the guard started and which was not enough. Two separate reasons,
 and the second is the expensive one:
 
@@ -1265,14 +1173,14 @@ and the second is the expensive one:
   `calculateHashGainRate` multiplies by `ramRatio = 1 - ramUsed/maxRam`. That is what the pool
   guards protect, and they stay — `server.js` does it in BOTH `build()` and `sync()`, which admit
   hosts independently.
-- **Most callers of the walk are not pools.** `continuous/lib/target.js`, `prepper.js` and
-  `capacity.js` rank targets off it, and the whole `getNormalServer` family **throws** on a
+- **Most callers of the walk are not pools.** `continuous/lib/target.js` ranks targets off it,
+  and the whole `getNormalServer` family **throws** on a
   hacknet server rather than returning a useless number — all 23 of `getServerRequiredHackingLevel`,
   `getServerMaxMoney`, the three op times, the analyze calls, `hack`/`grow`/`weaken`, `nuke` and
   every port opener (`NetscriptHelpers.tsx`). So a missing filter is not a bad ranking, it is a
   **dead manager**: `getServerRequiredHackingLevel: Cannot be executed on hacknet-server-0` killed
   the continuous manager at startup on the first BitNode 9 run, and boot restarted it into the same
-  wall once a minute. `prepper.js` carried the identical line, so the shotgun was dead the same way.
+  wall once a minute. The shotgun's prep carried the identical line and died the same way.
 
 The filter is applied to the RESULT, not during the walk: nothing hangs off a hacknet server today,
 but dropping one from the queue would silently orphan anything that ever did. `root.js` needs no
@@ -1295,13 +1203,12 @@ named `share` in `planHashes` cost 2.40 GB as `ns.share` before it became `incom
 
 Breaking any of these produces silent, compounding damage rather than an error:
 
-- **All four ops of a batch `exec` at the same instant** — *in the shotgun*. Separation comes
-  from `additionalMsec`, never from sleeping between launches: a sleep-then-op recomputes its
-  duration from the security level at wake-up and lands somewhere else. The continuous batcher
-  breaks this deliberately and is still correct — see its section below — but the reason is
-  narrow, and anything that sleeps and *then* asks how long an op takes is wrong in both.
-- **Recompute each worker's delay at its own `exec`.** A volley is hundreds of `exec` calls
-  spanning real wall time; one delay computed up front is correct only for the first worker.
+- **Never sleep and *then* ask how long an op takes.** A sleep-then-op recomputes its duration
+  from the security level at wake-up and lands somewhere else. The batcher execs each op just in
+  time and is still correct — op duration is fixed at CALL time, see its section — but the
+  reason is narrow.
+- **Recompute each worker's delay at its own `exec`.** Launches span real wall time; one delay
+  computed up front is correct only for the first worker.
 - **Call the security analyze functions WITHOUT a host argument.** With one, they cap by
   threads-to-max-money, so on a prepped target `growthAnalyzeSecurity` returns ~0 and weaken-2
   is sized at 1 thread instead of ~51.
@@ -1309,33 +1216,28 @@ Breaking any of these produces silent, compounding damage rather than an error:
   the byte total overstates what can actually be placed. Simulate placement instead.
 - **Judge timing on jitter (spread of drift within a batch), never absolute lateness.** The
   game lands whole batches tens of ms late together, which cannot reorder anything.
-- **A manager swap must clear the network.** When boot switches managers the outgoing one's
-  batches keep running — hundreds of batches holding the
-  RAM the replacement needs and still working a target nobody owns. `killOrphanWorkers` runs
-  only when no manager of ANY system survives; doing it on every manager kill would
-  destroy the volley of the survivor `killDuplicates` just kept. Switching BATCHERS is a manager
-  swap too; both systems run the same worker files, so one kill list covers it. Nothing is lost by killing them:
+- **A manager swap must clear the network.** When boot kills a retired manager its batches keep
+  running — hundreds of batches holding the RAM the replacement needs and still working a target
+  nobody owns. `killOrphanWorkers` runs only when no manager survives; doing it on every manager
+  kill would destroy the batches of the survivor `killDuplicates` just kept. The retired shotgun
+  ran the same worker files, so one kill list covers it. Nothing is lost by killing them:
   `ns.hack` credits money on landing, so a killed grow forfeits only the restore, which prep
   does anyway.
 - **A full pool is transient, not a failure.** Prep waits it out (`POOL_WAIT_CYCLES`) rather
   than returning an error that stops the manager and has boot restart it into the same wall a
   tick later. Waiting cycles do not spend `maxCycles`.
-- **Cap the auto-chosen steal fraction.** Thread counts are sized once per volley, then the
-  batches land across the whole weaken window while hacking level climbs. A batch landing late
-  steals more than planned, and its grow was sized for the smaller take, so it ends below where
-  it started and compounds. In the shotgun the headroom is
-  `((GROW_MARGIN - 1) / GROW_MARGIN) * (1 - steal) / steal` — 0.25% at 95% steal against 19% at
-  20%. A measured volley at 98.28% drained $17.68b to $166.11k in one window. See
-  `MAX_STEAL_FRACTION`. **That formula is the shotgun's**: the flat `GROW_MARGIN` in it is what
-  makes the tolerance a property of the fraction alone. Continuous derives the margin from
-  measured drift instead, so its tolerance moves with the target — do not carry the flat form
-  across.
+- **Cap the steal fraction.** Batches land after they are sized, while hacking level climbs. A
+  batch landing late steals more than planned, and its grow was sized for the smaller take, so it
+  ends below where it started and compounds. A shotgun volley at 98.28% drained $17.68b to
+  $166.11k in one window. The batcher derives its grow margin from measured drift and caps at
+  `MAX_STEAL_FRACTION`; do not replace that with a flat margin, which makes the tolerance a
+  property of the fraction alone.
 - **Share is launched by whoever owns the pool.** A share service running beside the manager
-  would `exec` into RAM the manager had already planned a volley against, and the manager's
-  `exec` would fail mid-volley — the same class of damage two managers cause. It would also
-  find nothing free, since a volley normally holds 99%+ of the pool. So `managerCore` does it,
-  before it builds the pool: share workers `exec` outside the reservation system and outlive the
-  cycle, and the volley then sizes itself against what `getServerUsedRam` reports. Do NOT route
+  would `exec` into RAM the manager had already planned batches against, and the manager's
+  `exec` would fail mid-batch — the same class of damage two managers cause. So the manager does
+  it, before it prices the budget: share workers `exec` outside the reservation system and
+  outlive the rescan, and the batches then size themselves against what `getServerUsedRam`
+  reports. Do NOT route
   them through `pool.allocate` — a reservation is released at cycle end, but the worker is not,
   so the pool would double-count RAM the game already reports as used.
 - **Cap the share fraction.** `SHARE_MAX_FRACTION` is not decoration. At 100% the prep gate
@@ -1347,11 +1249,11 @@ Breaking any of these produces silent, compounding damage rather than an error:
   would leave the RAM held with no way back but a kill.
 - **`killOrphanWorkers` spares share workers.** They are deliberately not in `WORKER_LIST`.
   None of the reasoning behind that kill applies: they are tied to no target, they hold a
-  bounded fraction rather than a whole volley's worth, and the incoming manager adopts them
+  bounded fraction rather than a whole pipeline's worth, and the incoming manager adopts them
   through `shareCensus`. Killing them would drop the bonus for a tick and buy nothing.
 - **A batch is all-or-nothing.** One that hacks but fails to grow steals money and never
   returns it — worse than not firing.
-- **Never volley an unprepped target**; all thread math assumes max money and min security.
+- **Never stream an unprepped target**; all thread math assumes max money and min security.
 
 ## Conventions
 
@@ -1390,17 +1292,16 @@ Three reasons this is not a style preference:
 **`ns.formatNumber()` and `ns.nFormat()` do not exist in this fork** — see Fork differences. Both
 are `undefined` here, which is a `TypeError` at the call site and nowhere else.
 
-**Format at the CALL SITE, not inside a 0 GB pure module.** `config.js`, `verify.js`,
-`gang/math.js` and the like have no `ns` and must keep it that way; threading one in to format a
+**Format at the CALL SITE, not inside a 0 GB pure module.** `config.js`, `gang/math.js` and
+the like have no `ns` and must keep it that way; threading one in to format a
 string is the wrong trade. Return the number, let the script that has `ns` print it — that is why
 gang.js's rpc bodies return numbers and gang.js formats them.
 
-**ponytail: five hand-rolled copies survive, four of them with a known ceiling.**
-`capacity.js:70`, `cloud.js:63`, `managerCore.js:96` and `prepper.js:72` each carry
-`[[1e12, "t"], [1e9, "b"], [1e6, "m"], [1e3, "k"]]` and print an unbounded mantissa past $1e15;
+**ponytail: two hand-rolled copies survive, one with a known ceiling.** `cloud.js:63` carries
+`[[1e12, "t"], [1e9, "b"], [1e6, "m"], [1e3, "k"]]` and prints an unbounded mantissa past $1e15;
 `continuous/lib/fmt.js` has the full list and is correct but still a copy. They predate this rule
 and are left alone because converting them means threading `ns` through their callers. Replace one
-with `ns.format.number` when you are already editing that file — do not add a sixth.
+with `ns.format.number` when you are already editing that file — do not add a third.
 `tests/ram.test.mjs` fails on any new copy.
 
 Commit messages lead with the reasoning and the measured numbers behind a change, not a file

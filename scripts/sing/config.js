@@ -14,7 +14,7 @@
 export const SING_SERVICE = "/scripts/sing/sing.js";
 
 /**
- * The one contract crossing into scripts/: the share hold both managers read.
+ * The one contract crossing into scripts/: the share hold the manager reads.
  * A re-export, spelled the way RamCalculations.ts can resolve it - see
  * CLAUDE.md on re-exports. scripts/config.js is 0 GB, so this stays 0 GB.
  */

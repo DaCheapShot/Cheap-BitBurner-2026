@@ -85,28 +85,18 @@ const ORPHANS = [
   { filename: "scripts/weaken.js", host: "p1", threads: 200 },
 ];
 
-/**
- * Boot runs the CONTINUOUS batcher unless told otherwise, so every case below
- * that is about the shotgun's two builds has to say so. Spelled out at each
- * call rather than defaulted here: these tests are the record of which system
- * boot was asked for, and a default would hide exactly that.
- */
-const SHOTGUN = ["--shotgun"];
-
 export const tests = {
   // --no-manager KILLS NOTHING: killDuplicates for managers lives inside
   // ensureOneManager, which that branch skips. So the marker clear on it has to
   // be gated on liveness, or a boot run beside a live batcher - which is the
   // whole point of the flag - blanks the target list its manager owns.
-  // managerCore publishes only on its initial pick and on a retarget, so a
-  // stable target never republishes: hashes.js would then report "no targets
-  // published - no manager is running" for the life of that manager, with one
-  // running, and the BitNode 9 half would do nothing. Behavioural rather than a
-  // source regex, so deleting the guard reddens this.
+  // hashes.js would then report "no targets published - no manager is running"
+  // until the next rescan republished it. Behavioural rather than a source
+  // regex, so deleting the guard reddens this.
   "--no-manager leaves a live manager's published targets alone": async () => {
     const r = await runBoot({
       args: ["--no-manager"],
-      running: ["scripts/manager.js"],
+      running: ["scripts/continuous/manager.js"],
       files: { "/data/targets.txt": "phantasy\n" },
       ticks: 1,
     });
@@ -201,11 +191,6 @@ export const tests = {
       `boot should name the stale copy, said: ${JSON.stringify(said)}`);
   },
 
-  "without Formulas, boot launches the shotgun manager": async () => {
-    const r = await runBoot({ args: SHOTGUN, hasFormulas: false });
-    assert(r.launched.includes("scripts/manager.js"), `expected manager.js, launched: ${r.launched}`);
-  },
-
   // Neither system has a formulas BUILD any more: each math module picks per
   // process, and the continuous one re-checks every rescan. So owning
   // Formulas.exe must not change which file boot runs.
@@ -215,20 +200,6 @@ export const tests = {
       `expected continuous/manager.js, launched: ${r.launched}`);
     assert(!r.launched.includes("scripts/continuous/manager-formulas.js"),
       "manager-formulas.js is retired and must never be started");
-  },
-
-  // What replaced the shotgun swap. There is one file, so the flag has to
-  // reach the PROCESS: scripts/math.js reads it off ns.args in prepare().
-  "the shotgun gets one manager, with --no-formulas forwarded to it": async () => {
-    const owned = await runBoot({ args: SHOTGUN, hasFormulas: true });
-    assert(owned.launched.includes("scripts/manager.js"),
-      `there is only one shotgun manager now, launched: ${owned.launched}`);
-
-    const forced = await runBoot({ args: [...SHOTGUN, "--no-formulas"], hasFormulas: true });
-    const proc = forced.procs.find((x) => x.filename === "scripts/manager.js");
-    assert(proc, `manager.js should be running, procs: ${forced.procs.map((x) => x.filename)}`);
-    assert(proc.args.includes("--no-formulas"),
-      `--no-formulas must be forwarded, got args: ${JSON.stringify(proc.args)}`);
   },
 
   // What used to be a swap is now nothing at all - the running manager
@@ -302,11 +273,11 @@ export const tests = {
   // ids out of argv. Only a swap that leaves NO manager may clear the network.
   "deduplicating managers leaves the survivor's workers alone": async () => {
     const r = await runBoot({
-      args: SHOTGUN, hasFormulas: false,
-      running: ["scripts/manager.js", "scripts/manager.js"], workers: ORPHANS,
+      hasFormulas: false,
+      running: ["scripts/continuous/manager.js", "scripts/continuous/manager.js"], workers: ORPHANS,
     });
-    assert(r.killed.includes("scripts/manager.js"), "the duplicate should be killed");
-    assert(r.procs.filter((p) => p.filename === "scripts/manager.js").length === 1,
+    assert(r.killed.includes("scripts/continuous/manager.js"), "the duplicate should be killed");
+    assert(r.procs.filter((p) => p.filename === "scripts/continuous/manager.js").length === 1,
       "exactly one manager should survive");
     for (const w of ORPHANS) {
       assert(!r.killed.includes(w.filename),
@@ -323,36 +294,30 @@ export const tests = {
       `only the old manager should be killed, killed: ${r.killed}`);
   },
 
-  // ------------------------------------------------------------ two systems --
+  // ------------------------------------------------------ retired shotgun --
 
-  "boot runs the continuous batcher unless told otherwise": async () => {
+  "boot runs the continuous batcher": async () => {
     const r = await runBoot({ hasFormulas: false });
     assert(r.launched.includes("scripts/continuous/manager.js"),
       `expected the continuous manager, launched: ${r.launched}`);
     assert(!r.launched.includes("scripts/manager.js"),
-      "the shotgun must not run alongside it - each believes it owns the pool");
+      "the retired shotgun must never be started");
   },
 
-  "--shotgun runs the volley batcher instead": async () => {
-    const r = await runBoot({ args: SHOTGUN, hasFormulas: false });
-    assert(r.launched.includes("scripts/manager.js"), `expected the shotgun, launched: ${r.launched}`);
-    assert(!r.launched.some((f) => f.startsWith("scripts/continuous/")),
-      "nothing continuous should start under --shotgun");
-  },
-
-  // The hole this whole change exists to close, in the direction that hurt
-  // most. scripts/continuous/core.js findRivals REFUSES to start beside any of
-  // the four manager files, so a surviving shotgun manager does not merely
-  // coexist - the incoming continuous one aborts and exits, boot sees no
-  // manager next tick, starts it again, and watches it abort again. Once a
-  // minute, forever, earning nothing.
-  "starting continuous stops a running shotgun manager": async () => {
+  // manager.js was the shotgun batcher. It is gone from disk but filesync never
+  // deletes from the game, so a copy can still be running. scripts/continuous/
+  // core.js findRivals REFUSES to start beside it, so a survivor does not merely
+  // coexist - the incoming manager aborts and exits, boot sees no manager next
+  // tick, starts it again, and watches it abort again. Once a minute, forever,
+  // earning nothing. Both systems ran the same worker files, so its in-flight
+  // batches are cleared as orphans too.
+  "a retired shotgun manager still running is stopped": async () => {
     const r = await runBoot({
       hasFormulas: false,
       running: ["scripts/manager.js"], workers: ORPHANS,
     });
     assert(r.killed.includes("scripts/manager.js"),
-      `the shotgun manager is a rival and must be stopped, killed: ${r.killed}`);
+      `the retired shotgun is a rival and must be stopped, killed: ${r.killed}`);
     assert(r.launched.includes("scripts/continuous/manager.js"), "continuous should start");
     for (const w of ORPHANS) {
       assert(r.killed.includes(w.filename),
@@ -360,41 +325,7 @@ export const tests = {
     }
   },
 
-  // The same in reverse, and the case a WORKER_LIST covering only the shotgun's
-  // three files gets wrong: the continuous workers are different files, so they
-  // survive the swap and keep hacking a target the incoming manager has not
-  // even picked.
-  "switching to the shotgun clears the continuous workers": async () => {
-    const r = await runBoot({
-      args: SHOTGUN, hasFormulas: false,
-      running: ["scripts/continuous/manager.js"], workers: ORPHANS,
-    });
-    assert(r.killed.includes("scripts/continuous/manager.js"),
-      `the continuous manager should be stopped, killed: ${r.killed}`);
-    for (const w of ORPHANS) {
-      assert(r.killed.includes(w.filename),
-        `${w.filename} should have been killed, killed: ${r.killed}`);
-    }
-    assert(!r.procs.some((p) => p.filename.startsWith("scripts/continuous/")),
-      "a continuous process survived the swap");
-    assert(r.launched.includes("scripts/manager.js"), "the shotgun should start");
-  },
-
-  // Share workers belong to neither system's WORKER_LIST and are adopted by
-  // whichever manager comes up, so a cross-system swap must spare them exactly
-  // as a build swap does.
-  "a cross-system swap spares the share workers": async () => {
-    const r = await runBoot({
-      args: SHOTGUN, hasFormulas: false,
-      running: ["scripts/continuous/manager.js"],
-      workers: [...ORPHANS, { filename: "scripts/share.js", host: "p1", threads: 2921 }],
-    });
-    assert(!r.killed.includes("scripts/share.js"),
-      `share workers must survive a cross-system swap, killed: ${r.killed}`);
-  },
-
-  // --targets is continuous's; the shotgun ignores it. Passed through rather
-  // than interpreted, so boot never has to know which flag belongs to which.
+  // Passed through rather than interpreted.
   "--target and --targets reach the manager": async () => {
     const r = await runBoot({
       args: ["--target", "phantasy", "--targets", "5"],

@@ -11,7 +11,7 @@ import { SHARE_WORKER, WORKER_LIST } from "scripts/continuous/config";
  * ---------------------------------------------------------------------------
  * Why this exists at all
  *
- * The workers are the shotgun's own files, and scripts/deploy.js broadcasts
+ * The workers are shared files, and scripts/deploy.js broadcasts
  * them - but only when boot runs it, which is when root.js roots something
  * NEW. A server cloud.js buys arrives rooted, so it never fires that trigger,
  * and a manager started by hand may run with no boot at all. So this copies

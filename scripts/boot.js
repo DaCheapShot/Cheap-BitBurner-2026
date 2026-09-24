@@ -16,9 +16,9 @@ import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE, HACKNET_EVERY } from "./ha
  *   2. deploy.js    - push workers, but only if root.js actually rooted something
  *   3. cloud.js     - kept alive as a service (buys and upgrades servers), but
  *                     only until the fleet is maxed; see CLOUD_DONE_MARKER
- *   5. manager      - kept alive as a service. One file per SYSTEM
- *                     (continuous or shotgun); each picks its own math backend
- *                     in-process, so Formulas.exe never changes the file.
+ *   5. manager      - kept alive as a service: scripts/continuous/manager.js.
+ *                     It picks its own math backend in-process, so
+ *                     Formulas.exe never changes the file.
  *   6. gang         - kept alive as a service, but ONLY once a gang exists.
  *                     ns.gang.inGang() is 0 GB, so the check costs nothing on
  *                     every BitNode that will never have one. The gang
@@ -27,16 +27,14 @@ import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE, HACKNET_EVERY } from "./ha
  *                     availability check, so sing.js gates itself: without
  *                     Source-File 4 it parks rather than exits.
  *
- * TWO BATCHERS, ONE POOL. scripts/continuous/ is the JIT batcher - it streams
+ * ONE BATCHER, ONE POOL. scripts/continuous/ is the JIT batcher - it streams
  * batches at a cadence and sizes its own steal fraction from the server and the
- * RAM it can have. scripts/manager.js is the shotgun - it fires a whole volley
- * per weaken window. They are ALTERNATIVES in the strongest sense: each believes
- * it owns the RAM pool and its report port, so two of them running is silent
- * corruption, not a slow mode. Continuous is the default; --shotgun picks the
- * other. See ensureOneManager, which has to police every manager file, not two.
+ * RAM it can have. It believes it owns the RAM pool and its report port, so any
+ * other manager running beside it is silent corruption, not a slow mode - and
+ * retired manager files can still be running in the game. See ensureOneManager.
  *
- * The math backend is not boot's choice for either system - each manager picks
- * its own - so --no-formulas is simply forwarded.
+ * The math backend is not boot's choice - the manager picks its own - so
+ * --no-formulas is simply forwarded.
  *
  * TRANSIENTS RUN ONE AT A TIME, and the tick waits for each to exit before
  * starting the next. They all run on home, and the manager reserves everything
@@ -57,8 +55,7 @@ import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE, HACKNET_EVERY } from "./ha
  *         run scripts/boot.js --no-sing           (don't run the singularity supervisor)
  *         run scripts/boot.js --no-hacknet        (do not buy hacknet nodes or spend hashes)
  *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
- *         run scripts/boot.js --shotgun           (the volley batcher, not the stream)
- *         run scripts/boot.js --targets 5         (continuous only; shotgun ignores it)
+ *         run scripts/boot.js --targets 5         (cap the manager's target count)
  *         run scripts/boot.js --interval 30000
  *
  * RAM: 1.60 base + run 1.00 + ps 0.20 + kill 0.50
@@ -79,29 +76,28 @@ const ROOT = "/scripts/root.js";
 const DEPLOY = "/scripts/deploy.js";
 const CLOUD = "/scripts/cloud.js";
 /**
- * The manager file for each system. One each: both math backends now live in
- * one module per system (scripts/math.js, scripts/continuous/lib/math.js),
- * which picks per process - so buying or losing Formulas.exe changes a branch
- * inside the running manager, never which file boot runs.
+ * The manager. Both math backends live in scripts/continuous/lib/math.js, which
+ * picks per process - so buying or losing Formulas.exe changes a branch inside
+ * the running manager, never which file boot runs.
  */
-const MANAGERS = {
-  continuous: "/scripts/continuous/manager.js",
-  shotgun: "/scripts/manager.js",
-};
+const MANAGER = "/scripts/continuous/manager.js";
 
 /**
  * Files that were managers once and are gone from disk - but NOT from the
  * game. filesync never deletes, so the last copy stays on home and may still be
  * RUNNING from before the upgrade. The continuous manager aborts beside any
  * rival, so one of these left alive would stop the new manager starting, once a
- * tick, forever. Killed like any other rival; never started.
+ * tick, forever. Killed like any other rival; never started. manager.js was the
+ * shotgun batcher, which shared the worker files, so a swap away from it still
+ * clears the network through killOrphanWorkers.
  */
 const RETIRED_MANAGERS = [
+  "/scripts/manager.js",
   "/scripts/continuous/manager-formulas.js",
   "/scripts/manager-formulas.js",
 ];
 
-const ALL_MANAGERS = [...Object.values(MANAGERS), ...RETIRED_MANAGERS];
+const ALL_MANAGERS = [MANAGER, ...RETIRED_MANAGERS];
 
 const DEFAULT_TICK_MS = 60000;
 
@@ -153,10 +149,10 @@ function killDuplicates(ns, file, log) {
 /**
  * Every host reachable from home, breadth first.
  *
- * A deliberate fourth copy of this walk rather than an import of ram.js's
- * ServerPool.scanAll: importing it would drag getServerMaxRam, getServerUsedRam
- * and hasRootAccess along with ns.scan and cost boot 0.35GB for a list of
- * names. The walk itself is four lines.
+ * A deliberate copy of this walk rather than an import of
+ * continuous/lib/server.js's ServerPool.scanAll: importing it would drag
+ * getServerMaxRam, getServerUsedRam and hasRootAccess along with ns.scan and
+ * cost boot 0.35GB for a list of names. The walk itself is four lines.
  */
 function reachableHosts(ns) {
   const seen = new Set(["home"]);
@@ -227,16 +223,15 @@ function killOrphanWorkers(ns, log) {
 /**
  * Ensure exactly one manager runs, and that it is the right one.
  *
- * All four manager files are ALTERNATIVES, not separate services. killDuplicates
- * only dedupes by filename, so on its own it would happily leave an analyze
- * manager and a formulas manager running side by side - each believing it owned
- * the RAM pool and the report port, over-committing the same RAM and stealing
- * each other's completion reports.
+ * Every manager file is an ALTERNATIVE, not a separate service. killDuplicates
+ * only dedupes by filename, so on its own it would happily leave a retired
+ * manager still running from before an upgrade beside the current one - each
+ * believing it owned the RAM pool and the report port, over-committing the same
+ * RAM and stealing each other's completion reports.
  *
- * `others` is a LIST rather than the single other build, and that is what makes
- * the two systems switchable at all. scripts/continuous/core.js has its own
- * guard - findRivals refuses to start beside any other manager - so a surviving
- * shotgun manager does not merely coexist with an incoming continuous one, it
+ * `others` is every retired manager file. scripts/continuous/core.js has its
+ * own guard - findRivals refuses to start beside any other manager - so a
+ * surviving retired manager does not merely coexist with the incoming one, it
  * makes it ABORT and exit. Boot would then see no manager next tick, start it
  * again, and watch it abort again, once a minute forever. Killing every rival
  * before the launch is the whole fix.
@@ -325,23 +320,17 @@ export async function main(ns) {
   if (noSing) ns.write(SHARE_HOLD_MARKER, "", "w");
   const noManager = args.includes("--no-manager");
   const noFormulas = args.includes("--no-formulas");
-  // Continuous by default. It is the measured better earner - $947m/s average
-  // against the shotgun on the same save - and it prices its own steal fraction
-  // per target instead of needing one chosen for it. --continuous is accepted
-  // and does nothing, so the command can say which system it means out loud.
-  const mode = args.includes("--shotgun") ? "shotgun" : "continuous";
   const tIdx = args.indexOf("--target");
   const target = tIdx >= 0 ? args[tIdx + 1] : null;
-  // Continuous supervises several targets at once and takes a count; the shotgun
-  // works one at a time and ignores the flag. Passed through rather than
-  // interpreted, so boot does not have to know which is which.
+  // The manager supervises several targets at once and takes a count. Passed
+  // through rather than interpreted.
   const nIdx = args.indexOf("--targets");
   const targets = nIdx >= 0 ? args[nIdx + 1] : null;
   const managerArgs = [
     ...(target ? ["--target", target] : []),
     ...(targets ? ["--targets", targets] : []),
-    // Forwarded, not interpreted. Both managers' math modules read it off
-    // ns.args and pick the *Analyze path.
+    // Forwarded, not interpreted. The manager's math module reads it off
+    // ns.args and picks the *Analyze path.
     ...(noFormulas ? ["--no-formulas"] : []),
   ];
   const iIdx = args.indexOf("--interval");
@@ -350,7 +339,7 @@ export async function main(ns) {
   const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
 
   ns.print(
-    `boot: ${mode}, tick ${Math.round(tickMs / 1000)}s, manager target ` +
+    `boot: tick${Math.round(tickMs / 1000)}s, manager target ` +
       `${target ?? "auto"}${noCloud ? ", cloud off" : ""}${noManager ? ", manager off" : ""}`,
   );
   // ONE BOOT. Two supervisors with different flags each read the other's
@@ -372,12 +361,10 @@ export async function main(ns) {
 
   do {
     // -- 0. did the manager die? -------------------------------------------
-    // The CHOSEN system's file. A manager of the other system running is not
-    // this one surviving - it is a rival that ensureOneManager is about to kill,
-    // so counting it here would report a live manager on exactly the tick it
-    // exited.
-    const wanted = MANAGERS[mode];
-    const managerDied = !firstPass && !noManager && !isUp(ns, wanted);
+    // MANAGER only. A retired manager running is not this one surviving - it is
+    // a rival that ensureOneManager is about to kill, so counting it here would
+    // report a live manager on exactly the tick it exited.
+    const managerDied = !firstPass && !noManager && !isUp(ns, MANAGER);
     if (managerDied) log("manager is not running - it exited since the last tick");
 
     // -- 1. root ------------------------------------------------------------
@@ -449,7 +436,7 @@ export async function main(ns) {
       }
     }
     if (!noManager) {
-      ensureOneManager(ns, wanted, ALL_MANAGERS.filter((f) => f !== wanted), managerArgs, log);
+      ensureOneManager(ns, MANAGER, RETIRED_MANAGERS, managerArgs, log);
     } else if (firstPass && !ALL_MANAGERS.some((f) => isUp(ns, f))) {
       // --no-manager with nothing already up means no manager will publish
       // targets this run - the same terminal state ensureOneManager reaches once
@@ -459,12 +446,8 @@ export async function main(ns) {
       // THE LIVENESS CHECK IS LOAD-BEARING. --no-manager kills nothing:
       // killDuplicates for managers lives inside ensureOneManager, which this
       // branch skips. So a boot run beside a live batcher - which is the point
-      // of the flag - would blank the list that manager owns. managerCore
-      // publishes only on its initial pick and on a retarget, so a stable target
-      // never republishes and hashes.js would report "no targets published - no
-      // manager is running" for the life of that manager, with one running. The
-      // continuous side republishes every rescan and would self-heal; the
-      // shotgun would not.
+      // of the flag - would blank the list that manager owns until its next
+      // rescan republishes it.
       ns.write(TARGETS_MARKER, "", "w");
     }
     // The gang supervisor. Gated on inGang() rather than started unconditionally

@@ -219,46 +219,9 @@ function bodiesOf(bare) {
 }
 
 export const tests = {
-  // 6.15 before share mode; ps (0.20) pays for the census that stops a restarted
-  // manager double-launching share workers, and getSharePower (0.20) for the only
-  // reading of the bonus that includes the intelligence and home-core multipliers.
-  //
-  // 0.40 of the total is `hack`, `grow` and `weaken` read as PROPERTY names -
-  // times.hack, ram.grow, threads.weaken1. The game charges those like calls.
-  // Left alone: they are the clearest names available for what they hold, and
-  // 0.40 GB does not buy renaming eight files' worth of them.
-  // 6.95 before rpc.js, 7.95 with only the startup constants moved, 5.40 now
-  // that mathAnalyze reaches the *Analyze API entirely through rpc bodies. The
-  // whole of its 2.55 is gone and what remains of it is the 1.00 GB ns.run.
-  //
-  // Two round trips per cycle buy that, not seven: snapshot() bundles the four
-  // getServer* fields, the three op times, hackAnalyze and the growth constant
-  // into one call, and maxMoneyOfAll asks about the whole network in another.
-  // Everything downstream reads the snapshot and stays synchronous.
-  "manager.js (analyze) costs 5.40 GB": () => {
-    const ram = ramOf("manager");
-    assert(Math.abs(ram - 5.40) < 0.011, `expected 5.40 GB, got ${ram.toFixed(2)}`);
-  },
-
-  // 6.55 before. Same story as manager.js, one module further down.
-  "prep.js (analyze) costs 5.00 GB": () => {
-    const ram = ramOf("prep");
-    assert(Math.abs(ram - 5.00) < 0.011, `expected 5.00 GB, got ${ram.toFixed(2)}`);
-  },
-
-  // The pair this replaced cost 6.95 and 6.90, and one of them was always
-  // wrong for the current state of Formulas.exe.
-  "one shotgun manager replaced the pair": () => {
-    assert(!scriptNames().includes("manager-formulas"),
-      "manager-formulas.js should be gone - math.js picks the backend per process");
-    assert(!scriptNames().includes("prep-formulas"), "prep-formulas.js should be gone too");
-    assert(!scriptNames().includes("mathAnalyze") && !scriptNames().includes("mathFormulas"),
-      "the twin math modules should be gone - scripts/math.js holds both");
-  },
-
   // Charged PER THREAD, and the manager places tens of thousands of them, so a
   // stray import costs more here than anywhere else in the repo: pulling in
-  // ram.js would add 0.35 GB to every single thread.
+  // a pool module would add 0.35 GB to every single thread.
   //
   // It must import NOTHING, like the three batch workers. A worker's imports have
   // to exist on every host it runs on, and importing config.js for one constant
@@ -288,11 +251,12 @@ export const tests = {
     }
   },
 
-  // A hand-run toggle, so prepper.js's 2.00 GB is affordable - and it buys the
-  // guarantee that the pool it reports is the pool the manager will divide.
-  "sharemode.js costs 4.20 GB": () => {
+  // A hand-run toggle. It builds the continuous manager's own ServerPool, which
+  // buys the guarantee that the pool it reports is the pool the manager divides.
+  // 4.20 while it borrowed the shotgun's prepper.js for the same job.
+  "sharemode.js costs 2.25 GB": () => {
     const ram = ramOf("sharemode");
-    assert(Math.abs(ram - 4.20) < 0.011, `expected 4.20 GB, got ${ram.toFixed(2)}`);
+    assert(Math.abs(ram - 2.25) < 0.011, `expected 2.25 GB, got ${ram.toFixed(2)}`);
   },
 
   // Bitburner resolves imports on the server a script STARTS on, and
@@ -321,7 +285,7 @@ export const tests = {
   // The manager reaches SHARE_WORKER as a STRING from config.js and must never
   // import the worker itself: ns.share is 2.40 GB for a function it never calls.
   "no manager build pays for ns.share": () => {
-    for (const entry of ["manager", "boot"]) {
+    for (const entry of ["continuous/manager", "boot"]) {
       assert(!closure(entry).has("share"),
         `${entry}.js imports share.js - 2.40 GB for a function it never calls`);
     }
@@ -333,21 +297,6 @@ export const tests = {
     const ram = ramOf("connectme");
     assert(Math.abs(ram - 3.85) < 0.011, `expected 3.85 GB, got ${ram.toFixed(2)}`);
     assert(!readScript("connectme").includes('from "./'), "connectme.js should import no other script");
-  },
-
-  // This replaces "neither entry pays for the other's backend", which guarded
-  // the twin split. math.js now holds BOTH backends: every *Analyze name is
-  // inside an rpc body, and ns.formulas.* was always 0 GB - what used to cost
-  // 2.50 was getServer and getPlayer, and snapshot() fetches those through rpc
-  // too, because helpers.server() only checks that 14 plain data keys are
-  // present and those survive JSON.
-  //
-  // If this ever exceeds 1.00, a backend has leaked out of an rpc body and
-  // every importer is paying for math it may not use.
-  "math.js holds both backends for 1.00 GB": () => {
-    const marginal = ramOf("math") - BASE;
-    assert(Math.abs(marginal - 1.00) < 0.011,
-      `expected 1.00 GB marginal (ns.run alone), got ${marginal.toFixed(2)}`);
   },
 
   // The continuous tree was never priced here at all - closure() only followed
@@ -548,21 +497,21 @@ export const tests = {
   // early does not error; the mantissa grows without bound instead, and a live
   // report read "$2219301.35b" for what the game calls "$2.22q".
   //
-  // ponytail: an allowlist, because five copies predate the rule and converting
+  // ponytail: an allowlist, because two copies predate the rule and converting
   // them means threading ns through their callers. It exists to stop a SIXTH,
   // which is the failure that actually keeps happening. Shrink it whenever one
   // of these files is being edited anyway; never grow it.
   "no new script re-types the money suffix list": () => {
     const GRANDFATHERED = new Set([
-      "capacity", "cloud", "managerCore", "prepper", "continuous/lib/fmt",
+      "cloud", "continuous/lib/fmt",
     ]);
     // Either shape that has actually been written here: the divisor/suffix
     // pair list, and the bare powers-of-1000 array.
     const COPY = /\[\s*1e(?:9|12)\s*,\s*"[a-zA-Z]"\s*\]|"k"\s*,\s*"m"\s*,\s*"b"/;
 
     const seen = new Set();
-    for (const entry of ["boot", "manager", "capacity", "cloud", "deploy",
-                         "root", "sharemode", "connectme", "prep",
+    for (const entry of ["boot", "cloud", "deploy",
+                         "root", "sharemode", "connectme",
                          "continuous/manager", "continuous/servers",
                          "gang/gang", "contracts/contracts", "sing/sing"]) {
       for (const mod of closure(entry)) seen.add(mod);
@@ -596,8 +545,8 @@ export const tests = {
   "no script names a variable after an expensive ns function": () => {
     const BANNED = { window: 25, document: 25, attempt: 10, share: 2.4, run: 1, probe: 0.2, connect: 2 };
     const entries = new Set();
-    for (const e of ["boot", "manager", "capacity", "cloud", "deploy",
-                     "root", "sharemode", "connectme", "prep",
+    for (const e of ["boot", "cloud", "deploy",
+                     "root", "sharemode", "connectme",
                      "continuous/manager", "continuous/servers",
                      "gang/gang", "contracts/contracts", "sing/sing",
                      "hacknet/hacknet", "hacknet/hashes"]) {
@@ -607,7 +556,7 @@ export const tests = {
     for (const mod of [...entries].sort()) {
       const src = codeOnly(readScript(mod));
       // Only the file that really calls it may hold the name. ns.share lives in
-      // share.js and nowhere else; ns.run is called by boot and by capacity.
+      // share.js and nowhere else; ns.run is called by boot and by rpc.
       const calls = new Set();
       for (const m of src.matchAll(/\bns\.(?:[\w$]+\.)*([\w$]+)\s*\(/g)) calls.add(m[1]);
 

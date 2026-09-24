@@ -30,7 +30,7 @@ import { rpc } from "scripts/rpc.js";
  *
  * SHARE FOLLOWS FACTION WORK. The share bonus multiplies faction work rep and
  * nothing else, so every tick this writes SHARE_HOLD_MARKER: "" while the
- * player is doing faction work, "hold" otherwise. Both managers read share
+ * player is doing faction work, "hold" otherwise. The manager reads share
  * through the hold (effectiveShareFraction in scripts/config.js), so the RAM
  * goes back to the batcher during the gym, crime and company work.
  *

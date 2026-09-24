@@ -73,10 +73,11 @@ const INDENT = "  ";
  * them.
  */
 const RIVALS = [
-  "scripts/manager.js",
   "scripts/continuous/manager.js",
   // Deleted from disk, but filesync never deletes from the game, so a stale
-  // copy can still be running. Still a pool owner, still a rival.
+  // copy can still be running. Still a pool owner, still a rival. manager.js
+  // was the shotgun batcher.
+  "scripts/manager.js",
   "scripts/manager-formulas.js",
   "scripts/continuous/manager-formulas.js",
 ];
@@ -125,7 +126,7 @@ export function workerRam(ns) {
 /**
  * Per-thread RAM of the share worker, measured if it is here.
  *
- * NOT added to workerRam.missing: share.js belongs to the shotgun's deploy and
+ * NOT added to workerRam.missing: share.js belongs to scripts/deploy.js and
  * a save that has never run it simply does not have the file. That is a reason
  * for share to report nothing, not a reason for the batcher to refuse to start.
  * The fallback keeps the arithmetic sane in the meantime.
@@ -378,7 +379,7 @@ export async function runContinuous(ns, math) {
  * The paper ranking in lib/target.js is a CEILING: with the cadence identical
  * for every target it reduces to maxMoney * steal * chance / weakenTime, and
  * nothing in it knows what a batch costs. Grow threads are exactly where
- * targets differ - the shotgun's capacity.js records foodnstuff ($50m max,
+ * targets differ - the retired capacity.js recorded foodnstuff ($50m max,
  * 0.0175% growth per thread, 634 grow threads, 1.08TB per batch) outranking
  * targets that actually fit.
  *

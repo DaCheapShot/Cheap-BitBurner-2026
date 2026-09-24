@@ -56,8 +56,8 @@ import { rpc } from "scripts/rpc.js";
 /**
  * Every contract on the network, with its type and data.
  *
- * ns.scan is walked inline - a fifth copy of the four-line BFS. Importing
- * ram.js for it would drag getServerMaxRam, getServerUsedRam and hasRootAccess
+ * ns.scan is walked inline - another copy of the four-line BFS. Importing
+ * continuous/lib/server.js for it would drag getServerMaxRam, getServerUsedRam and hasRootAccess
  * along for a list of names, exactly as boot.js:144 documents. Root access is
  * not required to read or attempt a contract, so every reachable host counts,
  * not just the rooted ones.
