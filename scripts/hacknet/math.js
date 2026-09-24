@@ -269,7 +269,7 @@ export function planMoney(state, cfg) {
       break;
     }
 
-    buys.push({ kind: best.kind, index: best.index, price: best.price });
+    buys.push({ kind: best.kind, index: best.index, price: best.price, payback: best.payback });
     spent += best.price;
 
     if (best.kind === "unit") {
