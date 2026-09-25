@@ -50,6 +50,13 @@ export const PARKED_MS = 3600000;
  * here that compounds into the batcher's own throughput.
  */
 export const HOME_RAM_BUDGET_FRACTION = 0.25;
+/**
+ * The same rule for a home CPU core, taken from what RAM left. Cores only speed
+ * grow and weaken run ON home (getCoreBonus, 1 + (cores - 1) / 16), so they are
+ * worth less per dollar than RAM and bid lower. Each core is x7.5 dearer
+ * ($1b * 7.5^cores), max 8. Read inside the CORES body: live, no restart.
+ */
+export const HOME_CORES_BUDGET_FRACTION = 0.10;
 /** Each darkweb program is bought only when it costs at most this fraction of cash. */
 export const PROG_BUDGET_FRACTION = 0.10;
 /**

@@ -394,7 +394,10 @@ export const tests = {
   // logged once as a WARN, and the subsystem quietly doing nothing.
   "every sing body is priced, and none exceeds CRIME's 6.60": () => {
     const want = {
-      UPGRADE: 6.25, TOR: 3.65, PROGS: 4.70, INVITES: 4.60, JOIN: 4.60,
+      UPGRADE: 6.25, TOR: 3.65,
+      // upgradeHomeCores 3.00 + its cost 1.50 + getServerMoneyAvailable 0.10;
+      // the count is derived from the price, not a 2.00 getServer.
+      CORES: 6.20, PROGS: 4.70, INVITES: 4.60, JOIN: 4.60,
       // 5.60 -> 6.60 for getCompanyRep, which puts READ exactly on the ceiling.
       // Anything more READ needs is a second read body, not a bigger one.
       READ: 6.60, GYM: 3.60, CRIME: 6.60, FACTION: 4.60,

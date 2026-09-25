@@ -104,6 +104,31 @@ return {
 };
 `;
 
+/**
+ * UPGRADE's twin for home CPU cores, run after it so RAM has first call on the
+ * cash. Split because together they are 10.70 GB. The core count is read off
+ * the price - getUpgradeHomeCoresCost is 1e9 * 7.5^cores - rather than paying
+ * 2.00 for getServer; the price stays finite at the 8-core cap, where
+ * upgradeHomeCores returns false instead.
+ */
+const CORES = `
+import { HOME_CORES_BUDGET_FRACTION } from "/scripts/sing/config.js";
+const frac = args.length ? Number(args[0]) : HOME_CORES_BUDGET_FRACTION;
+const coresAt = (c) => Math.round(Math.log(c / 1e9) / Math.log(7.5));
+let money = ns.getServerMoneyAvailable("home");
+let cost = ns.singularity.getUpgradeHomeCoresCost();
+const before = coresAt(cost);
+let bought = 0;
+let spent = 0;
+while (cost <= money * frac && ns.singularity.upgradeHomeCores()) {
+  bought++;
+  spent += cost;
+  money -= cost;
+  cost = ns.singularity.getUpgradeHomeCoresCost();
+}
+return { bought, spent, money, frac, before, after: coresAt(cost), cost };
+`;
+
 /** Once per BitNode. Split from PROGS so purchaseTor is not held on every sweep. */
 const TOR = `
 const had = ns.hasTorRouter();
@@ -392,6 +417,17 @@ function upgradeLine(ns, u) {
     `(buys at ${ns.format.percent(u.frac, 0)} of cash)`;
 }
 
+function coresLine(ns, c) {
+  if (c.bought) {
+    return `bought ${c.bought} home core(s) ${c.before} -> ${c.after} for ${money$(ns, c.spent)}`;
+  }
+  // upgradeHomeCores refuses only at the cap (8, or the BitNode's home
+  // restriction) once cash covers the price, so an affordable refusal IS the cap.
+  if (c.cost <= c.money * c.frac) return `home cores at their maximum, ${c.before}`;
+  return `not buying a core (${c.before}): ${money$(ns, c.money)}, next core ${money$(ns, c.cost)} ` +
+    `(buys at ${ns.format.percent(c.frac, 0)} of cash)`;
+}
+
 /**
  * What stopped the NeuroFlux fill, which is what stopped the batch: it is the
  * only filler with no supply limit, so the batch is short exactly when it is.
@@ -582,6 +618,8 @@ export async function main(ns) {
     }
     const u = await call("upgrade", UPGRADE, 1);
     if (u) log(`upgrade: ${upgradeLine(ns, u)}`);
+    const c = await call("cores", CORES, 1);
+    if (c) log(`cores: ${coresLine(ns, c)}`);
     const line = `installing ${queued} augs${swept ? "" : " (the contract sweep could not start)"}, ` +
       "boot.js restarts with its defaults";
     log(`install: ${line}`);
@@ -707,6 +745,8 @@ export async function main(ns) {
     if (bought.length) {
       const u = await call("upgrade", UPGRADE, 1);
       if (u) log(`upgrade: ${upgradeLine(ns, u)}`);
+      const c = await call("cores", CORES, 1);
+      if (c) log(`cores: ${coresLine(ns, c)}`);
     }
   };
 
@@ -765,6 +805,8 @@ export async function main(ns) {
     if (tick % UPGRADE_EVERY === 0) {
       const u = await call("upgrade", UPGRADE);
       if (u) log(`upgrade: ${upgradeLine(ns, u)}`);
+      const c = await call("cores", CORES);
+      if (c) log(`cores: ${coresLine(ns, c)}`);
     }
 
     if (tick % PROGS_EVERY === 0) {

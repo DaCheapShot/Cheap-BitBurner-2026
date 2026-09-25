@@ -321,7 +321,7 @@ editor's RAM panel when one moves.
 | `sing/config.js` | singularity tunables, `SING_SERVICE`, `WORK_ORDER`, `CITY_GROUPS` | 0 |
 | `sing/plan.js` | `chooseAction` + `sameAsCurrent` — every decision, pure | 0 |
 | `sing/sing.js` | entry: resident supervisor; every singularity call is an rpc body | 2.60 |
-| ↳ twenty-seven bodies | transients: read, upgrade, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors | 2.35–6.60 |
+| ↳ twenty-eight bodies | transients: read, upgrade, cores, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors | 2.35–6.60 |
 | `sing/backdoor.js` | one fire-and-forget backdoor; many run at once | 5.60 each |
 | `hacknet/config.js` | hacknet tunables, the two service paths, the hash price | 0 |
 | `hacknet/math.js` | cost ladders, gain ratios, both plans - pure | 0 |
@@ -828,7 +828,7 @@ because `runToCompletion` blocks. `--no-contracts` opts out.
 
 ### The singularity subsystem (`scripts/sing/`)
 
-BitNode 4 automation: home RAM, TOR and darkweb programs, faction invites, travel to collect Tian
+BitNode 4 automation: home RAM and cores, TOR and darkweb programs, faction invites, travel to collect Tian
 Di Hui's and the chosen city group's, and the player's own work (company and faction rep; gym and
 Homicide only for an opted-in gang; a money crime when there is nothing else). Self-contained
 like `gang/`: it imports only `scripts/rpc.js` and re-exports one 0 GB constant from
@@ -843,7 +843,7 @@ split. Splitting *below* 6.60 lowers nothing and costs a round trip, which is wh
 and READ stay whole - READ sits exactly ON the ceiling since `getCompanyRep` joined it, so the
 next read it needs is a second body, not a bigger one. `tests/ram.test.mjs` prices every body
 through `bodiesOf()` - the only place a body is priced before the game does it - and pins all
-twenty-seven.
+twenty-eight.
 
 The split also retired two calls outright: `gymWorkout`, `commitCrime` and `workForFaction` all
 take `focus` as an argument, so `setFocus` is never needed, and starting work finishes the
@@ -993,7 +993,7 @@ prerequisite is neither owned nor earlier in the batch; then NeuroFlux levels fi
 dearer in money AND rep. It returns the batch only when queued + batch reaches `MIN_AUG_BATCH`
 (10) and cash covers all of it. 1.9 is the ceiling - Source-File 11 only lowers it - so the plan
 over-states and can never buy a batch it cannot finish. Whatever is left then goes on home RAM
-(UPGRADE at fraction 1): an install resets money and keeps home RAM. Shadows of Anarchy is never
+(UPGRADE, then CORES, at fraction 1): an install resets money and keeps home RAM and cores. CORES runs beside UPGRADE on every path, after it so RAM has first call, at `HOME_CORES_BUDGET_FRACTION` (0.10) on the cadence; it reads the core count off the price (`1e9 * 7.5^cores`) instead of a 2.00 GB `getServer`, which keeps it at 6.20. Shadows of Anarchy is never
 bought from - its augs price off their own ladder. Each read is its own body: together they would
 be 14.10 GB. What each faction sells and each aug's prerequisites are fixed for the node and kept
 in memory; prices and the owned list are re-read every pass. READ now runs FIRST in the tick, so
@@ -1027,7 +1027,7 @@ hand is gone. The callback is skipped only when home lacks the RAM, which cannot
 script was just killed. Boot's first pass ignores the cloud marker and re-roots and redeploys, the
 same path as a hand `run scripts/boot.js` after a hand install. Before it: the SWEEP body runs one
 contract sweep and waits it out (an install destroys every unsolved contract), then UPGRADE at
-fraction 1 takes the cash the install would reset. SWEEP is split from INSTALL - together 7.70 - and
+fraction 1, then CORES, take the cash the install would reset. SWEEP is split from INSTALL - together 7.70 - and
 its body imports `CONTRACTS_SERVICE` from `contracts/config.js`, the one cross-subtree import in
 sing/, 0 GB and billed to the transient. `AUTO_INSTALL` is read inside SWEEP, so it is LIVE like
 `GRIND_GANG_KARMA`: off, the queue waits for a hand install. A sweep over rpc's 10 s times out, and

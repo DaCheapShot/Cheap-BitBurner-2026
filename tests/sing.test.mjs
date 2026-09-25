@@ -55,17 +55,22 @@ async function driveSing(mods, {
   installed = [],
   // Extra getServer records by host - the backdoor pass reads them.
   servers = {},
+  homeCores = 1,
 } = {}) {
   const calls = [];
   let current = work;
   let tor = hasTor;
   let sleeps = 0;
+  let cores = homeCores;
   const rec = (name, fn) => (...a) => { calls.push(`${name}:${a.join(",")}`); return fn(...a); };
   const queued = [];
   const aug = (n) => Object.values(augs).flat().find((a) => a.name === n);
   const singularity = {
     getUpgradeHomeRamCost: () => 1e6,
     upgradeHomeRam: rec("upgradeHomeRam", () => true),
+    // Player.getUpgradeHomeCoresCost and the 8-core cap, as the fork has them.
+    getUpgradeHomeCoresCost: () => 1e9 * 7.5 ** cores,
+    upgradeHomeCores: rec("upgradeHomeCores", () => cores < 8 && ++cores > 0),
     purchaseTor: rec("purchaseTor", () => { tor = true; return true; }),
     // ServerProfiler is the cheapest and must still never be bought: not a port opener.
     getDarkwebPrograms: () => ["ServerProfiler.exe", "BruteSSH.exe", "FTPCrack.exe"],
@@ -963,6 +968,27 @@ export const tests = {
     assert(r.ns._log.slice(after).some((l) => l.includes("upgrade: bought")), "leftover goes on home RAM");
   },
 
+  // Cores ride with RAM: on the cadence at HOME_CORES_BUDGET_FRACTION, and at
+  // fraction 1 before an install. The count is derived from the price.
+  "home cores are bought after RAM, and the cap is named rather than retried": async () => {
+    const mods = await loadScripts();
+    // Home cash lives on the mock server, not the player. The flat $1m RAM price
+    // is raised so the RAM loop stays short; the mock never debits cash.
+    const cash = (money) => ({ home: { moneyAvailable: money } });
+    const api = { getUpgradeHomeRamCost: () => 1e10 };
+    const rich = await driveSing(mods, { ticks: 1, api, servers: cash(1e11) });
+    const i = rich.calls.findIndex((c) => c.startsWith("upgradeHomeCores:"));
+    assert(i > rich.calls.findIndex((c) => c.startsWith("upgradeHomeRam:")), `RAM first, then cores: ${rich.calls}`);
+    assert(rich.ns._log.some((l) => l.includes("bought 1 home core(s) 1 -> 2")), `bought one: ${rich.ns._log}`);
+    const poor = await driveSing(mods, { ticks: 1 });
+    assert(poor.count("upgradeHomeCores") === 0, "a $7.5b core is not 10% of $1b");
+    assert(poor.ns._log.some((l) => l.includes("not buying a core (1)")), "and the log says why");
+    const maxed = await driveSing(mods, {
+      ticks: 1, homeCores: 8, api: { getUpgradeHomeRamCost: () => Infinity }, servers: cash(1e20),
+    });
+    assert(maxed.ns._log.some((l) => l.includes("home cores at their maximum, 8")), `cap named: ${maxed.ns._log}`);
+  },
+
   // Phase 4. An install destroys every unsolved contract, so one sweep runs
   // first and is waited out; home RAM takes the cash the install would reset;
   // and the callback is boot.js, which the game runs with no arguments.
@@ -1200,7 +1226,7 @@ export const tests = {
     const r = await driveSing(mods, { ticks: 6, run: () => 0 });
     const warns = r.ns._log.filter((l) => l.includes("WARN"));
     const tags = warns.map((l) => l.match(/WARN: (\w+) failed/)[1]).sort();
-    assert(JSON.stringify(tags) === JSON.stringify(["backdoors", "invites", "read", "tor", "upgrade"]),
+    assert(JSON.stringify(tags) === JSON.stringify(["backdoors", "cores", "invites", "read", "tor", "upgrade"]),
       `each failing body should warn exactly once, got ${tags}`);
     assert(!r.ns._log.some((l) => l.includes("Parked")), "a RAM failure must never park the subsystem");
   },

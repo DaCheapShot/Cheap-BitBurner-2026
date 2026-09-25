@@ -225,8 +225,8 @@ export const tests = {
     const per = (n) => bodies.filter(([f]) => f === n).length;
     assert(per("gang/gang") === 5, `gang.js should have 5 bodies (tick, war, ascend, equip, create), found ${per("gang/gang")}`);
     assert(per("continuous/lib/math") === 1, `continuous/lib/math.js should have 1 body, found ${per("continuous/lib/math")}`);
-    assert(per("sing/sing") === 27,
-      `sing.js should have 27 bodies (upgrade, tor, progs, invites, join, read, gym, crime, faction, ` +
+    assert(per("sing/sing") === 28,
+      `sing.js should have 28 bodies (upgrade, cores, tor, progs, invites, join, read, gym, crime, faction, ` +
         `crime stats, crime chance, company, apply, travel, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, bitnode mults, sweep, ` +
         `install, backdoors, donate), found ${per("sing/sing")}`);
     assert(per("contracts/contracts") === 3, `contracts.js should have 3 bodies (find, submit, dummy), found ${per("contracts/contracts")}`);
