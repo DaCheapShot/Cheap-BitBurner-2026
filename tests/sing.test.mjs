@@ -94,6 +94,14 @@ async function driveSing(mods, {
       return true;
     }),
     commitCrime: rec("commitCrime", (crime) => { current = { type: "CRIME", crimeType: crime }; return 3000; }),
+    // Singularity.ts: false anywhere but the university's own city.
+    universityCourse: rec("universityCourse", (uni, course) => {
+      const city = { "Rothman University": "Sector-12", "Summit University": "Aevum",
+        "ZB Institute of Technology": "Volhaven" }[uni];
+      if (city !== p.city) return false;
+      current = { type: "CLASS", classType: course, location: uni };
+      return true;
+    }),
     workForFaction: rec("workForFaction", (faction, type) => {
       current = { type: "FACTION", factionName: faction, factionWorkType: type };
       return true;
@@ -683,7 +691,8 @@ export const tests = {
   "only the action bodies start work, one call each": () => {
     const STARTERS = ["gymWorkout", "commitCrime", "workForFaction", "universityCourse",
       "workForCompany", "stopAction", "setFocus"];
-    const OWNER = { GYM: "gymWorkout", CRIME: "commitCrime", FACTION: "workForFaction", COMPANY: "workForCompany" };
+    const OWNER = { GYM: "gymWorkout", CRIME: "commitCrime", FACTION: "workForFaction", COMPANY: "workForCompany",
+      STUDY: "universityCourse" };
     for (const [name, body] of Object.entries(bodies())) {
       for (const s of STARTERS) {
         if (OWNER[name] === s) continue;
@@ -1075,11 +1084,33 @@ export const tests = {
   // than nothing, and the best one, started once and left running.
   "nothing to work: the best-paying crime, started once": async () => {
     const mods = await loadScripts();
-    const r = await driveSing(mods, { ticks: 4 });
+    // Chongqing has no university, so the class is not on offer.
+    const r = await driveSing(mods, { ticks: 4, p: player({ city: "Chongqing" }) });
     const crimes = r.calls.filter((c) => c.startsWith("commitCrime:"));
     assert(JSON.stringify(crimes) === '["commitCrime:Shoplift,true"]', `one Shoplift, got ${crimes}`);
     assert(r.ns._log.some((l) => l.includes("crime Shoplift for money")), `why: ${r.ns._log.filter((l) => l.includes("work:"))}`);
     assert(!r.ns._log.some((l) => l.includes("WARN")), `a body failed: ${r.ns._log.filter((l) => l.includes("WARN"))}`);
+  },
+
+  // Nothing to work where a university stands: Algorithms, started once and
+  // left running, and the marker hashes.js buys Improve Studying off.
+  "nothing to work beside a university: a class, started once, marked for hashes": async () => {
+    const mods = await loadScripts();
+    const r = await driveSing(mods, { ticks: 4 });
+    const classes = r.calls.filter((c) => c.startsWith("universityCourse:"));
+    assert(JSON.stringify(classes) === '["universityCourse:Rothman University,Algorithms,true"]', `one class, got ${classes}`);
+    assert(r.count("commitCrime") === 0, "no crime beside it");
+    assert(r.ns.read("/data/studying.txt") === "study", `marker: "${r.ns.read("/data/studying.txt")}"`);
+    assert(!r.ns._log.some((l) => l.includes("WARN")), `a body failed: ${r.ns._log.filter((l) => l.includes("WARN"))}`);
+  },
+
+  "idle class: off by the live setting, or short of cash, it is crime again": async () => {
+    const mods = await loadScripts();
+    const off = await driveSing(mods, { ticks: 1, files: { "/data/settings.txt": '{"sing.idleStudy":0}' } });
+    assert(off.count("universityCourse") === 0 && off.count("commitCrime") === 1, `off: ${off.calls}`);
+    assert(off.ns.read("/data/studying.txt") === "", "no class, no marker");
+    const poor = await driveSing(mods, { ticks: 1, p: player({ money: 1e6 }) });
+    assert(poor.count("universityCourse") === 0 && poor.count("commitCrime") === 1, `poor: ${poor.calls}`);
   },
 
   "under ten queued: no sweep, no install": async () => {

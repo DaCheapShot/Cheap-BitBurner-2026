@@ -3,10 +3,11 @@ import {
   CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
+  STUDY_MARKER,
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTargets, planAugBuys,
-  canDonate, donationPerRep, bestCrime, chooseCityGroup,
+  canDonate, donationPerRep, bestCrime, chooseCityGroup, studyAction,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
@@ -199,16 +200,18 @@ return {
   hasSF2: reset.currentNode === 2 || reset.ownedSF.has(2),
   inGang: ns.gang.inGang(),
   grindKarma: setting(ns.read(SETTINGS_FILE), "sing.grindKarma") === 1,
+  idleStudy: setting(ns.read(SETTINGS_FILE), "sing.idleStudy") === 1,
   rep, workTypes, companyRep,
 };
 `;
 
-// The three action bodies. They alone may touch Player.currentWork - one slot,
+// The action bodies. They alone may touch Player.currentWork - one slot,
 // and every work-starting call finishes whatever held it.
 const GYM = `return ns.singularity.gymWorkout(args[0], args[1], args[2]);`;
 const CRIME = `return ns.singularity.commitCrime(args[0], args[1]);`;
 const FACTION = `return ns.singularity.workForFaction(args[0], args[1], args[2]);`;
 const COMPANY = `return ns.singularity.workForCompany(args[0], args[1]);`;
+const STUDY = `return ns.singularity.universityCourse(args[0], args[1], args[2]);`;
 
 /**
  * The idle fallback's two reads, 5.00 GB each so split. What a crime pays and
@@ -493,6 +496,7 @@ function backdoorWaitLine(level, waiting) {
 
 function describe(ns, a, r) {
   if (a.kind === "gym") return `gym ${a.stat} at ${a.gym}`;
+  if (a.kind === "study") return `${a.course} at ${a.university} - no faction or company work left`;
   if (a.kind === "crime" && a.money) return `crime ${a.crime} for money - no faction or company work left`;
   if (a.kind === "crime") {
     return `crime ${a.crime}, karma ${ns.format.number(r.player.karma, 2)} of ` +
@@ -514,6 +518,7 @@ function actionCall(a) {
   if (a.kind === "gym") return [GYM, a.gym, a.stat, WORK_FOCUS];
   if (a.kind === "crime") return [CRIME, a.crime, WORK_FOCUS];
   if (a.kind === "company") return [COMPANY, a.company, WORK_FOCUS];
+  if (a.kind === "study") return [STUDY, a.university, a.course, WORK_FOCUS];
   return [FACTION, a.faction, a.type, WORK_FOCUS];
 }
 
@@ -804,6 +809,12 @@ export async function main(ns) {
     log(`share: ${want ? "HELD - not doing faction work, the only work it multiplies" : "released - faction work"}`);
   };
 
+  /** STUDY_MARKER, only on a change - hashes.js buys Improve Studying off it. */
+  const markStudy = (studying) => {
+    const want = studying ? "study" : "";
+    if (ns.read(STUDY_MARKER) !== want) ns.write(STUDY_MARKER, want, "w");
+  };
+
   let lastCfgText = null;
   while (true) {
     // Its own knobs only (sing.*): the budgets are read inside the bodies and
@@ -868,7 +879,9 @@ export async function main(ns) {
       let action = chooseAction(r.player, st);
       // Nothing to work - the first stretch after an install, before any
       // invite. Money beats idling: it is what TOR, the programs, the Tian Di
-      // Hui trip and home RAM all wait on.
+      // Hui trip and home RAM all wait on. A class beats both where the hacking
+      // level is the wall - see IDLE_STUDY - and it is the user's switch.
+      if (action.kind === "idle") action = studyAction(r.player, r.idleStudy) ?? action;
       if (action.kind === "idle") {
         crimeStats ??= await call("crime stats", CRIME_STATS);
         const chances = crimeStats && await call("crime chance", CRIME_CHANCE);
@@ -893,6 +906,7 @@ export async function main(ns) {
         log(`work: ${started ? "started" : "could not start"} ${what}`);
       }
       holdShare(started ? action.kind === "faction" : r.work?.type === "FACTION");
+      markStudy(action.kind === "study" && (started || sameAsCurrent(r.work, action)));
     }
 
     if (!backdoorsDone && tick % BACKDOOR_EVERY === 0) await backdoorPass();

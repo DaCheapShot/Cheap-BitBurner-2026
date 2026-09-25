@@ -365,6 +365,28 @@ export function minSecurityFactor(reqSkill, minSec) {
 // ------------------------------------------------------------- hash plan ---
 
 /**
+ * Improve Studying levels to buy this sweep: as many as the balance covers, up
+ * to `cap`, and only while the player is in a class - the upgrade does nothing
+ * for any other work. It runs BEFORE planHashes, which is handed what is left.
+ *
+ * `saving` is true when a level is wanted, fits the store and is not yet
+ * affordable. The sweep must not sell then: the same rule planHashes keeps for
+ * its own out-of-reach buys - selling what is being saved means never buying.
+ * A level too dear for the whole store never fills, so it saves nothing.
+ *
+ * @param {object} s { studying, level, perLevel, cap, hashes, capacity }
+ */
+export function planStudy(s) {
+  const none = { count: 0, hashes: 0, saving: false };
+  if (!s.studying || !(s.perLevel > 0) || s.level >= s.cap) return none;
+  let count = 0;
+  while (s.level + count < s.cap && bundlePrice(s.perLevel, s.level, count + 1) <= s.hashes) count++;
+  if (count) return { count, hashes: bundlePrice(s.perLevel, s.level, count), saving: false };
+  return { ...none, saving: bundlePrice(s.perLevel, s.level, 1) <= s.capacity };
+}
+
+
+/**
  * What to spend hashes on this sweep.
  *
  * Both upgrades reduce to one number - the factor by which the batcher's income

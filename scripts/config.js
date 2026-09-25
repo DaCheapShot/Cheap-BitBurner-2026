@@ -111,6 +111,14 @@ export const SHARE_MAX_FRACTION = 0.90;
 export const SHARE_HOLD_MARKER = "/data/share-hold.txt";
 
 /**
+ * "study" while sing holds the player in a university class, "" otherwise.
+ * Written by sing/sing.js, read by hacknet/hashes.js - which buys Improve
+ * Studying only while it is set, since the upgrade does nothing for any other
+ * work. Here because it crosses two subtrees, like SHARE_HOLD_MARKER.
+ */
+export const STUDY_MARKER = "/data/studying.txt";
+
+/**
  * The share fraction actually in force: SHARE_MARKER's, unless sing holds it.
  * The manager and sharemode.js both read share through this, so they cannot
  * disagree about a hold. Pure, like everything in this file.

@@ -1,4 +1,4 @@
-export { TARGETS_MARKER, HACKNET_HOST_PREFIX } from "scripts/config.js";
+export { TARGETS_MARKER, HACKNET_HOST_PREFIX, STUDY_MARKER } from "scripts/config.js";
 
 /**
  * Hacknet tunables. No ns call anywhere in this file, and it must stay that
@@ -91,3 +91,15 @@ export const MIN_SECURITY_UPGRADE = "Reduce Minimum Security";
  * into home RAM where a parked hash does not.
  */
 export const SELL_MONEY_UPGRADE = "Sell for Money";
+
+/**
+ * +20% class exp per level (HashManager.getStudyMult: 1 + 20 * level / 100),
+ * costPerLevel 50, so level L costs 50 * (L+1). Bought only while sing holds
+ * the player in a class (STUDY_MARKER), and ahead of any sale: it pays in exp,
+ * which no dollar figure here can be weighed against, so it is capped by a
+ * level count rather than priced. Measured in BN9, Algorithms ~96 exp/s, so a
+ * level is ~+19 exp/s. Resets at an install, like every hash upgrade.
+ */
+export const STUDY_UPGRADE = "Improve Studying";
+/** Default of the live `hacknet.studyLevels` - 10 levels is 2750 hashes in all. */
+export const STUDY_LEVELS = 10;

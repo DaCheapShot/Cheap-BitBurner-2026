@@ -82,12 +82,13 @@ run scripts/contracts/contracts.js --forget  # clear the skip list, after fixing
 run scripts/hacknet/hacknet.js --dry-run     # plan a hacknet buy and print it, buy nothing
 run scripts/hacknet/hashes.js --dry-run      # plan a hash spend and print it, spend nothing
 run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
+run scripts/expwatch.js 60              # hacking exp/s per 60 s window, in a tail
 run scripts/set.js                      # list live settings (budgets) and their defaults
 run scripts/set.js hacknet.cash 0.9     # override one, live - next sweep, no restart
 run scripts/set.js hacknet.cash default # back to config.js's value
 run scripts/set.js gang.enabled off     # live switch: boot stops gang.js next tick
 run scripts/set.js boot.tick 30         # cadences: boot.tick, sing.tick, hacknet.every, gang.*Every
-run scripts/set.js sing.autoInstall off # sing: autoInstall, grindKarma, minAugBatch
+run scripts/set.js sing.autoInstall off # sing: autoInstall, grindKarma, idleStudy, minAugBatch
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -329,7 +330,7 @@ editor's RAM panel when one moves.
 | `sing/config.js` | singularity tunables, `SING_SERVICE`, `WORK_ORDER`, `CITY_GROUPS` | 0 |
 | `sing/plan.js` | `chooseAction` + `sameAsCurrent` — every decision, pure | 0 |
 | `sing/sing.js` | entry: resident supervisor; every singularity call is an rpc body | 2.60 |
-| ↳ twenty-eight bodies | transients: read, upgrade, cores, tor, progs, invites, join, travel, apply, gym, crime, faction, company, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors | 2.35–6.60 |
+| ↳ twenty-nine bodies | transients: read, upgrade, cores, tor, progs, invites, join, travel, apply, gym, crime, study, faction, company, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors | 2.35–6.60 |
 | `sing/backdoor.js` | one fire-and-forget backdoor; many run at once | 5.60 each |
 | `hacknet/config.js` | hacknet tunables, the two service paths, the hash price | 0 |
 | `hacknet/math.js` | cost ladders, gain ratios, both plans - pure | 0 |
@@ -878,7 +879,7 @@ split. Splitting *below* 6.60 lowers nothing and costs a round trip, which is wh
 and READ stay whole - READ sits exactly ON the ceiling since `getCompanyRep` joined it, so the
 next read it needs is a second body, not a bigger one. `tests/ram.test.mjs` prices every body
 through `bodiesOf()` - the only place a body is priced before the game does it - and pins all
-twenty-eight.
+twenty-nine.
 
 The split also retired two calls outright: `gymWorkout`, `commitCrime` and `workForFaction` all
 take `focus` as an argument, so `setFocus` is never needed, and starting work finishes the
@@ -957,9 +958,18 @@ the programs, the Tian Di Hui trip and home RAM all wait on money. `bestCrime` t
 carries the multipliers - and `getCrimeChance`, every idle tick, since odds move with every stat
 point), so no crime table is transcribed. It picks only from `MONEY_CRIMES` - Shoplift, Mug, Deal
 Drugs, Homicide, all 2-10 s - the user's rule: a switch or real work turning up restarts the crime
-and forfeits the unit, which on Heist is 600 s. Crime was chosen over the university: the batcher already
-out-earns a class in hacking exp, and crime also trains the combat stats. Only a failed read leaves
-it truly idle.
+and forfeits the unit, which on Heist is 600 s. Only a failed read leaves it truly idle.
+
+**Unless a university is where the player stands: then a class.** `studyAction` puts the player in
+Algorithms at the city's university (Rothman, Summit, ZB - no travel for it, the city group owns
+where the player stands) when the live `sing.idleStudy` is on and cash is over `STUDY_MIN_MONEY`;
+anywhere else it is crime as above. Crime used to win this on the theory that the batcher
+out-earns a class in hacking exp, which BitNode 9 disproved: `HackExpGain` 0.05 scales the
+batcher's exp and NOT a class's (`calculateClassEarnings`), and a live measure read crime ~16
+exp/s against Algorithms ~96. While sing holds a class it writes `"study"` to `STUDY_MARKER`, and
+`hashes.js` buys Improve Studying (+20% class exp a level) off it, up to `hacknet.studyLevels`,
+BEFORE anything else - and holds the store rather than sell while a level is out of reach but
+fits, the same save-don't-sell rule `planHashes` keeps for its own buys.
 
 **One city group per install, and travel collects its invites.** The six city factions are three
 enemy groups (`FactionInfo.tsx`): Sector-12 + Aevum, Chongqing + New Tokyo + Ishima, and

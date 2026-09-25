@@ -402,6 +402,8 @@ export const tests = {
       // Anything more READ needs is a second read body, not a bigger one.
       READ: 6.60, GYM: 3.60, CRIME: 6.60, FACTION: 4.60,
       COMPANY: 4.60, APPLY: 4.60, TRAVEL: 3.60,
+      // universityCourse alone: the idle class, see IDLE_STUDY.
+      STUDY: 3.60,
       // The aug reads, one call each: together they would be 14.10.
       OWNED: 6.60, FAC_AUGS: 6.60, PREREQ: 6.60, AUG_INFO: 6.60, BUY: 6.60,
       // Favor split from READ (full); DONATE is donateToFaction alone.

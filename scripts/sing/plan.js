@@ -4,6 +4,7 @@ import {
   TDH_FACTION, TDH_CITIES, TDH_HACKING, TDH_MONEY, TRAVEL_COST, CITY_GROUPS, CITY_INVITE_MONEY,
   MIN_AUG_BATCH, NFG, AUG_PRICE_MULT, NFG_LEVEL_MULT, AUG_SKIP_FACTIONS,
   DONATE_MONEY_PER_REP, RED_PILL, MONEY_CRIMES,
+  STUDY_COURSE, UNIVERSITIES, STUDY_MIN_MONEY,
 } from "./config.js";
 
 /**
@@ -385,6 +386,19 @@ export function bestCrime(stats, chances) {
 }
 
 /**
+ * The idle fallback's first choice: a class, when asked for (`idleStudy`, the
+ * live sing.idleStudy), where the player stands has a university and the cash
+ * can carry it. Otherwise null, and sing.js falls through to bestCrime - a
+ * city with no university must still earn something rather than retry a class
+ * the game refuses every tick.
+ */
+export function studyAction(player, idleStudy) {
+  const university = UNIVERSITIES[player.city];
+  if (!idleStudy || !university || player.money < STUDY_MIN_MONEY) return null;
+  return { kind: "study", university, course: STUDY_COURSE };
+}
+
+/**
  * Is `action` already what the player is doing?
  *
  * The guard that makes invariant 2 structural: an action body runs only when
@@ -400,6 +414,9 @@ export function sameAsCurrent(work, action) {
     return work.type === "CLASS" && work.classType === action.stat && work.location === action.gym;
   }
   if (action.kind === "crime") return work.type === "CRIME" && work.crimeType === action.crime;
+  if (action.kind === "study") {
+    return work.type === "CLASS" && work.classType === action.course && work.location === action.university;
+  }
   if (action.kind === "faction") {
     return work.type === "FACTION" && work.factionName === action.faction &&
       work.factionWorkType === action.type;
