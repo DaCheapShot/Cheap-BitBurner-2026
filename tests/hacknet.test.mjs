@@ -848,7 +848,8 @@ export const tests = {
     assert(src.includes("HACKNET_MONEY_SERVICE") && src.includes("HACKNET_HASH_SERVICE"),
       "boot must import both service paths from hacknet/config.js");
     assert(src.includes("--no-hacknet"), "boot must accept --no-hacknet");
-    assert(src.includes("HACKNET_EVERY"), "boot must run the sweeps on a cadence");
+    // The cadence is the live `hacknet.every` setting, defaulting to HACKNET_EVERY.
+    assert(src.includes('"hacknet.every"'), "boot must run the sweeps on a cadence");
 
     // runToCompletion, never ensureService: a sweep that exits would be
     // relaunched every tick forever.

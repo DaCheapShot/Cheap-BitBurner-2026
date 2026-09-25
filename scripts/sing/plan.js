@@ -94,11 +94,13 @@ export function repTargets(augsOf, owned, info, priority = null) {
  * @param o.donate   { perRep, can(faction) } - or null, and nothing is donated
  * @param o.priority {aug: bool} - priority augs are planned first (tier 1), each class dearest first
  * @param o.force    buy what fits even under MIN_AUG_BATCH
+ * @param o.minBatch the live `sing.minAugBatch`; MIN_AUG_BATCH when omitted
  * @returns {{ buys: {faction, name, cost}[], donations: {faction, amount, rep}[],
  *             batch: number, total: number, eligible: number,
  *             nfg: {faction, levels, why: "rep"|"cash", ...}|null }}
  */
-export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, donate = null, priority = null, force = false }) {
+export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, donate = null, priority = null, force = false,
+  minBatch = MIN_AUG_BATCH }) {
   // Who sells each aug, among joined factions we may buy from.
   const sellers = {};
   for (const [faction, augs] of Object.entries(augsOf)) {
@@ -172,7 +174,7 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, d
   const batch = queued + buys.length;
   const donations = Object.entries(donated)
     .map(([faction, amount]) => ({ faction, amount, rep: amount / donate.perRep }));
-  const go = batch >= MIN_AUG_BATCH || force || buys.some((b) => b.name === RED_PILL);
+  const go = batch >= minBatch || force || buys.some((b) => b.name === RED_PILL);
   return { buys: go ? buys : [], donations: go ? donations : [], batch, total, eligible: eligible.length, nfg };
 }
 

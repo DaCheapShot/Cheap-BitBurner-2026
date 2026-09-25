@@ -1,4 +1,5 @@
-import { TICK_EVERY, ASCEND_EVERY, EQUIP_EVERY, WAR_EVERY, ASCEND_MULT_THRESHOLD } from "./config.js";
+import { ASCEND_MULT_THRESHOLD } from "./config.js";
+import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
 import { rpc } from "scripts/rpc.js";
 
 /**
@@ -164,6 +165,7 @@ return { done, best, blocked, respect };
  */
 const EQUIP = `
 import { planPurchases, equipBudget, eligibleItems, considerItems } from "/scripts/gang/math.js";
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
 const state = JSON.parse(args[0]);
 const members = ns.gang.getMemberNames().map((n) => ns.gang.getMemberInformation(n));
 const items = ns.gang.getEquipmentNames().map((n) => ({
@@ -172,7 +174,7 @@ const items = ns.gang.getEquipmentNames().map((n) => ({
   type: ns.gang.getEquipmentType(n),
   stats: ns.gang.getEquipmentStats(n),
 }));
-const budget = equipBudget(ns.getServerMoneyAvailable("home"));
+const budget = equipBudget(ns.getServerMoneyAvailable("home"), setting(ns.read(SETTINGS_FILE), "gang.equip"));
 const buys = planPurchases(members, items, budget, state.isHacking);
 const eligible = eligibleItems(items);
 const pool = considerItems(members, items, state.isHacking);
@@ -283,16 +285,24 @@ export async function main(ns) {
   log("gang supervisor up");
 
   let updates = 0;
+  let lastCfgText = null;
   let state = null;
   let lastPhase = "";
 
   while (true) {
     await ns.gang.nextUpdate();
     updates++;
+    // Cadences are live settings, re-read each update (ns.read is 0 GB), so
+    // scripts/set.js gang.equipEvery 5 needs no restart.
+    const cfgText = ns.read(SETTINGS_FILE);
+    const news = settingsLog(lastCfgText, cfgText, "gang.");
+    if (news) log(news);
+    lastCfgText = cfgText;
+    const every = (key) => updates % setting(cfgText, key) === 0;
 
     // tick first, always: it produces the state ascend and equip decide from,
     // so on a pass where several coincide they get this pass's numbers.
-    if (updates % TICK_EVERY === 0) {
+    if (every("gang.tickEvery")) {
       const t = await call("tick", TICK);
       if (t?.refused) {
         ns.tprint("ERROR: gang/gang.js manages COMBAT gangs and this is a hacking gang. Refusing.");
@@ -302,17 +312,17 @@ export async function main(ns) {
         log(`tick: ${tickLine(ns, t)}`);
       }
     }
-    if (updates % WAR_EVERY === 0) {
+    if (every("gang.warEvery")) {
       const w = await call("war", WAR);
       if (w) log(`war: ${warLine(ns, w)}`);
     }
     // No tick yet means no respect guard to check against. Skipping is right;
     // guessing at the guard is not.
-    if (updates % ASCEND_EVERY === 0) {
+    if (every("gang.ascendEvery")) {
       const a = state && (await call("ascend", ASCEND, JSON.stringify(state)));
       log(`ascend: ${a ? ascendLine(ns, a, state) : state ? "skipped" : "no tick yet, skipping"}`);
     }
-    if (updates % EQUIP_EVERY === 0) {
+    if (every("gang.equipEvery")) {
       const e = state && (await call("equip", EQUIP, JSON.stringify(state)));
       log(`equip: ${e ? equipLine(ns, e, state) : state ? "skipped" : "no tick yet, skipping"}`);
     }

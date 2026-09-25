@@ -1,14 +1,15 @@
 import {
-  SING_TICK_MS, UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
-  PROG_BUDGET_FRACTION, CITY_GROUPS,
+  UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
+  CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
-  WORK_ORDER, MIN_AUG_BATCH, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
+  WORK_ORDER, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTargets, planAugBuys,
   canDonate, donationPerRep, bestCrime, chooseCityGroup,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
+import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
 
 /**
  * The singularity supervisor: a cheap resident loop whose singularity calls all
@@ -78,14 +79,14 @@ import { rpc } from "scripts/rpc.js";
 
 /**
  * Buy home RAM upgrades while each costs at most a fraction of the cash left:
- * HOME_RAM_BUDGET_FRACTION normally, args[0] when given - 1 after an aug
+ * the live `sing.homeRam` setting (settings.js) normally, args[0] when given - 1 after an aug
  * batch, which spends everything an install would reset anyway. Each upgrade
  * doubles the next price, so at 0.25 this is usually one. A non-finite cost
  * would cross JSON as null, so it crosses as -1.
  */
 const UPGRADE = `
-import { HOME_RAM_BUDGET_FRACTION } from "/scripts/sing/config.js";
-const frac = args.length ? Number(args[0]) : HOME_RAM_BUDGET_FRACTION;
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
+const frac = args.length ? Number(args[0]) : setting(ns.read(SETTINGS_FILE), "sing.homeRam");
 let money = ns.getServerMoneyAvailable("home");
 const before = ns.getServerMaxRam("home");
 let cost = ns.singularity.getUpgradeHomeRamCost();
@@ -112,8 +113,8 @@ return {
  * upgradeHomeCores returns false instead.
  */
 const CORES = `
-import { HOME_CORES_BUDGET_FRACTION } from "/scripts/sing/config.js";
-const frac = args.length ? Number(args[0]) : HOME_CORES_BUDGET_FRACTION;
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
+const frac = args.length ? Number(args[0]) : setting(ns.read(SETTINGS_FILE), "sing.homeCores");
 const coresAt = (c) => Math.round(Math.log(c / 1e9) / Math.log(7.5));
 let money = ns.getServerMoneyAvailable("home");
 let cost = ns.singularity.getUpgradeHomeCoresCost();
@@ -136,12 +137,14 @@ return { had, owned: had || ns.singularity.purchaseTor() };
 `;
 
 /**
- * Cheapest WANTED program first, each at most PROG_BUDGET_FRACTION of what is
+ * Cheapest WANTED program first, each at most the live `sing.progs` fraction of what is
  * left. getDarkwebProgramCost returns 0 for a program already owned, so it
  * doubles as the ownership check and fileExists is not needed.
  */
 const PROGS = `
-import { PROG_BUDGET_FRACTION, PROGS_WANTED } from "/scripts/sing/config.js";
+import { PROGS_WANTED } from "/scripts/sing/config.js";
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
+const frac = setting(ns.read(SETTINGS_FILE), "sing.progs");
 let money = ns.getServerMoneyAvailable("home");
 const want = ns.singularity.getDarkwebPrograms()
   .filter((name) => PROGS_WANTED.includes(name))
@@ -150,13 +153,13 @@ const want = ns.singularity.getDarkwebPrograms()
   .sort((a, b) => a.cost - b.cost);
 const bought = [];
 for (const p of want) {
-  if (p.cost > money * PROG_BUDGET_FRACTION) break;
+  if (p.cost > money * frac) break;
   if (!ns.singularity.purchaseProgram(p.name)) break;
   money -= p.cost;
   bought.push(p.name);
 }
 const next = want[bought.length];
-return { bought, left: want.length - bought.length, next: next ? next.cost : -1, money };
+return { bought, left: want.length - bought.length, next: next ? next.cost : -1, money, frac };
 `;
 
 /** Split from JOIN: the deny filter runs resident between the two. */
@@ -173,12 +176,13 @@ return joined;
  * Map into {} - returned raw, the SF2 gate would read false forever with no
  * error - so it is collapsed to a boolean here, inside the transient.
  *
- * GRIND_GANG_KARMA rides along from config for a different reason: a body
- * re-imports config.js every run, so the flag is LIVE - flip it and the next
- * tick obeys. Read resident, it would be frozen until sing restarted.
+ * The `sing.grindKarma` setting rides along for a different reason: a body
+ * reads it every run, so the flag is LIVE - `set.js sing.grindKarma on` and the
+ * next tick obeys. Read resident, it would be frozen until sing restarted.
  */
 const READ = `
-import { WORK_ORDER, GRIND_GANG_KARMA } from "/scripts/sing/config.js";
+import { WORK_ORDER } from "/scripts/sing/config.js";
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
 const p = ns.getPlayer();
 const reset = ns.getResetInfo();
 const rep = {};
@@ -194,7 +198,7 @@ return {
   work: ns.singularity.getCurrentWork(),
   hasSF2: reset.currentNode === 2 || reset.ownedSF.has(2),
   inGang: ns.gang.inGang(),
-  grindKarma: GRIND_GANG_KARMA,
+  grindKarma: setting(ns.read(SETTINGS_FILE), "sing.grindKarma") === 1,
   rep, workTypes, companyRep,
 };
 `;
@@ -340,9 +344,9 @@ const BN_MULTS = `return ns.getBitNodeMultipliers().FactionWorkRepGain;`;
  * the install waits for the next pass. Split from INSTALL: together 7.70.
  */
 const SWEEP = `
-import { AUTO_INSTALL } from "/scripts/sing/config.js";
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
 import { CONTRACTS_SERVICE } from "/scripts/contracts/config.js";
-if (!AUTO_INSTALL) return -1;
+if (!setting(ns.read(SETTINGS_FILE), "sing.autoInstall")) return -1;
 const pid = ns.run(CONTRACTS_SERVICE);
 while (pid && ns.isRunning(pid)) await ns.sleep(200);
 return pid;
@@ -443,9 +447,9 @@ function nfgLine(ns, nfg) {
   return `${at}, then the next costs ${money$(ns, nfg.cost)} against ${money$(ns, nfg.left)} left`;
 }
 
-function augsWaitLine(ns, plan, queued, cash) {
-  if (queued >= MIN_AUG_BATCH) return `${queued} queued; nothing more affordable now`;
-  return `waiting: best batch is ${plan.batch} of ${MIN_AUG_BATCH} (${queued} queued), ` +
+function augsWaitLine(ns, plan, queued, cash, minBatch) {
+  if (queued >= minBatch) return `${queued} queued; nothing more affordable now`;
+  return `waiting: best batch is ${plan.batch} of ${minBatch} (${queued} queued), ` +
     `${plan.eligible} unlocked by rep or favor, cash ${money$(ns, cash)} - ${nfgLine(ns, plan.nfg)}`;
 }
 
@@ -457,7 +461,7 @@ function progsLine(ns, p) {
   if (p.bought.length) return `bought ${p.bought.join(", ")}${p.left ? ` - ${p.left} left` : ""}`;
   if (!p.left) return "every wanted program owned";
   return `nothing bought: ${p.left} left, cheapest ${money$(ns, p.next)} against ` +
-    `${money$(ns, p.money)} cash (buys at ${ns.format.percent(PROG_BUDGET_FRACTION, 0)})`;
+    `${money$(ns, p.money)} cash (buys at ${ns.format.percent(p.frac, 0)})`;
 }
 
 function joinLine(invites, joined, deny) {
@@ -613,7 +617,7 @@ export async function main(ns) {
     const swept = await call("sweep", SWEEP);
     if (swept === null) return;
     if (swept < 0) {
-      log(`install: AUTO_INSTALL is off - ${queued} queued, install by hand`);
+      log(`install: sing.autoInstall is off - ${queued} queued, install by hand`);
       return;
     }
     const u = await call("upgrade", UPGRADE, 1);
@@ -650,6 +654,9 @@ export async function main(ns) {
    * above for why.
    */
   const augsPass = async (r) => {
+    // Live `sing.minAugBatch`, read once per pass so the plan, the log and the
+    // install trigger below all agree on the same number.
+    const minBatch = setting(ns.read(SETTINGS_FILE), "sing.minAugBatch");
     const owned = await call("owned", OWNED);
     if (!owned) return;
     // Every faction WORK_ORDER names, joined or not: a company step and a city
@@ -705,10 +712,11 @@ export async function main(ns) {
     const force = await crossesFavorBar(r, owned);
     const plan = planAugBuys({
       augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash, donate, priority, force,
+      minBatch,
     });
     if (!plan.buys.length) {
-      log(`augs: ${augsWaitLine(ns, plan, owned.queued, cash)}`);
-      if (owned.queued >= MIN_AUG_BATCH || owned.pill || (force && owned.queued)) await install(owned.queued);
+      log(`augs: ${augsWaitLine(ns, plan, owned.queued, cash, minBatch)}`);
+      if (owned.queued >= minBatch || owned.pill || (force && owned.queued)) await install(owned.queued);
       return;
     }
     // The rep first, then the augs it unlocks. A refused donation stops the
@@ -739,7 +747,7 @@ export async function main(ns) {
     const now = [...owned.all, ...bought];
     targets = repTargets(augsOf, now, info);
     priorityTargets = repTargets(augsOf, now, info, priority);
-    if (queued >= MIN_AUG_BATCH || force || owned.pill || bought.includes(RED_PILL)) await install(queued);
+    if (queued >= minBatch || force || owned.pill || bought.includes(RED_PILL)) await install(queued);
     // Still here, so not installed. What is left would be reset by the install
     // when it comes; home RAM survives it.
     if (bought.length) {
@@ -796,7 +804,15 @@ export async function main(ns) {
     log(`share: ${want ? "HELD - not doing faction work, the only work it multiplies" : "released - faction work"}`);
   };
 
+  let lastCfgText = null;
   while (true) {
+    // Its own knobs only (sing.*): the budgets are read inside the bodies and
+    // the tick below, so this is the line that says when they took effect.
+    const cfgText = ns.read(SETTINGS_FILE);
+    const news = settingsLog(lastCfgText, cfgText, "sing.");
+    if (news) log(news);
+    lastCfgText = cfgText;
+
     // READ first: the aug pass plans against its money and rep, and gets the
     // cash before the home upgrade's 25% can take it.
     const r = await call("read", READ);
@@ -882,6 +898,8 @@ export async function main(ns) {
     if (!backdoorsDone && tick % BACKDOOR_EVERY === 0) await backdoorPass();
 
     tick++;
-    await ns.sleep(SING_TICK_MS);
+    // Live: `sing.tick` from scripts/set.js. Every cadence above is counted in
+    // ticks, so this scales all of them together - by design.
+    await ns.sleep(setting(ns.read(SETTINGS_FILE), "sing.tick") * 1000);
   }
 }

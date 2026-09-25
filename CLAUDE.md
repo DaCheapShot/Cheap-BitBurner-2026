@@ -82,6 +82,12 @@ run scripts/contracts/contracts.js --forget  # clear the skip list, after fixing
 run scripts/hacknet/hacknet.js --dry-run     # plan a hacknet buy and print it, buy nothing
 run scripts/hacknet/hashes.js --dry-run      # plan a hash spend and print it, spend nothing
 run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
+run scripts/set.js                      # list live settings (budgets) and their defaults
+run scripts/set.js hacknet.cash 0.9     # override one, live - next sweep, no restart
+run scripts/set.js hacknet.cash default # back to config.js's value
+run scripts/set.js gang.enabled off     # live switch: boot stops gang.js next tick
+run scripts/set.js boot.tick 30         # cadences: boot.tick, sing.tick, hacknet.every, gang.*Every
+run scripts/set.js sing.autoInstall off # sing: autoInstall, grindKarma, minAugBatch
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -298,6 +304,8 @@ editor's RAM panel when one moves.
 |---|---|---|
 | `config.js` | every tunable, shared so nothing drifts | 0 |
 | `rpc.js` | run a body in a throwaway script, get its value back | 1.00 |
+| `settings.js` | live overrides registry (`KNOBS`) + parser for `/data/settings.txt` | 0 |
+| `set.js` | terminal CLI that writes `/data/settings.txt` | 1.60 |
 | `boot.js` | supervisor, kills retired managers | 3.50 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
@@ -343,6 +351,32 @@ it grants no faction. `fulcrumassets` is excluded: Fulcrum also requires employm
 and company rep, so its backdoor never invites on its own. `w0r1d_d43m0n` is off the
 network until The Red Pill is installed (`Prestige.ts` links it to `The-Cave` there),
 so unreachable rows are dropped rather than reported as an error.
+
+### Live settings (`settings.js` / `set.js`)
+
+`set.js` writes a JSON object to `/data/settings.txt`; readers call
+`setting(ns.read(SETTINGS_FILE), key)` **at the point of use** (per sweep, per loop step, inside
+the rpc body), so a change needs no restart. Defaults are imported from the owning `config.js`,
+which stays the one home of a default. `setting()` never throws - a mangled file falls back to
+defaults - and `setSetting()` is where bad input is refused. Home-only file is fine because every
+reader runs on home; a worker on another host would need a port (see share).
+
+**Switches** (`cloud.enabled|gang|sing|hacknet|contracts`, on/off) are read by `boot.js` every
+tick. Off STOPS a running resident (cloud, gang, sing) and skips a transient; sing off also clears
+`SHARE_HOLD_MARKER`, since a killed sing cannot. The `--no-X` flags keep their old meaning (don't
+start, never kill) - a switch that left gang.js running would change nothing visible. The manager
+has no switch: stopping it belongs to `--no-manager` and the retired-manager/orphan-kill rules.
+
+**Cadences** (`boot.tick`, `sing.tick` in seconds; `hacknet.every` in boot ticks; `gang.tickEvery|
+warEvery|ascendEvery|equipEvery` in gang updates) are re-read at the top of each loop. Counts are
+`int` knobs - a fractional modulus never hits 0 and would silently stop the thing it paces.
+`--interval` still pins boot's tick. `sing.tick` scales every sing cadence with it, on purpose:
+they are all counted in ticks.
+
+Not an in-game rewrite of `config.js`: filesync pushes disk -> game on save/connect and would
+silently revert it. Adding a knob = one `KNOBS` entry + swap the constant for `setting()` at its
+consumer. rpc bodies import it as `"/scripts/settings.js"` (leading slash, the gang body rule);
+resident files as `"scripts/settings.js"`.
 
 ### Share mode
 
@@ -675,8 +709,9 @@ Things that look arbitrary in there and aren't:
   which is the batcher's whole growth path, stops growing.
 
 **Which config changes need a restart.** `gang.js` is the only long-lived process, so it is the
-only one holding stale constants: `TICK_EVERY`, `WAR_EVERY`, `ASCEND_EVERY`, `EQUIP_EVERY`, and the
-`ASCEND_MULT_THRESHOLD` its log line quotes, are frozen at the value it started with. **Everything else is read inside an rpc
+only one holding stale constants: the `ASCEND_MULT_THRESHOLD` its log line quotes is frozen at the
+value it started with. The four cadences (`TICK_EVERY` etc.) are only defaults now - the live
+`gang.*Every` settings are re-read every update. **Everything else is read inside an rpc
 body and takes effect on that body's next run** — `Script.ts` cascades
 `invalidateModule()` to every dependent, so writing `config.js` re-compiles `math.js` and every
 generated transient that imports it, and the next `ns.run` picks up the new value with no restart.
@@ -886,8 +921,8 @@ worst overlap of awaited transients from three processes (contracts find 12.00 +
 **The gang grind is opt-in, and LIVE.** `GRIND_GANG_KARMA` defaults off: -54000 karma is ~18000
 successful homicides, ~15 hours even at 100% success, that earn no rep anywhere. The gym goes with
 it - Homicide's success and the crime factions' combat bars are all the combat stats serve here.
-The flag is read inside the READ body, not by `plan.js`: a body re-imports `config.js` every run,
-so flipping it takes effect next tick, while anything the resident process imports (the cadences,
+The flag is the live `sing.grindKarma` setting (default `GRIND_GANG_KARMA`), read inside the READ
+body, not by `plan.js`, so `set.js sing.grindKarma on` takes effect next tick, while anything the resident process imports (the cadences,
 `WORK_ORDER`) is frozen until sing restarts. The tick is 20 s and every cadence is counted in
 ticks, sized so upgrade and join run each minute and programs and promotions every two - change
 the tick and re-derive them.
@@ -1029,8 +1064,9 @@ same path as a hand `run scripts/boot.js` after a hand install. Before it: the S
 contract sweep and waits it out (an install destroys every unsolved contract), then UPGRADE at
 fraction 1, then CORES, take the cash the install would reset. SWEEP is split from INSTALL - together 7.70 - and
 its body imports `CONTRACTS_SERVICE` from `contracts/config.js`, the one cross-subtree import in
-sing/, 0 GB and billed to the transient. `AUTO_INSTALL` is read inside SWEEP, so it is LIVE like
-`GRIND_GANG_KARMA`: off, the queue waits for a hand install. A sweep over rpc's 10 s times out, and
+sing/, 0 GB and billed to the transient. `sing.autoInstall` (default `AUTO_INSTALL`) is read inside SWEEP,
+so it is LIVE like `sing.grindKarma`: off, the queue waits for a hand install. `sing.minAugBatch`
+(default `MIN_AUG_BATCH`) is read once per aug pass and passed to `planAugBuys` as `minBatch`. A sweep over rpc's 10 s times out, and
 the install waits for the next pass rather than kill the sweep mid-attempt.
 
 **Two installs skip `MIN_AUG_BATCH`, both the user's rule, both aimed at ending the node.** The

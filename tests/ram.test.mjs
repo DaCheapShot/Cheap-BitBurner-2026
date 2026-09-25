@@ -592,6 +592,15 @@ export const tests = {
   // billed function and every importer is paying for it.
   // The report exists to catch THIS file's model being wrong, so it has to stay
   // runnable on the smallest home that could need it.
+  // settings.js is imported by cloud, the hacknet sweeps and sing/gang rpc
+  // bodies - one billed name in it taxes all of them. set.js is the bare CLI.
+  "settings.js is free to import and set.js is the 1.60 base": () => {
+    for (const mod of ["settings", "set"]) {
+      const ram = ramOf(mod);
+      assert(Math.abs(ram - BASE) < 0.011, `${mod}.js costs ${ram.toFixed(2)} GB; it must be ${BASE}`);
+    }
+  },
+
   "ramreport.js costs 1.90 GB": () => {
     const ram = ramOf("ramreport");
     assert(Math.abs(ram - 1.90) < 0.011, `expected 1.90 GB, got ${ram.toFixed(2)}`);
