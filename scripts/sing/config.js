@@ -96,9 +96,9 @@ export const TRAIN_GYM_CITY = "Sector-12";
  * and every one of those hours is not spent on Tian Di Hui, Bachman or any
  * other rep. Turn it on when a gang is actually wanted - it still needs SF2.
  *
- * LIVE: read inside the READ body, which re-imports this file each run, so a
- * change takes effect on the next tick with no restart. Crime work the flag
- * started is replaced by the next job down, not stopped.
+ * The DEFAULT of the live `sing.grindKarma` setting (scripts/set.js), which the
+ * READ body reads each run, so a change takes effect on the next tick with no
+ * restart. Crime work the flag started is replaced by the next job down, not stopped.
  */
 export const GRIND_GANG_KARMA = false;
 export const CRIME_TYPE = "Homicide";
@@ -208,14 +208,16 @@ export const FACTION_REP_TARGET = 1e6;
  * batch leaves is spent on home RAM in the same pass - and then, with
  * AUTO_INSTALL on, the queue is installed.
  */
+// The default of the live `sing.minAugBatch` setting, read once per aug pass.
 export const MIN_AUG_BATCH = 10;
 /**
  * Install as soon as MIN_AUG_BATCH augs are queued, and come back up through
  * boot.js - the game runs installAugmentations' callback script with NO
  * arguments, so any boot flag typed by hand is lost at the install.
  *
- * LIVE, like GRIND_GANG_KARMA: read inside the SWEEP body, so turning it off
- * stops the next install with no restart. Off, the queue waits for a hand install.
+ * The DEFAULT of the live `sing.autoInstall` setting, read inside the SWEEP
+ * body, so `set.js sing.autoInstall off` stops the next install with no
+ * restart. Off, the queue waits for a hand install.
  */
 export const AUTO_INSTALL = true;
 export const NFG = "NeuroFlux Governor";

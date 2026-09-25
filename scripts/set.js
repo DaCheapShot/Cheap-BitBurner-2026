@@ -6,7 +6,7 @@ import { SETTINGS_FILE, KNOBS, parseSettings, setting, setSetting, showSetting }
  *   run scripts/set.js                          list every setting
  *   run scripts/set.js hacknet.cash 0.9         set one
  *   run scripts/set.js hacknet.cash default     back to config.js's value
- *   run scripts/set.js enabled.gang off         switches take on/off (or 1/0)
+ *   run scripts/set.js gang.enabled off         switches take on/off (or 1/0)
  *
  * Readers pick it up on their next sweep / loop / rpc body. See settings.js.
  * RAM: ns.read, ns.write and ns.tprint are 0 GB, so this is the 1.60 base.
@@ -19,12 +19,16 @@ export async function main(ns) {
 
   if (key === undefined) {
     const o = parseSettings(text);
-    const rows = Object.entries(KNOBS).map(([k, d]) => {
+    // KNOBS is grouped by script; a blank line between groups keeps each
+    // script's settings visibly together.
+    const group = (k) => k.split(".")[0];
+    const rows = Object.entries(KNOBS).map(([k, d], i, all) => {
       const now = setting(text, k);
       const mark = k in o ? (now === o[k] ? " *" : " (override INVALID, using default)") : "";
       const range = d.bool ? "on/off" : `[${d.min}, ${d.max}]`;
-      return `  ${k.padEnd(17)} ${showSetting(k, now).padStart(8)}  default ${showSetting(k, d.def).padStart(6)}` +
-        `  ${range}  ${d.doc}${mark}`;
+      const gap = i && group(all[i - 1][0]) !== group(k) ? "\n" : "";
+      return `${gap}  ${k.padEnd(17)} ${showSetting(k, now).padStart(8)}  default ${showSetting(k, d.def).padStart(6)}` +
+        `  ${range.padEnd(12)}  ${d.doc}${mark}`;
     });
     ns.tprint(`settings (${SETTINGS_FILE}, * = overridden):\n${rows.join("\n")}`);
     return;

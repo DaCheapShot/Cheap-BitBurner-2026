@@ -458,6 +458,11 @@ export const tests = {
     assert(nine.buys.length === 0, "nine for sale: buy nothing");
     const topUp = planAugBuys({ ...base, augsOf: { F: names.slice(0, 2) }, queued: 8, cash: 1e15 });
     assert(topUp.buys.length === 2, "eight queued + two: that is ten");
+    // The live `sing.minAugBatch` replaces the ten when sing passes it.
+    const five = planAugBuys({ ...base, augsOf: { F: names.slice(0, 5) }, cash: 1e15, minBatch: 5 });
+    assert(five.buys.length === 5, `minBatch 5: five for sale is a batch, got ${five.buys.length}`);
+    const four = planAugBuys({ ...base, augsOf: { F: names.slice(0, 4) }, cash: 1e15, minBatch: 5 });
+    assert(four.buys.length === 0, "minBatch 5: four is not");
   },
 
   "NeuroFlux fills the batch, each level dearer in money and rep": async () => {
@@ -1242,5 +1247,25 @@ export const tests = {
       assert(!/ns\.format\.number\s*\([^)]*,\s*0\s*[,)]/.test(src),
         `sing/${f} formats with 0 fractional digits - with a suffix, 1.6m and 2.05m both print "2m"`);
     }
+  },
+
+  // Both behaviour flags are read INSIDE a body, so a set.js change lands on
+  // the body's next run with no sing restart.
+  "READ and SWEEP obey the live sing.grindKarma / sing.autoInstall settings": async () => {
+    const mods = await loadScripts();
+    const { READ, SWEEP } = bodies();
+    const files = { "/data/settings.txt": '{"sing.grindKarma":1,"sing.autoInstall":0}' };
+    const ns = makeNs({
+      files,
+      extra: {
+        getPlayer: () => player(),
+        getResetInfo: () => ({ currentNode: 4, ownedSF: new Map() }),
+        gang: { inGang: () => false },
+        singularity: { getCurrentWork: () => null, getCompanyRep: () => 0 },
+      },
+    });
+    const r = await mods["rpc"].rpc(ns, READ);
+    assert(r.grindKarma === true, `grindKarma should follow the setting, got ${r.grindKarma}`);
+    assert(await mods["rpc"].rpc(ns, SWEEP) === -1, "autoInstall off must stop the sweep before any install");
   },
 };

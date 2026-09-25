@@ -85,8 +85,9 @@ run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-
 run scripts/set.js                      # list live settings (budgets) and their defaults
 run scripts/set.js hacknet.cash 0.9     # override one, live - next sweep, no restart
 run scripts/set.js hacknet.cash default # back to config.js's value
-run scripts/set.js enabled.gang off     # live switch: boot stops gang.js next tick
+run scripts/set.js gang.enabled off     # live switch: boot stops gang.js next tick
 run scripts/set.js boot.tick 30         # cadences: boot.tick, sing.tick, hacknet.every, gang.*Every
+run scripts/set.js sing.autoInstall off # sing: autoInstall, grindKarma, minAugBatch
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -360,7 +361,7 @@ which stays the one home of a default. `setting()` never throws - a mangled file
 defaults - and `setSetting()` is where bad input is refused. Home-only file is fine because every
 reader runs on home; a worker on another host would need a port (see share).
 
-**Switches** (`enabled.cloud|gang|sing|hacknet|contracts`, on/off) are read by `boot.js` every
+**Switches** (`cloud.enabled|gang|sing|hacknet|contracts`, on/off) are read by `boot.js` every
 tick. Off STOPS a running resident (cloud, gang, sing) and skips a transient; sing off also clears
 `SHARE_HOLD_MARKER`, since a killed sing cannot. The `--no-X` flags keep their old meaning (don't
 start, never kill) - a switch that left gang.js running would change nothing visible. The manager
@@ -920,8 +921,8 @@ worst overlap of awaited transients from three processes (contracts find 12.00 +
 **The gang grind is opt-in, and LIVE.** `GRIND_GANG_KARMA` defaults off: -54000 karma is ~18000
 successful homicides, ~15 hours even at 100% success, that earn no rep anywhere. The gym goes with
 it - Homicide's success and the crime factions' combat bars are all the combat stats serve here.
-The flag is read inside the READ body, not by `plan.js`: a body re-imports `config.js` every run,
-so flipping it takes effect next tick, while anything the resident process imports (the cadences,
+The flag is the live `sing.grindKarma` setting (default `GRIND_GANG_KARMA`), read inside the READ
+body, not by `plan.js`, so `set.js sing.grindKarma on` takes effect next tick, while anything the resident process imports (the cadences,
 `WORK_ORDER`) is frozen until sing restarts. The tick is 20 s and every cadence is counted in
 ticks, sized so upgrade and join run each minute and programs and promotions every two - change
 the tick and re-derive them.
@@ -1063,8 +1064,9 @@ same path as a hand `run scripts/boot.js` after a hand install. Before it: the S
 contract sweep and waits it out (an install destroys every unsolved contract), then UPGRADE at
 fraction 1, then CORES, take the cash the install would reset. SWEEP is split from INSTALL - together 7.70 - and
 its body imports `CONTRACTS_SERVICE` from `contracts/config.js`, the one cross-subtree import in
-sing/, 0 GB and billed to the transient. `AUTO_INSTALL` is read inside SWEEP, so it is LIVE like
-`GRIND_GANG_KARMA`: off, the queue waits for a hand install. A sweep over rpc's 10 s times out, and
+sing/, 0 GB and billed to the transient. `sing.autoInstall` (default `AUTO_INSTALL`) is read inside SWEEP,
+so it is LIVE like `sing.grindKarma`: off, the queue waits for a hand install. `sing.minAugBatch`
+(default `MIN_AUG_BATCH`) is read once per aug pass and passed to `planAugBuys` as `minBatch`. A sweep over rpc's 10 s times out, and
 the install waits for the next pass rather than kill the sweep mid-attempt.
 
 **Two installs skip `MIN_AUG_BATCH`, both the user's rule, both aimed at ending the node.** The

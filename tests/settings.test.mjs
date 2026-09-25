@@ -51,10 +51,10 @@ export const tests = {
   "switches take on/off words and refuse anything but 0 or 1": async () => {
     const { settings: S } = await loadScripts();
     for (const [w, v] of [["off", 0], ["OFF", 0], ["false", 0], ["0", 0], ["on", 1], ["true", 1], ["1", 1]]) {
-      assert(S.setting(S.setSetting("", "enabled.gang", w), "enabled.gang") === v, `"${w}" should be ${v}`);
+      assert(S.setting(S.setSetting("", "gang.enabled", w), "gang.enabled") === v, `"${w}" should be ${v}`);
     }
     for (const bad of ["0.5", "yes", ""]) {
-      assertThrows(() => S.setSetting("", "enabled.gang", bad), `"${bad}" accepted for a switch`);
+      assertThrows(() => S.setSetting("", "gang.enabled", bad), `"${bad}" accepted for a switch`);
     }
     // A fraction knob must NOT take "on": that would read as 1 = all the cash.
     assertThrows(() => S.setSetting("", "hacknet.cash", "on"), '"on" accepted for a fraction');
@@ -83,5 +83,27 @@ export const tests = {
     assert(S.settingsLog(a, b, "cloud.") === "settings changed: cloud.cash 0.2 -> 0.3", S.settingsLog(a, b, "cloud."));
     assert(S.settingsLog(a, '{"gang.equip":7}', "gang.") === "settings changed: gang.equip 0.5 -> 0.15",
       "an invalid override reads as the default it falls back to");
+  },
+
+  // set.js prints KNOBS in order, a group per script, so a knob added at the
+  // bottom of the list would split its script's group in two.
+  "each script's settings are contiguous in KNOBS": async () => {
+    const { settings: S } = await loadScripts();
+    const seen = [];
+    for (const k of Object.keys(S.KNOBS)) {
+      const g = k.split(".")[0];
+      if (seen.at(-1) === g) continue;
+      assert(!seen.includes(g), `${k} splits the ${g} group - move it beside the other ${g}.* keys`);
+      seen.push(g);
+    }
+  },
+
+  "a file written with the old enabled.<script> keys still switches": async () => {
+    const { settings: S } = await loadScripts();
+    const old = '{"enabled.gang":0}';
+    assert(S.setting(old, "gang.enabled") === 0, "the old spelling of an off switch was dropped");
+    const t = S.setSetting(old, "cloud.cash", "0.2");
+    assert(t.includes('"gang.enabled": 0') && !t.includes("enabled.gang"), `rewrite should migrate: ${t}`);
+    assert(S.setting('{"enabled.gang":0,"gang.enabled":1}', "gang.enabled") === 1, "the new key wins");
   },
 };

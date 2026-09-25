@@ -60,7 +60,7 @@ import { SETTINGS_FILE, setting, settingsLog, BOOT_TICK_S } from "./settings.js"
  *         run scripts/boot.js --interval 30000
  *
  * Every --no-X above except --no-manager/--no-formulas also has a LIVE switch,
- * `run scripts/set.js enabled.X off`, re-read every tick. The two differ on
+ * `run scripts/set.js X.enabled off`, re-read every tick. The two differ on
  * purpose: the flag only stops boot STARTING the service (as it always has);
  * the switch also STOPS a running resident, because a switch that left
  * gang.js running would change nothing you could see.
@@ -394,7 +394,7 @@ export async function main(ns) {
     const news = settingsLog(lastCfgText, cfgText);
     if (news) log(news);
     lastCfgText = cfgText;
-    const live = (svc) => setting(cfgText, `enabled.${svc}`) !== 0;
+    const live = (svc) => setting(cfgText, `${svc}.enabled`) !== 0;
 
     // -- 0. did the manager die? -------------------------------------------
     // MANAGER only. A retired manager running is not this one surviving - it is

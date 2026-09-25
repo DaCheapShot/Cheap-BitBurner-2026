@@ -396,14 +396,14 @@ export const tests = {
       `--no-contracts should suppress it, launched: ${r.launched}`);
   },
 
-  // The live switches (scripts/set.js enabled.X off). Unlike the --no-X flags
+  // The live switches (scripts/set.js X.enabled off). Unlike the --no-X flags
   // they STOP a running resident, and they are re-read every tick - so a switch
   // flipped mid-run lands on the next tick with no boot restart.
   "a switch turned off mid-run stops the running resident": async () => {
     const r = await runBoot({
       inGang: true, ticks: 4,
       onTick: (tick, procs, store) => {
-        if (tick === 2) store["/data/settings.txt"] = JSON.stringify({ "enabled.gang": 0, "enabled.cloud": 0 });
+        if (tick === 2) store["/data/settings.txt"] = JSON.stringify({ "gang.enabled": 0, "cloud.enabled": 0 });
         return procs;
       },
     });
@@ -418,7 +418,7 @@ export const tests = {
   "sing switched off is stopped AND its share hold released": async () => {
     const r = await runBoot({
       running: ["scripts/sing/sing.js"], ticks: 2,
-      files: { "/data/settings.txt": '{"enabled.sing":0}', "/data/share-hold.txt": "hold" },
+      files: { "/data/settings.txt": '{"sing.enabled":0}', "/data/share-hold.txt": "hold" },
     });
     assert(r.killed.includes("scripts/sing/sing.js"), `sing should be stopped, killed: ${r.killed}`);
     assert(!r.launched.includes("scripts/sing/sing.js"), "and not relaunched");
@@ -427,7 +427,7 @@ export const tests = {
 
   "transients switched off are skipped": async () => {
     const r = await runBoot({
-      ticks: 3, files: { "/data/settings.txt": '{"enabled.hacknet":0,"enabled.contracts":0}' },
+      ticks: 3, files: { "/data/settings.txt": '{"hacknet.enabled":0,"contracts.enabled":0}' },
     });
     for (const f of ["scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js", "scripts/contracts/contracts.js"]) {
       assert(!r.launched.includes(f), `${f} should not run while off, launched: ${r.launched}`);
@@ -436,7 +436,7 @@ export const tests = {
 
   "a switch turned back on restarts the service": async () => {
     const r = await runBoot({
-      ticks: 4, files: { "/data/settings.txt": '{"enabled.sing":0}' },
+      ticks: 4, files: { "/data/settings.txt": '{"sing.enabled":0}' },
       onTick: (tick, procs, store) => {
         if (tick === 2) store["/data/settings.txt"] = "{}";
         return procs;
@@ -473,14 +473,14 @@ export const tests = {
     const r = await runBoot({
       ticks: 3, files: { "/data/settings.txt": '{"boot.tick":30}' },
       onTick: (tick, procs, store) => {
-        if (tick === 1) store["/data/settings.txt"] = '{"boot.tick":30,"enabled.gang":0}';
+        if (tick === 1) store["/data/settings.txt"] = '{"boot.tick":30,"gang.enabled":0}';
         return procs;
       },
     });
     assert(r.logs.some((l) => l.includes("settings (vs default): boot.tick 60 -> 30")),
       `start line missing: ${r.logs.join(" | ")}`);
     const changes = r.logs.filter((l) => l.includes("settings changed"));
-    assert(changes.length === 1 && changes[0].includes("enabled.gang on -> off") && !changes[0].includes("boot.tick"),
+    assert(changes.length === 1 && changes[0].includes("gang.enabled on -> off") && !changes[0].includes("boot.tick"),
       `expected one line naming only the gang switch: ${changes}`);
   },
 };

@@ -2,7 +2,7 @@ import {
   UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
   CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
-  WORK_ORDER, MIN_AUG_BATCH, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
+  WORK_ORDER, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTargets, planAugBuys,
@@ -176,12 +176,13 @@ return joined;
  * Map into {} - returned raw, the SF2 gate would read false forever with no
  * error - so it is collapsed to a boolean here, inside the transient.
  *
- * GRIND_GANG_KARMA rides along from config for a different reason: a body
- * re-imports config.js every run, so the flag is LIVE - flip it and the next
- * tick obeys. Read resident, it would be frozen until sing restarted.
+ * The `sing.grindKarma` setting rides along for a different reason: a body
+ * reads it every run, so the flag is LIVE - `set.js sing.grindKarma on` and the
+ * next tick obeys. Read resident, it would be frozen until sing restarted.
  */
 const READ = `
-import { WORK_ORDER, GRIND_GANG_KARMA } from "/scripts/sing/config.js";
+import { WORK_ORDER } from "/scripts/sing/config.js";
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
 const p = ns.getPlayer();
 const reset = ns.getResetInfo();
 const rep = {};
@@ -197,7 +198,7 @@ return {
   work: ns.singularity.getCurrentWork(),
   hasSF2: reset.currentNode === 2 || reset.ownedSF.has(2),
   inGang: ns.gang.inGang(),
-  grindKarma: GRIND_GANG_KARMA,
+  grindKarma: setting(ns.read(SETTINGS_FILE), "sing.grindKarma") === 1,
   rep, workTypes, companyRep,
 };
 `;
@@ -343,9 +344,9 @@ const BN_MULTS = `return ns.getBitNodeMultipliers().FactionWorkRepGain;`;
  * the install waits for the next pass. Split from INSTALL: together 7.70.
  */
 const SWEEP = `
-import { AUTO_INSTALL } from "/scripts/sing/config.js";
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
 import { CONTRACTS_SERVICE } from "/scripts/contracts/config.js";
-if (!AUTO_INSTALL) return -1;
+if (!setting(ns.read(SETTINGS_FILE), "sing.autoInstall")) return -1;
 const pid = ns.run(CONTRACTS_SERVICE);
 while (pid && ns.isRunning(pid)) await ns.sleep(200);
 return pid;
@@ -446,9 +447,9 @@ function nfgLine(ns, nfg) {
   return `${at}, then the next costs ${money$(ns, nfg.cost)} against ${money$(ns, nfg.left)} left`;
 }
 
-function augsWaitLine(ns, plan, queued, cash) {
-  if (queued >= MIN_AUG_BATCH) return `${queued} queued; nothing more affordable now`;
-  return `waiting: best batch is ${plan.batch} of ${MIN_AUG_BATCH} (${queued} queued), ` +
+function augsWaitLine(ns, plan, queued, cash, minBatch) {
+  if (queued >= minBatch) return `${queued} queued; nothing more affordable now`;
+  return `waiting: best batch is ${plan.batch} of ${minBatch} (${queued} queued), ` +
     `${plan.eligible} unlocked by rep or favor, cash ${money$(ns, cash)} - ${nfgLine(ns, plan.nfg)}`;
 }
 
@@ -616,7 +617,7 @@ export async function main(ns) {
     const swept = await call("sweep", SWEEP);
     if (swept === null) return;
     if (swept < 0) {
-      log(`install: AUTO_INSTALL is off - ${queued} queued, install by hand`);
+      log(`install: sing.autoInstall is off - ${queued} queued, install by hand`);
       return;
     }
     const u = await call("upgrade", UPGRADE, 1);
@@ -653,6 +654,9 @@ export async function main(ns) {
    * above for why.
    */
   const augsPass = async (r) => {
+    // Live `sing.minAugBatch`, read once per pass so the plan, the log and the
+    // install trigger below all agree on the same number.
+    const minBatch = setting(ns.read(SETTINGS_FILE), "sing.minAugBatch");
     const owned = await call("owned", OWNED);
     if (!owned) return;
     // Every faction WORK_ORDER names, joined or not: a company step and a city
@@ -708,10 +712,11 @@ export async function main(ns) {
     const force = await crossesFavorBar(r, owned);
     const plan = planAugBuys({
       augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash, donate, priority, force,
+      minBatch,
     });
     if (!plan.buys.length) {
-      log(`augs: ${augsWaitLine(ns, plan, owned.queued, cash)}`);
-      if (owned.queued >= MIN_AUG_BATCH || owned.pill || (force && owned.queued)) await install(owned.queued);
+      log(`augs: ${augsWaitLine(ns, plan, owned.queued, cash, minBatch)}`);
+      if (owned.queued >= minBatch || owned.pill || (force && owned.queued)) await install(owned.queued);
       return;
     }
     // The rep first, then the augs it unlocks. A refused donation stops the
@@ -742,7 +747,7 @@ export async function main(ns) {
     const now = [...owned.all, ...bought];
     targets = repTargets(augsOf, now, info);
     priorityTargets = repTargets(augsOf, now, info, priority);
-    if (queued >= MIN_AUG_BATCH || force || owned.pill || bought.includes(RED_PILL)) await install(queued);
+    if (queued >= minBatch || force || owned.pill || bought.includes(RED_PILL)) await install(queued);
     // Still here, so not installed. What is left would be reset by the install
     // when it comes; home RAM survives it.
     if (bought.length) {
