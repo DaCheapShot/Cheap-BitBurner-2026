@@ -1,9 +1,9 @@
 import { CLOUD_BUDGET_FRACTION } from "./config.js";
-import { HACKNET_CASH_FRACTION, PAYBACK_SECONDS, HACKNET_EVERY } from "./hacknet/config.js";
+import { HACKNET_CASH_FRACTION, PAYBACK_SECONDS, HACKNET_EVERY, STUDY_LEVELS } from "./hacknet/config.js";
 import { EQUIP_BUDGET_FRACTION, TICK_EVERY, WAR_EVERY, ASCEND_EVERY, EQUIP_EVERY } from "./gang/config.js";
 import {
   HOME_RAM_BUDGET_FRACTION, HOME_CORES_BUDGET_FRACTION, PROG_BUDGET_FRACTION, SING_TICK_MS,
-  AUTO_INSTALL, GRIND_GANG_KARMA, MIN_AUG_BATCH,
+  AUTO_INSTALL, GRIND_GANG_KARMA, MIN_AUG_BATCH, IDLE_STUDY,
 } from "./sing/config.js";
 
 /** boot.js's tick. Here, not in boot.js, so the default has one home a pure module can import. */
@@ -55,6 +55,7 @@ export const KNOBS = {
   "hacknet.cash": { def: HACKNET_CASH_FRACTION, min: 0, max: 1, doc: "fraction of cash one hacknet sweep may spend" },
   "hacknet.payback": { def: PAYBACK_SECONDS, min: 60, max: 7 * 86400, doc: "seconds an upgrade must repay itself within" },
   "hacknet.every": { def: HACKNET_EVERY, min: 1, max: 60, int: true, doc: "boot ticks between hacknet sweeps" },
+  "hacknet.studyLevels": { def: STUDY_LEVELS, min: 0, max: 100, int: true, doc: "Improve Studying levels to buy while sing studies" },
 
   // autoInstall and grindKarma are read inside the SWEEP and READ bodies;
   // minAugBatch at the top of each aug pass.
@@ -65,6 +66,7 @@ export const KNOBS = {
   "sing.progs": { def: PROG_BUDGET_FRACTION, min: 0, max: 1, doc: "fraction of cash a darkweb program may cost" },
   "sing.autoInstall": { def: AUTO_INSTALL ? 1 : 0, min: 0, max: 1, bool: true, doc: "install the aug queue once minAugBatch are queued" },
   "sing.grindKarma": { def: GRIND_GANG_KARMA ? 1 : 0, min: 0, max: 1, bool: true, doc: "grind Homicide + gym for gang karma (~15 h)" },
+  "sing.idleStudy": { def: IDLE_STUDY ? 1 : 0, min: 0, max: 1, bool: true, doc: "nothing to work: a university class, not a money crime" },
   "sing.minAugBatch": { def: MIN_AUG_BATCH, min: 1, max: 100, int: true, doc: "augs a batch (plus the queue) must reach to buy" },
 
   "contracts.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },

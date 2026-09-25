@@ -1,8 +1,8 @@
-import { planHashes } from "./math.js";
+import { planHashes, planStudy } from "./math.js";
 import {
   TARGETS_MARKER,
   HASH_PRICE, HASH_SALE_COST, HASH_HORIZON_S, HASH_VALUE_MARGIN, MONEY_SOFTCAP,
-  MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE, SELL_MONEY_UPGRADE,
+  MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE, SELL_MONEY_UPGRADE, STUDY_UPGRADE, STUDY_MARKER,
 } from "./config.js";
 import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
 
@@ -96,6 +96,19 @@ export async function main(ns) {
     perLevel[name] = ns.hacknet.hashCost(name, 1) / (levels[name] + 1);
   }
 
+  // Improve Studying first, and only while sing holds the player in a class.
+  // Not in the "not offered" check above: a fork without it should still spend
+  // on the batcher's targets.
+  const studyLevel = offered.has(STUDY_UPGRADE) ? ns.hacknet.getHashUpgradeLevel(STUDY_UPGRADE) : 0;
+  const study = planStudy({
+    studying: offered.has(STUDY_UPGRADE) && ns.read(STUDY_MARKER).trim() === "study",
+    level: studyLevel,
+    perLevel: offered.has(STUDY_UPGRADE) ? ns.hacknet.hashCost(STUDY_UPGRADE, 1) / (studyLevel + 1) : 0,
+    cap: setting(ns.read(SETTINGS_FILE), "hacknet.studyLevels"),
+    hashes: ns.hacknet.numHashes(),
+    capacity,
+  });
+
   const owned = ns.hacknet.numNodes();
   const units = [];
   for (let i = 0; i < owned; i++) {
@@ -115,7 +128,7 @@ export async function main(ns) {
 
   const plan = planHashes(
     {
-      hashes: ns.hacknet.numHashes(),
+      hashes: ns.hacknet.numHashes() - study.hashes,
       capacity,
       levels, perLevel, income, targets, units,
       budget: ns.getServerMoneyAvailable("home") * setting(ns.read(SETTINGS_FILE), "hacknet.cash"),
@@ -128,7 +141,15 @@ export async function main(ns) {
       MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE,
     });
 
+  // Saving toward a study level: hold the store, as planHashes does for its own
+  // out-of-reach buys.
+  if (study.saving && plan.sell) {
+    plan.sell = 0;
+    plan.reason += ` - holding hashes for ${STUDY_UPGRADE} ${studyLevel + 1}`;
+  }
+
   if (dry) {
+    if (study.count) log(`would spend ${study.hashes} hashes: ${STUDY_UPGRADE} x${study.count}`);
     for (const s of plan.spends) {
       log(`would spend ${s.hashes} hashes: ${s.upgrade} x${s.count} on ${s.host}`);
     }
@@ -144,6 +165,15 @@ export async function main(ns) {
 
   let spent = 0;
   let sold = 0;
+  if (study.count) {
+    if (ns.hacknet.spendHashes(STUDY_UPGRADE, "", study.count)) {
+      spent += study.hashes;
+      log(`${STUDY_UPGRADE} x${study.count} for ${study.hashes} hashes - now level ${studyLevel + study.count}, ` +
+          `+${(studyLevel + study.count) * 20}% class exp`);
+    } else {
+      log(`WARN: ${STUDY_UPGRADE} x${study.count} was refused`);
+    }
+  }
   for (const s of plan.spends) {
     // One call per pair: raising max money and lowering minimum security both
     // put a streaming target off baseline, so the re-prep is paid once here

@@ -779,6 +779,36 @@ export const tests = {
     assert(broke.reason.includes("capacity"), `reason was "${broke.reason}"`);
   },
 
+  // Improve Studying: HashUpgrade.getCost is costPerLevel * (L+1) per level, 50
+  // per level (HashUpgradesMetadata.tsx), so levels 0,1,2 cost 50, 100, 150.
+  "planStudy buys what the balance covers, up to the cap, only while studying": async () => {
+    const { planStudy } = (await loadScripts())["hacknet/math"];
+    const base = { studying: true, level: 0, perLevel: 50, cap: 10, hashes: 320, capacity: 1000 };
+    let p = planStudy(base);
+    assert(p.count === 3 && p.hashes === 300 && !p.saving, `50+100+150 = 300 of 320: ${JSON.stringify(p)}`);
+    p = planStudy({ ...base, cap: 2 });
+    assert(p.count === 2 && p.hashes === 150, `capped at 2: ${JSON.stringify(p)}`);
+    p = planStudy({ ...base, studying: false });
+    assert(p.count === 0 && !p.saving, "not studying: nothing, and nothing held");
+    p = planStudy({ ...base, level: 10 });
+    assert(p.count === 0 && !p.saving, "at the cap: nothing, and nothing held");
+  },
+
+  // Out of reach but fits the store: hold the hashes, never sell them - the
+  // sale would fund nothing and the level would never be bought. Too dear for
+  // the whole store: it can never fill, so nothing is held for it.
+  "planStudy saves toward a level the store can hold, and only that": async () => {
+    const { planStudy } = (await loadScripts())["hacknet/math"];
+    const base = { studying: true, level: 5, perLevel: 50, cap: 10, hashes: 100, capacity: 1000 };
+    assert(planStudy(base).saving === true, "300 fits a 1000 store: save");
+    assert(planStudy({ ...base, capacity: 200 }).saving === false, "300 never fits a 200 store: do not save");
+    const src = readScript("hacknet/hashes");
+    assert(/study\.saving\s*&&\s*plan\.sell/.test(src) && /plan\.sell\s*=\s*0/.test(src),
+      "hashes.js must cancel the sale while saving for a study level");
+    assert(/numHashes\(\)\s*-\s*study\.hashes/.test(src),
+      "planHashes must be handed the balance LEFT after the study buy");
+  },
+
   // The name is resolved through getEnumHelper().nsGetMember, which THROWS on a
   // miss - so a folded or mistyped upgrade name takes the whole sweep down
   // rather than quietly skipping one buy. This is the Vigenere lesson: the

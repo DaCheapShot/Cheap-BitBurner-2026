@@ -115,6 +115,44 @@ export const GANG_KARMA_TARGET = -54000;
 export const MONEY_CRIMES = ["Shoplift", "Mug", "Deal Drugs", "Homicide"];
 
 /**
+ * With nothing to work, take a class instead of a money crime - where the
+ * player stands has a university. The DEFAULT of the live `sing.idleStudy`
+ * setting, read inside the READ body, so `set.js sing.idleStudy off` lands next
+ * tick.
+ *
+ * Measured live in BitNode 9: crime ~16 hacking exp/s, Algorithms ~96. Money
+ * crimes carry almost no hacking exp, and a class is not scaled by HackExpGain
+ * (src/Work/Formulas.ts calculateClassEarnings), which BN9 sets to 0.05 - so
+ * the batcher's own exp is nearly nothing there and the hacking level
+ * w0r1d_d43m0n needs has to come from somewhere else. The price is small:
+ * Algorithms is $320/s x the university's costMult, $960-1600/s.
+ */
+export const IDLE_STUDY = true;
+export const STUDY_COURSE = "Algorithms";
+/**
+ * The universities by city, spelled as LocationName's values
+ * (src/Locations/Enums.ts). No travel for a class: the city group owns where
+ * the player stands, and a flight for a class would drag them off an invite.
+ * Best expMult first would only matter with a choice, and there is one per city.
+ */
+export const UNIVERSITIES = {
+  "Sector-12": "Rothman University",
+  "Aevum": "Summit University",
+  "Volhaven": "ZB Institute of Technology",
+};
+/**
+ * Below this, crime rather than a class: a class costs money every second, and
+ * right after an install the cash is what TOR and the programs wait on. $10m is
+ * nearly two hours at ZB's $1600/s.
+ */
+export const STUDY_MIN_MONEY = 10e6;
+/**
+ * sing writes "study" here while it holds the player in a class, "" otherwise.
+ * hashes.js reads it to buy Improve Studying only while it pays.
+ */
+export { STUDY_MARKER } from "scripts/config.js";
+
+/**
  * Rep work, in priority order: the first step with work left wins. Joined
  * factions not listed here are worked after these, in join order.
  *
