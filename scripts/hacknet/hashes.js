@@ -1,9 +1,10 @@
 import { planHashes } from "./math.js";
 import {
-  TARGETS_MARKER, HACKNET_CASH_FRACTION,
+  TARGETS_MARKER,
   HASH_PRICE, HASH_SALE_COST, HASH_HORIZON_S, HASH_VALUE_MARGIN, MONEY_SOFTCAP,
   MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE, SELL_MONEY_UPGRADE,
 } from "./config.js";
+import { SETTINGS_FILE, setting } from "scripts/settings.js";
 
 /**
  * The hash sweep: ONE pass, then exit. A no-op outside BitNode 9.
@@ -115,7 +116,7 @@ export async function main(ns) {
       hashes: ns.hacknet.numHashes(),
       capacity,
       levels, perLevel, income, targets, units,
-      budget: ns.getServerMoneyAvailable("home") * HACKNET_CASH_FRACTION,
+      budget: ns.getServerMoneyAvailable("home") * setting(ns.read(SETTINGS_FILE), "hacknet.cash"),
       // Only the cache ladder is read out of this, and it is the one ladder
       // that takes no cost multiplier - passed for the shared signature.
       mults: { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 },

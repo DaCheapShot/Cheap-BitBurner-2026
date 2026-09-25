@@ -305,6 +305,13 @@ export const CLOUD_DONE_MARKER = "/data/cloud-maxed.txt";
 export const CLOUD_RECHECK_MS = 30 * 60 * 1000;
 
 /**
+ * Hard cap on what one cloud.js purchase or upgrade may cost, as a fraction of
+ * money. Here rather than in cloud.js so scripts/settings.js can name it as the
+ * default of `cloud.cash` without importing a script that bills ns calls.
+ */
+export const CLOUD_BUDGET_FRACTION = 0.10;
+
+/**
  * The hosts the RUNNING batcher is currently working, one per line, richest
  * first. Written by the manager - continuous/core.js at every rescan - and read
  * by scripts/hacknet/hashes.js.

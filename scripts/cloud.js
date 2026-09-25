@@ -1,9 +1,10 @@
 import { ROOT_MARKER, CLOUD_DONE_MARKER } from "./config.js";
+import { SETTINGS_FILE, setting } from "./settings.js";
 
 /**
  * Cloud server purchaser / upgrader.
  *
- * Spends at most BUDGET_FRACTION of current money on any single action, so it
+ * Spends at most the `cloud.cash` setting (settings.js) of current money on any single action, so it
  * can be left running without ever emptying your account.
  *
  * Policy: fill empty server slots before upgrading anything.
@@ -45,9 +46,6 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER } from "./config.js";
  */
 
 // ---------------------------------------------------------------- config ----
-
-/** Hard cap on what one purchase or upgrade may cost, as a fraction of money. */
-const BUDGET_FRACTION = 0.10;
 
 const NAME_PREFIX = "cheapserv-";
 
@@ -239,16 +237,19 @@ export async function main(ns) {
   const lIdx = args.indexOf("--loop");
   const loopMs = lIdx >= 0 && Number(args[lIdx + 1]) > 0 ? Number(args[lIdx + 1]) : DEFAULT_LOOP_MS;
 
+  // --budget pins the fraction for this run; otherwise it is the live
+  // `cloud.cash` setting, re-read every step so scripts/set.js needs no restart.
   const bIdx = args.indexOf("--budget");
-  let budgetFraction = BUDGET_FRACTION;
+  let pinned = null;
   if (bIdx >= 0) {
     const v = Number(args[bIdx + 1]);
     if (!Number.isFinite(v) || v <= 0 || v > 1) {
       ns.tprint(`ERROR: --budget needs a fraction in (0,1], got "${args[bIdx + 1]}"`);
       return;
     }
-    budgetFraction = v;
+    pinned = v;
   }
+  const fraction = () => pinned ?? setting(ns.read(SETTINGS_FILE), "cloud.cash");
 
   // Any run of this script re-evaluates from scratch, so a marker left by an
   // earlier run is worthless from here on. Clear it first and re-stamp only if
@@ -257,20 +258,20 @@ export async function main(ns) {
   if (!dryRun) ns.write(CLOUD_DONE_MARKER, "", "w");
 
   if (!loop) {
-    const r = step(ns, budgetFraction, dryRun);
+    const r = step(ns, fraction(), dryRun);
     if (r.done && !dryRun) ns.write(CLOUD_DONE_MARKER, `${Date.now()}\n${r.msg}`, "w");
     ns.print(`cloud: ${r.msg}`);
     return;
   }
 
   ns.print(
-    `cloud loop: up to ${(budgetFraction * 100).toFixed(0)}% of money per action, ` +
+    `cloud loop: up to ${(fraction() * 100).toFixed(0)}% of money per action, ` +
       `checking every ${(loopMs / 1000).toFixed(0)}s${dryRun ? " [DRY RUN]" : ""}`,
   );
 
   let lastMsg = "";
   while (true) {
-    const r = step(ns, budgetFraction, dryRun);
+    const r = step(ns, fraction(), dryRun);
 
     // "wait:" lines repeat every tick while money accumulates - only print on
     // change so the log stays readable over hours.

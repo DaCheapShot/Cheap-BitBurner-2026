@@ -352,8 +352,9 @@ export function warDecision(engaged, chances) {
 
 // -------------------------------------------------------------- equipment ---
 
-export function equipBudget(money) {
-  return Math.max(0, (money ?? 0) * EQUIP_BUDGET_FRACTION);
+/** `fraction` is the live `gang.equip` setting when the equip body passes it. */
+export function equipBudget(money, fraction = EQUIP_BUDGET_FRACTION) {
+  return Math.max(0, (money ?? 0) * fraction);
 }
 
 /**

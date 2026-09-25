@@ -164,6 +164,7 @@ return { done, best, blocked, respect };
  */
 const EQUIP = `
 import { planPurchases, equipBudget, eligibleItems, considerItems } from "/scripts/gang/math.js";
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
 const state = JSON.parse(args[0]);
 const members = ns.gang.getMemberNames().map((n) => ns.gang.getMemberInformation(n));
 const items = ns.gang.getEquipmentNames().map((n) => ({
@@ -172,7 +173,7 @@ const items = ns.gang.getEquipmentNames().map((n) => ({
   type: ns.gang.getEquipmentType(n),
   stats: ns.gang.getEquipmentStats(n),
 }));
-const budget = equipBudget(ns.getServerMoneyAvailable("home"));
+const budget = equipBudget(ns.getServerMoneyAvailable("home"), setting(ns.read(SETTINGS_FILE), "gang.equip"));
 const buys = planPurchases(members, items, budget, state.isHacking);
 const eligible = eligibleItems(items);
 const pool = considerItems(members, items, state.isHacking);

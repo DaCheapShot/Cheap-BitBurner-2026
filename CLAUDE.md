@@ -82,6 +82,9 @@ run scripts/contracts/contracts.js --forget  # clear the skip list, after fixing
 run scripts/hacknet/hacknet.js --dry-run     # plan a hacknet buy and print it, buy nothing
 run scripts/hacknet/hashes.js --dry-run      # plan a hash spend and print it, spend nothing
 run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
+run scripts/set.js                      # list live settings (budgets) and their defaults
+run scripts/set.js hacknet.cash 0.9     # override one, live - next sweep, no restart
+run scripts/set.js hacknet.cash default # back to config.js's value
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -298,6 +301,8 @@ editor's RAM panel when one moves.
 |---|---|---|
 | `config.js` | every tunable, shared so nothing drifts | 0 |
 | `rpc.js` | run a body in a throwaway script, get its value back | 1.00 |
+| `settings.js` | live overrides registry (`KNOBS`) + parser for `/data/settings.txt` | 0 |
+| `set.js` | terminal CLI that writes `/data/settings.txt` | 1.60 |
 | `boot.js` | supervisor, kills retired managers | 3.50 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
@@ -343,6 +348,20 @@ it grants no faction. `fulcrumassets` is excluded: Fulcrum also requires employm
 and company rep, so its backdoor never invites on its own. `w0r1d_d43m0n` is off the
 network until The Red Pill is installed (`Prestige.ts` links it to `The-Cave` there),
 so unreachable rows are dropped rather than reported as an error.
+
+### Live settings (`settings.js` / `set.js`)
+
+`set.js` writes a JSON object to `/data/settings.txt`; readers call
+`setting(ns.read(SETTINGS_FILE), key)` **at the point of use** (per sweep, per loop step, inside
+the rpc body), so a change needs no restart. Defaults are imported from the owning `config.js`,
+which stays the one home of a default. `setting()` never throws - a mangled file falls back to
+defaults - and `setSetting()` is where bad input is refused. Home-only file is fine because every
+reader runs on home; a worker on another host would need a port (see share).
+
+Not an in-game rewrite of `config.js`: filesync pushes disk -> game on save/connect and would
+silently revert it. Adding a knob = one `KNOBS` entry + swap the constant for `setting()` at its
+consumer. rpc bodies import it as `"/scripts/settings.js"` (leading slash, the gang body rule);
+resident files as `"scripts/settings.js"`.
 
 ### Share mode
 

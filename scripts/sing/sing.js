@@ -1,6 +1,6 @@
 import {
   SING_TICK_MS, UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
-  PROG_BUDGET_FRACTION, CITY_GROUPS,
+  CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, MIN_AUG_BATCH, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
 } from "./config.js";
@@ -78,14 +78,14 @@ import { rpc } from "scripts/rpc.js";
 
 /**
  * Buy home RAM upgrades while each costs at most a fraction of the cash left:
- * HOME_RAM_BUDGET_FRACTION normally, args[0] when given - 1 after an aug
+ * the live `sing.homeRam` setting (settings.js) normally, args[0] when given - 1 after an aug
  * batch, which spends everything an install would reset anyway. Each upgrade
  * doubles the next price, so at 0.25 this is usually one. A non-finite cost
  * would cross JSON as null, so it crosses as -1.
  */
 const UPGRADE = `
-import { HOME_RAM_BUDGET_FRACTION } from "/scripts/sing/config.js";
-const frac = args.length ? Number(args[0]) : HOME_RAM_BUDGET_FRACTION;
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
+const frac = args.length ? Number(args[0]) : setting(ns.read(SETTINGS_FILE), "sing.homeRam");
 let money = ns.getServerMoneyAvailable("home");
 const before = ns.getServerMaxRam("home");
 let cost = ns.singularity.getUpgradeHomeRamCost();
@@ -112,8 +112,8 @@ return {
  * upgradeHomeCores returns false instead.
  */
 const CORES = `
-import { HOME_CORES_BUDGET_FRACTION } from "/scripts/sing/config.js";
-const frac = args.length ? Number(args[0]) : HOME_CORES_BUDGET_FRACTION;
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
+const frac = args.length ? Number(args[0]) : setting(ns.read(SETTINGS_FILE), "sing.homeCores");
 const coresAt = (c) => Math.round(Math.log(c / 1e9) / Math.log(7.5));
 let money = ns.getServerMoneyAvailable("home");
 let cost = ns.singularity.getUpgradeHomeCoresCost();
@@ -136,12 +136,14 @@ return { had, owned: had || ns.singularity.purchaseTor() };
 `;
 
 /**
- * Cheapest WANTED program first, each at most PROG_BUDGET_FRACTION of what is
+ * Cheapest WANTED program first, each at most the live `sing.progs` fraction of what is
  * left. getDarkwebProgramCost returns 0 for a program already owned, so it
  * doubles as the ownership check and fileExists is not needed.
  */
 const PROGS = `
-import { PROG_BUDGET_FRACTION, PROGS_WANTED } from "/scripts/sing/config.js";
+import { PROGS_WANTED } from "/scripts/sing/config.js";
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
+const frac = setting(ns.read(SETTINGS_FILE), "sing.progs");
 let money = ns.getServerMoneyAvailable("home");
 const want = ns.singularity.getDarkwebPrograms()
   .filter((name) => PROGS_WANTED.includes(name))
@@ -150,13 +152,13 @@ const want = ns.singularity.getDarkwebPrograms()
   .sort((a, b) => a.cost - b.cost);
 const bought = [];
 for (const p of want) {
-  if (p.cost > money * PROG_BUDGET_FRACTION) break;
+  if (p.cost > money * frac) break;
   if (!ns.singularity.purchaseProgram(p.name)) break;
   money -= p.cost;
   bought.push(p.name);
 }
 const next = want[bought.length];
-return { bought, left: want.length - bought.length, next: next ? next.cost : -1, money };
+return { bought, left: want.length - bought.length, next: next ? next.cost : -1, money, frac };
 `;
 
 /** Split from JOIN: the deny filter runs resident between the two. */
@@ -457,7 +459,7 @@ function progsLine(ns, p) {
   if (p.bought.length) return `bought ${p.bought.join(", ")}${p.left ? ` - ${p.left} left` : ""}`;
   if (!p.left) return "every wanted program owned";
   return `nothing bought: ${p.left} left, cheapest ${money$(ns, p.next)} against ` +
-    `${money$(ns, p.money)} cash (buys at ${ns.format.percent(PROG_BUDGET_FRACTION, 0)})`;
+    `${money$(ns, p.money)} cash (buys at ${ns.format.percent(p.frac, 0)})`;
 }
 
 function joinLine(invites, joined, deny) {

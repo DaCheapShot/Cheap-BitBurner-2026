@@ -1,5 +1,6 @@
 import { planMoney } from "./math.js";
-import { HACKNET_CASH_FRACTION, PAYBACK_SECONDS, HASH_PRICE } from "./config.js";
+import { HASH_PRICE } from "./config.js";
+import { SETTINGS_FILE, setting } from "scripts/settings.js";
 
 /**
  * The hacknet money sweep: ONE pass, then exit.
@@ -62,7 +63,10 @@ export async function main(ns) {
   }
 
   const money = ns.getServerMoneyAvailable("home");
-  const budget = money * HACKNET_CASH_FRACTION;
+  // Read per sweep, not imported: scripts/set.js retunes both with no restart.
+  const cfgText = ns.read(SETTINGS_FILE);
+  const budget = money * setting(cfgText, "hacknet.cash");
+  const PAYBACK_SECONDS = setting(cfgText, "hacknet.payback");
   const mults = ns.getHacknetMultipliers();
 
   const plan = planMoney(
