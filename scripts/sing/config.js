@@ -32,6 +32,8 @@ export { SHARE_HOLD_MARKER } from "scripts/config.js";
  * its wall-clock period: upgrade and join every 60 s, programs and promotions
  * every 120 s. Change the tick and re-derive these, or they speed up with it.
  * All of these are read by the resident process - a change needs a sing restart.
+ * Except the tick itself: SING_TICK_MS is only the default of the live
+ * `sing.tick` setting (scripts/set.js), and changing that scales every cadence.
  */
 export const SING_TICK_MS = 20000;
 export const UPGRADE_EVERY = 3;

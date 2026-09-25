@@ -1,5 +1,5 @@
 import {
-  SING_TICK_MS, UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
+  UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
   CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, MIN_AUG_BATCH, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
@@ -9,6 +9,7 @@ import {
   canDonate, donationPerRep, bestCrime, chooseCityGroup,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
+import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
 
 /**
  * The singularity supervisor: a cheap resident loop whose singularity calls all
@@ -798,7 +799,15 @@ export async function main(ns) {
     log(`share: ${want ? "HELD - not doing faction work, the only work it multiplies" : "released - faction work"}`);
   };
 
+  let lastCfgText = null;
   while (true) {
+    // Its own knobs only (sing.*): the budgets are read inside the bodies and
+    // the tick below, so this is the line that says when they took effect.
+    const cfgText = ns.read(SETTINGS_FILE);
+    const news = settingsLog(lastCfgText, cfgText, "sing.");
+    if (news) log(news);
+    lastCfgText = cfgText;
+
     // READ first: the aug pass plans against its money and rep, and gets the
     // cash before the home upgrade's 25% can take it.
     const r = await call("read", READ);
@@ -884,6 +893,8 @@ export async function main(ns) {
     if (!backdoorsDone && tick % BACKDOOR_EVERY === 0) await backdoorPass();
 
     tick++;
-    await ns.sleep(SING_TICK_MS);
+    // Live: `sing.tick` from scripts/set.js. Every cadence above is counted in
+    // ticks, so this scales all of them together - by design.
+    await ns.sleep(setting(ns.read(SETTINGS_FILE), "sing.tick") * 1000);
   }
 }

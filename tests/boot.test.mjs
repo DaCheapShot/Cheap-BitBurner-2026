@@ -26,7 +26,7 @@ const TRANSIENT = [
  */
 async function runBoot({
   args = [], files = {}, running = [], workers = [], ticks = 3, hasFormulas = false,
-  inGang = false, onTprint = () => {}, onTick = (_tick, procs) => procs,
+  inGang = false, onTprint = () => {}, onTick = (_tick, procs) => procs, onSleep = () => {},
 }) {
   const { main } = (await loadScripts())["boot"];
   let procs = running.map((f, i) => ({ filename: f, host: "home", pid: i + 1, args: [], threads: 1 }));
@@ -67,6 +67,7 @@ async function runBoot({
       return nextPid++;
     },
     sleep: async (ms) => {
+      if (ms >= 1000) onSleep(ms);
       for (const p of procs) if (TRANSIENT.includes(p.filename)) p.life--;
       procs = procs.filter((p) => !TRANSIENT.includes(p.filename) || (p.life ?? 99) > 0);
       if (ms >= 1000) { tick++; if (tick >= ticks) throw new Error("STOP"); procs = onTick(tick, procs, store); }
@@ -442,5 +443,44 @@ export const tests = {
       },
     });
     assert(r.launched.includes("scripts/sing/sing.js"), `sing should start once switched back on: ${r.launched}`);
+  },
+
+  // boot.tick and hacknet.every are re-read every tick, and --interval still
+  // pins the tick over the setting.
+  "boot.tick is live, and --interval overrides it": async () => {
+    const slept = [];
+    await runBoot({
+      ticks: 3, files: { "/data/settings.txt": '{"boot.tick":30}' },
+      onTick: (tick, procs, store) => { if (tick === 1) store["/data/settings.txt"] = '{"boot.tick":45}'; return procs; },
+      onSleep: (ms) => slept.push(ms),
+    });
+    assert(slept.includes(30000) && slept.includes(45000), `expected 30s then 45s ticks, slept ${slept}`);
+    slept.length = 0;
+    await runBoot({
+      ticks: 2, args: ["--interval", "7000"], files: { "/data/settings.txt": '{"boot.tick":30}' },
+      onSleep: (ms) => slept.push(ms),
+    });
+    assert(slept.includes(7000) && !slept.includes(30000), `--interval should win, slept ${slept}`);
+  },
+
+  "hacknet.every changes the sweep cadence": async () => {
+    const r = await runBoot({ ticks: 6, files: { "/data/settings.txt": '{"hacknet.every":3}' } });
+    const runs = r.launched.filter((f) => f === "scripts/hacknet/hacknet.js").length;
+    assert(runs === 2, `every 3rd of 6 ticks is 2 sweeps, got ${runs}`);
+  },
+
+  "boot logs overrides at start and each change as it lands": async () => {
+    const r = await runBoot({
+      ticks: 3, files: { "/data/settings.txt": '{"boot.tick":30}' },
+      onTick: (tick, procs, store) => {
+        if (tick === 1) store["/data/settings.txt"] = '{"boot.tick":30,"enabled.gang":0}';
+        return procs;
+      },
+    });
+    assert(r.logs.some((l) => l.includes("settings (vs default): boot.tick 60 -> 30")),
+      `start line missing: ${r.logs.join(" | ")}`);
+    const changes = r.logs.filter((l) => l.includes("settings changed"));
+    assert(changes.length === 1 && changes[0].includes("enabled.gang on -> off") && !changes[0].includes("boot.tick"),
+      `expected one line naming only the gang switch: ${changes}`);
   },
 };

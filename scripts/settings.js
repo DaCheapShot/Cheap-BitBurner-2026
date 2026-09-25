@@ -1,9 +1,12 @@
 import { CLOUD_BUDGET_FRACTION } from "./config.js";
-import { HACKNET_CASH_FRACTION, PAYBACK_SECONDS } from "./hacknet/config.js";
-import { EQUIP_BUDGET_FRACTION } from "./gang/config.js";
+import { HACKNET_CASH_FRACTION, PAYBACK_SECONDS, HACKNET_EVERY } from "./hacknet/config.js";
+import { EQUIP_BUDGET_FRACTION, TICK_EVERY, WAR_EVERY, ASCEND_EVERY, EQUIP_EVERY } from "./gang/config.js";
 import {
-  HOME_RAM_BUDGET_FRACTION, HOME_CORES_BUDGET_FRACTION, PROG_BUDGET_FRACTION,
+  HOME_RAM_BUDGET_FRACTION, HOME_CORES_BUDGET_FRACTION, PROG_BUDGET_FRACTION, SING_TICK_MS,
 } from "./sing/config.js";
+
+/** boot.js's tick. Here, not in boot.js, so the default has one home a pure module can import. */
+export const BOOT_TICK_S = 60;
 
 /**
  * Live overrides for a handful of tunables, set from the terminal by
@@ -39,6 +42,18 @@ export const KNOBS = {
   "enabled.sing": { def: 1, min: 0, max: 1, bool: true, doc: "sing.js supervisor (off also releases the share hold)" },
   "enabled.hacknet": { def: 1, min: 0, max: 1, bool: true, doc: "hacknet money + hash sweeps" },
   "enabled.contracts": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },
+
+  // Cadences, read at the top of each loop, so they apply from the next wait.
+  // sing.tick scales EVERY sing cadence with it (upgrade, progs, join, augs...
+  // are counted in ticks) - deliberate: one knob slows or speeds all of sing.
+  // The gang ones are counted in gang updates (2 s, faster in bonus time).
+  "boot.tick": { def: BOOT_TICK_S, min: 5, max: 3600, doc: "seconds between boot ticks (--interval wins)" },
+  "hacknet.every": { def: HACKNET_EVERY, min: 1, max: 60, int: true, doc: "boot ticks between hacknet sweeps" },
+  "sing.tick": { def: SING_TICK_MS / 1000, min: 5, max: 600, doc: "seconds per sing tick; scales all sing cadences" },
+  "gang.tickEvery": { def: TICK_EVERY, min: 1, max: 300, int: true, doc: "gang updates between tick bodies" },
+  "gang.warEvery": { def: WAR_EVERY, min: 1, max: 300, int: true, doc: "gang updates between war checks" },
+  "gang.ascendEvery": { def: ASCEND_EVERY, min: 1, max: 300, int: true, doc: "gang updates between ascension passes" },
+  "gang.equipEvery": { def: EQUIP_EVERY, min: 1, max: 300, int: true, doc: "gang updates between equipment sweeps" },
 };
 
 const WORDS = { on: 1, true: 1, off: 0, false: 0 };
@@ -62,7 +77,8 @@ export function setting(text, key) {
   const k = KNOBS[key];
   if (!k) throw new Error(`unknown setting "${key}"`);
   const v = parseSettings(text)[key];
-  return typeof v === "number" && Number.isFinite(v) && v >= k.min && v <= k.max ? v : k.def;
+  return typeof v === "number" && Number.isFinite(v) && v >= k.min && v <= k.max &&
+    (!k.int || Number.isInteger(v)) ? v : k.def;
 }
 
 /**
@@ -80,10 +96,40 @@ export function setSetting(text, key, value) {
     const word = String(value).trim().toLowerCase();
     const v = k.bool && word in WORDS ? WORDS[word] : Number(value);
     if (k.bool && v !== 0 && v !== 1) throw new Error(`${key} is on or off, got "${value}"`);
+    if (k.int && !Number.isInteger(v)) throw new Error(`${key} must be a whole number, got "${value}"`);
     if (word === "" || !Number.isFinite(v) || v < k.min || v > k.max) {
       throw new Error(`${key} must be a number in [${k.min}, ${k.max}], got "${value}"`);
     }
     o[key] = v;
   }
   return JSON.stringify(o, null, 2);
+}
+
+/** A value as the terminal should read it: switches as on/off. */
+export function showSetting(key, v) {
+  return KNOBS[key]?.bool ? (v ? "on" : "off") : String(v);
+}
+
+/**
+ * "key a -> b" for every knob whose value IN FORCE differs between two file
+ * texts. Compared on setting(), not on the raw JSON, so an invalid override
+ * that falls back to the default is not reported as a change it never made.
+ */
+export function settingChanges(before, after, prefix = "") {
+  return Object.keys(KNOBS)
+    .filter((k) => k.startsWith(prefix) && setting(before, k) !== setting(after, k))
+    .map((k) => `${k} ${showSetting(k, setting(before, k))} -> ${showSetting(k, setting(after, k))}`);
+}
+
+/**
+ * The one log line a reader prints about its settings, or null for none.
+ * `before` null means "just started": list what is off its default. After
+ * that, list what changed. `prefix` keeps each script to its own knobs
+ * ("gang." in gang.js); boot passes "" and reports them all.
+ */
+export function settingsLog(before, after, prefix = "") {
+  if (before === after) return null;
+  const c = settingChanges(before ?? "", after, prefix);
+  if (!c.length) return null;
+  return `${before === null ? "settings (vs default)" : "settings changed"}: ${c.join(", ")}`;
 }

@@ -86,6 +86,7 @@ run scripts/set.js                      # list live settings (budgets) and their
 run scripts/set.js hacknet.cash 0.9     # override one, live - next sweep, no restart
 run scripts/set.js hacknet.cash default # back to config.js's value
 run scripts/set.js enabled.gang off     # live switch: boot stops gang.js next tick
+run scripts/set.js boot.tick 30         # cadences: boot.tick, sing.tick, hacknet.every, gang.*Every
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -364,6 +365,12 @@ tick. Off STOPS a running resident (cloud, gang, sing) and skips a transient; si
 `SHARE_HOLD_MARKER`, since a killed sing cannot. The `--no-X` flags keep their old meaning (don't
 start, never kill) - a switch that left gang.js running would change nothing visible. The manager
 has no switch: stopping it belongs to `--no-manager` and the retired-manager/orphan-kill rules.
+
+**Cadences** (`boot.tick`, `sing.tick` in seconds; `hacknet.every` in boot ticks; `gang.tickEvery|
+warEvery|ascendEvery|equipEvery` in gang updates) are re-read at the top of each loop. Counts are
+`int` knobs - a fractional modulus never hits 0 and would silently stop the thing it paces.
+`--interval` still pins boot's tick. `sing.tick` scales every sing cadence with it, on purpose:
+they are all counted in ticks.
 
 Not an in-game rewrite of `config.js`: filesync pushes disk -> game on save/connect and would
 silently revert it. Adding a knob = one `KNOBS` entry + swap the constant for `setting()` at its
@@ -701,8 +708,9 @@ Things that look arbitrary in there and aren't:
   which is the batcher's whole growth path, stops growing.
 
 **Which config changes need a restart.** `gang.js` is the only long-lived process, so it is the
-only one holding stale constants: `TICK_EVERY`, `WAR_EVERY`, `ASCEND_EVERY`, `EQUIP_EVERY`, and the
-`ASCEND_MULT_THRESHOLD` its log line quotes, are frozen at the value it started with. **Everything else is read inside an rpc
+only one holding stale constants: the `ASCEND_MULT_THRESHOLD` its log line quotes is frozen at the
+value it started with. The four cadences (`TICK_EVERY` etc.) are only defaults now - the live
+`gang.*Every` settings are re-read every update. **Everything else is read inside an rpc
 body and takes effect on that body's next run** — `Script.ts` cascades
 `invalidateModule()` to every dependent, so writing `config.js` re-compiles `math.js` and every
 generated transient that imports it, and the next `ns.run` picks up the new value with no restart.

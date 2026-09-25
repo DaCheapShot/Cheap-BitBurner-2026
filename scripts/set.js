@@ -1,4 +1,4 @@
-import { SETTINGS_FILE, KNOBS, parseSettings, setting, setSetting } from "./settings.js";
+import { SETTINGS_FILE, KNOBS, parseSettings, setting, setSetting, showSetting } from "./settings.js";
 
 /**
  * Change a tunable live, without editing config.js or restarting anything.
@@ -20,11 +20,10 @@ export async function main(ns) {
   if (key === undefined) {
     const o = parseSettings(text);
     const rows = Object.entries(KNOBS).map(([k, d]) => {
-      const shown = (v) => (d.bool ? (v ? "on" : "off") : v);
       const now = setting(text, k);
       const mark = k in o ? (now === o[k] ? " *" : " (override INVALID, using default)") : "";
       const range = d.bool ? "on/off" : `[${d.min}, ${d.max}]`;
-      return `  ${k.padEnd(17)} ${String(shown(now)).padStart(8)}  default ${String(shown(d.def)).padStart(6)}` +
+      return `  ${k.padEnd(17)} ${showSetting(k, now).padStart(8)}  default ${showSetting(k, d.def).padStart(6)}` +
         `  ${range}  ${d.doc}${mark}`;
     });
     ns.tprint(`settings (${SETTINGS_FILE}, * = overridden):\n${rows.join("\n")}`);
@@ -44,6 +43,6 @@ export async function main(ns) {
   }
   const before = setting(text, key);
   ns.write(SETTINGS_FILE, next, "w");
-  const shown = (v) => (KNOBS[key].bool ? (v ? "on" : "off") : v);
-  ns.tprint(`${key}: ${shown(before)} -> ${shown(setting(next, key))}`);
+  ns.tprint(`${key}: ${showSetting(key, before)} -> ${showSetting(key, setting(next, key))}` +
+    ` (boot's log confirms it on its next tick)`);
 }

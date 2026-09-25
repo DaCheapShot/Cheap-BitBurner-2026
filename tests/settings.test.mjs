@@ -59,4 +59,29 @@ export const tests = {
     // A fraction knob must NOT take "on": that would read as 1 = all the cash.
     assertThrows(() => S.setSetting("", "hacknet.cash", "on"), '"on" accepted for a fraction');
   },
+
+  "cadence counts must be whole numbers, in the file and at the CLI": async () => {
+    const { settings: S } = await loadScripts();
+    const def = S.KNOBS["gang.equipEvery"].def;
+    assert(S.setting('{"gang.equipEvery":5}', "gang.equipEvery") === 5, "valid count ignored");
+    // A fractional modulus would never hit 0 - the sweep would silently stop.
+    assert(S.setting('{"gang.equipEvery":2.5}', "gang.equipEvery") === def, "2.5 should fall back");
+    assertThrows(() => S.setSetting("", "gang.equipEvery", "2.5"), "2.5 accepted for a count");
+    assertThrows(() => S.setSetting("", "hacknet.every", "0"), "0 accepted - modulo by zero");
+    assert(S.setting(S.setSetting("", "boot.tick", "30"), "boot.tick") === 30, "boot.tick 30 refused");
+  },
+
+  "settingsLog: start lists overrides, then only changes, scoped by prefix": async () => {
+    const { settings: S } = await loadScripts();
+    const a = '{"gang.equip":0.5,"cloud.cash":0.2}';
+    assert(S.settingsLog(null, "", "gang.") === null, "nothing overridden should print nothing");
+    assert(S.settingsLog(null, a, "gang.") === "settings (vs default): gang.equip 0.15 -> 0.5",
+      `start line: ${S.settingsLog(null, a, "gang.")}`);
+    assert(S.settingsLog(a, a, "gang.") === null, "unchanged text should print nothing");
+    const b = '{"gang.equip":0.5,"cloud.cash":0.3}';
+    assert(S.settingsLog(a, b, "gang.") === null, "another script's knob must not reach the gang log");
+    assert(S.settingsLog(a, b, "cloud.") === "settings changed: cloud.cash 0.2 -> 0.3", S.settingsLog(a, b, "cloud."));
+    assert(S.settingsLog(a, '{"gang.equip":7}', "gang.") === "settings changed: gang.equip 0.5 -> 0.15",
+      "an invalid override reads as the default it falls back to");
+  },
 };

@@ -1,5 +1,5 @@
 import { ROOT_MARKER, CLOUD_DONE_MARKER } from "./config.js";
-import { SETTINGS_FILE, setting } from "./settings.js";
+import { SETTINGS_FILE, setting, settingsLog } from "./settings.js";
 
 /**
  * Cloud server purchaser / upgrader.
@@ -270,7 +270,13 @@ export async function main(ns) {
   );
 
   let lastMsg = "";
+  let lastCfgText = null;
   while (true) {
+    const cfgText = ns.read(SETTINGS_FILE);
+    const news = settingsLog(lastCfgText, cfgText, "cloud.");
+    if (news) ns.print(news + (pinned === null ? "" : " (ignored: --budget pins this run)"));
+    lastCfgText = cfgText;
+
     const r = step(ns, fraction(), dryRun);
 
     // "wait:" lines repeat every tick while money accumulates - only print on

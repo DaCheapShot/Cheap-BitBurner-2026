@@ -6,8 +6,8 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
 import { GANG_SERVICE } from "./gang/config.js";
 import { CONTRACTS_SERVICE } from "./contracts/config.js";
 import { SING_SERVICE } from "./sing/config.js";
-import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE, HACKNET_EVERY } from "./hacknet/config.js";
-import { SETTINGS_FILE, setting } from "./settings.js";
+import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE } from "./hacknet/config.js";
+import { SETTINGS_FILE, setting, settingsLog, BOOT_TICK_S } from "./settings.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -106,7 +106,7 @@ const RETIRED_MANAGERS = [
 
 const ALL_MANAGERS = [MANAGER, ...RETIRED_MANAGERS];
 
-const DEFAULT_TICK_MS = 60000;
+const DEFAULT_TICK_MS = BOOT_TICK_S * 1000;
 
 /** How long to wait for a transient before giving up and moving on. */
 const TRANSIENT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -352,7 +352,11 @@ export async function main(ns) {
     ...(noFormulas ? ["--no-formulas"] : []),
   ];
   const iIdx = args.indexOf("--interval");
-  const tickMs = iIdx >= 0 ? Math.max(5000, Number(args[iIdx + 1]) || DEFAULT_TICK_MS) : DEFAULT_TICK_MS;
+  // --interval pins the tick; otherwise it is the live `boot.tick` setting,
+  // re-read every tick like the switches.
+  const pinnedTickMs = iIdx >= 0 ? Math.max(5000, Number(args[iIdx + 1]) || DEFAULT_TICK_MS) : null;
+  const tickMsFrom = (cfgText) => pinnedTickMs ?? setting(cfgText, "boot.tick") * 1000;
+  const tickMs = tickMsFrom(ns.read(SETTINGS_FILE));
 
   const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
 
@@ -370,6 +374,11 @@ export async function main(ns) {
     if (p.pid !== ns.pid && ns.kill(p.pid)) log(`stopped an older boot (pid ${p.pid}) - this one supersedes it`);
   }
 
+  // Say what the live settings are at start (only those off their default),
+  // then every change as boot picks it up - so the log shows when a set.js
+  // actually took effect, not just that it was typed.
+  let lastCfgText = null;
+
   let lastRootStamp = ns.read(ROOT_MARKER);
   let firstPass = true;
   let ticks = 0;
@@ -382,6 +391,9 @@ export async function main(ns) {
     // `live` is false when the SETTING is off; the CLI flags are checked
     // separately below because they only suppress starting, never stop.
     const cfgText = ns.read(SETTINGS_FILE);
+    const news = settingsLog(lastCfgText, cfgText);
+    if (news) log(news);
+    lastCfgText = cfgText;
     const live = (svc) => setting(cfgText, `enabled.${svc}`) !== 0;
 
     // -- 0. did the manager die? -------------------------------------------
@@ -502,7 +514,7 @@ export async function main(ns) {
       killDuplicates(ns, SING_SERVICE, log);
       ensureService(ns, SING_SERVICE, [], log);
     }
-    // The hacknet, money sweep then hash sweep, every HACKNET_EVERY ticks.
+    // The hacknet, money sweep then hash sweep, every `hacknet.every` ticks (live setting).
     //
     // TRANSIENTS, not services: both exit on their own, so ensureService would
     // relaunch them every tick forever - the trap CLOUD_DONE_MARKER closes for
@@ -515,7 +527,7 @@ export async function main(ns) {
     // The isUp checks are about STACKING rather than duplicates: a hand-run
     // --dry-run can still be going, and a second sweep on top of it would plan
     // against cash the first is about to spend.
-    if (!noHacknet && live("hacknet") && ticks % HACKNET_EVERY === 0) {
+    if (!noHacknet && live("hacknet") && ticks % setting(cfgText, "hacknet.every") === 0) {
       if (!isUp(ns, HACKNET_MONEY_SERVICE)) {
         await runToCompletion(ns, HACKNET_MONEY_SERVICE, [], log);
       }
@@ -545,7 +557,7 @@ export async function main(ns) {
 
     firstPass = false;
     ticks++;
-    if (!once) await ns.sleep(tickMs);
+    if (!once) await ns.sleep(tickMsFrom(cfgText));
   } while (!once);
 
   ns.tprint("boot: one pass done.");

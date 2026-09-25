@@ -1,6 +1,6 @@
 import { planMoney } from "./math.js";
 import { HASH_PRICE } from "./config.js";
-import { SETTINGS_FILE, setting } from "scripts/settings.js";
+import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
 
 /**
  * The hacknet money sweep: ONE pass, then exit.
@@ -65,6 +65,9 @@ export async function main(ns) {
   const money = ns.getServerMoneyAvailable("home");
   // Read per sweep, not imported: scripts/set.js retunes both with no restart.
   const cfgText = ns.read(SETTINGS_FILE);
+  // A transient has no "before", so it says what is off default every sweep.
+  const news = settingsLog(null, cfgText, "hacknet.");
+  if (news) log(news);
   const budget = money * setting(cfgText, "hacknet.cash");
   const PAYBACK_SECONDS = setting(cfgText, "hacknet.payback");
   const mults = ns.getHacknetMultipliers();

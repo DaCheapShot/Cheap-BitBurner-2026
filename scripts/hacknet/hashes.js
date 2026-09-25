@@ -4,7 +4,7 @@ import {
   HASH_PRICE, HASH_SALE_COST, HASH_HORIZON_S, HASH_VALUE_MARGIN, MONEY_SOFTCAP,
   MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE, SELL_MONEY_UPGRADE,
 } from "./config.js";
-import { SETTINGS_FILE, setting } from "scripts/settings.js";
+import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
 
 /**
  * The hash sweep: ONE pass, then exit. A no-op outside BitNode 9.
@@ -50,6 +50,8 @@ import { SETTINGS_FILE, setting } from "scripts/settings.js";
 export async function main(ns) {
   ns.disableLog("ALL");
   const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
+  const news = settingsLog(null, ns.read(SETTINGS_FILE), "hacknet.");
+  if (news) log(news);
   const dry = ns.args.map(String).includes("--dry-run");
 
   // hashCapacity() returns 0 without hacknet servers, which is every BitNode
