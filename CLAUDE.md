@@ -85,6 +85,7 @@ run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-
 run scripts/set.js                      # list live settings (budgets) and their defaults
 run scripts/set.js hacknet.cash 0.9     # override one, live - next sweep, no restart
 run scripts/set.js hacknet.cash default # back to config.js's value
+run scripts/set.js enabled.gang off     # live switch: boot stops gang.js next tick
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -357,6 +358,12 @@ the rpc body), so a change needs no restart. Defaults are imported from the owni
 which stays the one home of a default. `setting()` never throws - a mangled file falls back to
 defaults - and `setSetting()` is where bad input is refused. Home-only file is fine because every
 reader runs on home; a worker on another host would need a port (see share).
+
+**Switches** (`enabled.cloud|gang|sing|hacknet|contracts`, on/off) are read by `boot.js` every
+tick. Off STOPS a running resident (cloud, gang, sing) and skips a transient; sing off also clears
+`SHARE_HOLD_MARKER`, since a killed sing cannot. The `--no-X` flags keep their old meaning (don't
+start, never kill) - a switch that left gang.js running would change nothing visible. The manager
+has no switch: stopping it belongs to `--no-manager` and the retired-manager/orphan-kill rules.
 
 Not an in-game rewrite of `config.js`: filesync pushes disk -> game on save/connect and would
 silently revert it. Adding a knob = one `KNOBS` entry + swap the constant for `setting()` at its

@@ -47,4 +47,16 @@ export const tests = {
         `${k}: default ${d.def} outside [${d.min}, ${d.max}] - an import went missing?`);
     }
   },
+
+  "switches take on/off words and refuse anything but 0 or 1": async () => {
+    const { settings: S } = await loadScripts();
+    for (const [w, v] of [["off", 0], ["OFF", 0], ["false", 0], ["0", 0], ["on", 1], ["true", 1], ["1", 1]]) {
+      assert(S.setting(S.setSetting("", "enabled.gang", w), "enabled.gang") === v, `"${w}" should be ${v}`);
+    }
+    for (const bad of ["0.5", "yes", ""]) {
+      assertThrows(() => S.setSetting("", "enabled.gang", bad), `"${bad}" accepted for a switch`);
+    }
+    // A fraction knob must NOT take "on": that would read as 1 = all the cash.
+    assertThrows(() => S.setSetting("", "hacknet.cash", "on"), '"on" accepted for a fraction');
+  },
 };

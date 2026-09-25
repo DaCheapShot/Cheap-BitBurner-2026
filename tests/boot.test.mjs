@@ -69,7 +69,7 @@ async function runBoot({
     sleep: async (ms) => {
       for (const p of procs) if (TRANSIENT.includes(p.filename)) p.life--;
       procs = procs.filter((p) => !TRANSIENT.includes(p.filename) || (p.life ?? 99) > 0);
-      if (ms >= 1000) { tick++; if (tick >= ticks) throw new Error("STOP"); procs = onTick(tick, procs); }
+      if (ms >= 1000) { tick++; if (tick >= ticks) throw new Error("STOP"); procs = onTick(tick, procs, store); }
       await new Promise((r) => setTimeout(r, 1));
     },
   };
@@ -393,5 +393,54 @@ export const tests = {
     const r = await runBoot({ args: ["--no-contracts"], ticks: 3 });
     assert(!r.launched.includes("scripts/contracts/contracts.js"),
       `--no-contracts should suppress it, launched: ${r.launched}`);
+  },
+
+  // The live switches (scripts/set.js enabled.X off). Unlike the --no-X flags
+  // they STOP a running resident, and they are re-read every tick - so a switch
+  // flipped mid-run lands on the next tick with no boot restart.
+  "a switch turned off mid-run stops the running resident": async () => {
+    const r = await runBoot({
+      inGang: true, ticks: 4,
+      onTick: (tick, procs, store) => {
+        if (tick === 2) store["/data/settings.txt"] = JSON.stringify({ "enabled.gang": 0, "enabled.cloud": 0 });
+        return procs;
+      },
+    });
+    for (const f of ["scripts/gang/gang.js", "scripts/cloud.js"]) {
+      assert(r.launched.includes(f), `${f} should have run before the switch`);
+      assert(r.killed.includes(f), `${f} should have been stopped, killed: ${r.killed}`);
+      assert(!r.procs.some((p) => p.filename === f), `${f} is still running`);
+    }
+    assert(r.logs.some((l) => l.includes("switched off")), "the stop should be logged");
+  },
+
+  "sing switched off is stopped AND its share hold released": async () => {
+    const r = await runBoot({
+      running: ["scripts/sing/sing.js"], ticks: 2,
+      files: { "/data/settings.txt": '{"enabled.sing":0}', "/data/share-hold.txt": "hold" },
+    });
+    assert(r.killed.includes("scripts/sing/sing.js"), `sing should be stopped, killed: ${r.killed}`);
+    assert(!r.launched.includes("scripts/sing/sing.js"), "and not relaunched");
+    assert(r.store["/data/share-hold.txt"] === "", "a dead sing cannot release its hold, so boot must");
+  },
+
+  "transients switched off are skipped": async () => {
+    const r = await runBoot({
+      ticks: 3, files: { "/data/settings.txt": '{"enabled.hacknet":0,"enabled.contracts":0}' },
+    });
+    for (const f of ["scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js", "scripts/contracts/contracts.js"]) {
+      assert(!r.launched.includes(f), `${f} should not run while off, launched: ${r.launched}`);
+    }
+  },
+
+  "a switch turned back on restarts the service": async () => {
+    const r = await runBoot({
+      ticks: 4, files: { "/data/settings.txt": '{"enabled.sing":0}' },
+      onTick: (tick, procs, store) => {
+        if (tick === 2) store["/data/settings.txt"] = "{}";
+        return procs;
+      },
+    });
+    assert(r.launched.includes("scripts/sing/sing.js"), `sing should start once switched back on: ${r.launched}`);
   },
 };

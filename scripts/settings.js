@@ -29,7 +29,19 @@ export const KNOBS = {
   "sing.homeRam": { def: HOME_RAM_BUDGET_FRACTION, min: 0, max: 1, doc: "fraction of cash a home RAM upgrade may cost" },
   "sing.homeCores": { def: HOME_CORES_BUDGET_FRACTION, min: 0, max: 1, doc: "fraction of cash a home core upgrade may cost" },
   "sing.progs": { def: PROG_BUDGET_FRACTION, min: 0, max: 1, doc: "fraction of cash a darkweb program may cost" },
+
+  // Service switches, read by boot.js every tick. Off STOPS a running resident
+  // (cloud, gang, sing) and skips a transient (hacknet, contracts). The manager
+  // is deliberately absent: stopping it drags in killOrphanWorkers and the
+  // retired-manager rules, which --no-manager already owns.
+  "enabled.cloud": { def: 1, min: 0, max: 1, bool: true, doc: "cloud.js buys/upgrades servers" },
+  "enabled.gang": { def: 1, min: 0, max: 1, bool: true, doc: "gang.js supervisor" },
+  "enabled.sing": { def: 1, min: 0, max: 1, bool: true, doc: "sing.js supervisor (off also releases the share hold)" },
+  "enabled.hacknet": { def: 1, min: 0, max: 1, bool: true, doc: "hacknet money + hash sweeps" },
+  "enabled.contracts": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },
 };
+
+const WORDS = { on: 1, true: 1, off: 0, false: 0 };
 
 /** The overrides object in `text`, or {} for a missing or broken file. */
 export function parseSettings(text) {
@@ -65,8 +77,10 @@ export function setSetting(text, key, value) {
   if (String(value).trim().toLowerCase() === "default") {
     delete o[key];
   } else {
-    const v = Number(value);
-    if (String(value).trim() === "" || !Number.isFinite(v) || v < k.min || v > k.max) {
+    const word = String(value).trim().toLowerCase();
+    const v = k.bool && word in WORDS ? WORDS[word] : Number(value);
+    if (k.bool && v !== 0 && v !== 1) throw new Error(`${key} is on or off, got "${value}"`);
+    if (word === "" || !Number.isFinite(v) || v < k.min || v > k.max) {
       throw new Error(`${key} must be a number in [${k.min}, ${k.max}], got "${value}"`);
     }
     o[key] = v;

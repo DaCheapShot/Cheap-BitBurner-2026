@@ -7,6 +7,7 @@ import { GANG_SERVICE } from "./gang/config.js";
 import { CONTRACTS_SERVICE } from "./contracts/config.js";
 import { SING_SERVICE } from "./sing/config.js";
 import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE, HACKNET_EVERY } from "./hacknet/config.js";
+import { SETTINGS_FILE, setting } from "./settings.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -57,6 +58,12 @@ import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE, HACKNET_EVERY } from "./ha
  *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
  *         run scripts/boot.js --targets 5         (cap the manager's target count)
  *         run scripts/boot.js --interval 30000
+ *
+ * Every --no-X above except --no-manager/--no-formulas also has a LIVE switch,
+ * `run scripts/set.js enabled.X off`, re-read every tick. The two differ on
+ * purpose: the flag only stops boot STARTING the service (as it always has);
+ * the switch also STOPS a running resident, because a switch that left
+ * gang.js running would change nothing you could see.
  *
  * RAM: 1.60 base + run 1.00 + ps 0.20 + kill 0.50
  *      + scan 0.20 (killOrphanWorkers must reach the whole network) = 3.50 GB
@@ -144,6 +151,17 @@ function killDuplicates(ns, file, log) {
   for (const p of live.slice(1)) if (ns.kill(p.pid)) killed++;
   log(`killed ${killed} duplicate instance(s) of ${file} - kept pid ${live[0].pid}`);
   return killed;
+}
+
+/**
+ * Kill every copy of a resident the live switch has turned off. Says so only
+ * when it actually stopped something, so an off switch costs one log line, not
+ * one per tick.
+ */
+function stopService(ns, file, log) {
+  const live = instancesOf(ns, file);
+  for (const p of live) ns.kill(p.pid);
+  if (live.length) log(`stopped ${file} - switched off in ${SETTINGS_FILE}`);
 }
 
 /**
@@ -360,6 +378,12 @@ export async function main(ns) {
   let cloudMaxedLogged = false;
 
   do {
+    // The live switches, re-read every tick so scripts/set.js needs no restart.
+    // `live` is false when the SETTING is off; the CLI flags are checked
+    // separately below because they only suppress starting, never stop.
+    const cfgText = ns.read(SETTINGS_FILE);
+    const live = (svc) => setting(cfgText, `enabled.${svc}`) !== 0;
+
     // -- 0. did the manager die? -------------------------------------------
     // MANAGER only. A retired manager running is not this one surviving - it is
     // a rival that ensureOneManager is about to kill, so counting it here would
@@ -416,7 +440,9 @@ export async function main(ns) {
     // -- 3. services --------------------------------------------------------
     // Sweep duplicates first. If an earlier build (or a hand-started copy) left
     // extras running, they are cleaned up before anything else is decided.
-    if (!noCloud) {
+    if (!live("cloud")) {
+      stopService(ns, CLOUD, log);
+    } else if (!noCloud) {
       killDuplicates(ns, CLOUD, log);
       // cloud.js EXITS once the fleet is fully maxed - it is a service with a
       // finish line, unlike the manager. Without this check, ensureService sees
@@ -455,7 +481,9 @@ export async function main(ns) {
     // would then relaunch it every tick forever - the same trap CLOUD_DONE_MARKER
     // exists to avoid. inGang() is 0 GB, so the gate is free on every BitNode
     // that never founds one.
-    if (!noGang && ns.gang.inGang()) {
+    if (!live("gang")) {
+      stopService(ns, GANG_SERVICE, log);
+    } else if (!noGang && ns.gang.inGang()) {
       killDuplicates(ns, GANG_SERVICE, log);
       ensureService(ns, GANG_SERVICE, [], log);
     }
@@ -464,7 +492,13 @@ export async function main(ns) {
     // boot is pinned at 3.50). It does not need a gate, because sing.js never
     // exits - without Source-File 4 it parks, so ensureService finds it up and
     // there is no relaunch loop to prevent.
-    if (!noSing) {
+    if (!live("sing")) {
+      stopService(ns, SING_SERVICE, log);
+      // A killed sing.js cannot release its share hold - the same reason
+      // --no-sing clears it at startup. Written only when set, so an off switch
+      // is not a file write a minute.
+      if (ns.read(SHARE_HOLD_MARKER) !== "") ns.write(SHARE_HOLD_MARKER, "", "w");
+    } else if (!noSing) {
       killDuplicates(ns, SING_SERVICE, log);
       ensureService(ns, SING_SERVICE, [], log);
     }
@@ -481,7 +515,7 @@ export async function main(ns) {
     // The isUp checks are about STACKING rather than duplicates: a hand-run
     // --dry-run can still be going, and a second sweep on top of it would plan
     // against cash the first is about to spend.
-    if (!noHacknet && ticks % HACKNET_EVERY === 0) {
+    if (!noHacknet && live("hacknet") && ticks % HACKNET_EVERY === 0) {
       if (!isUp(ns, HACKNET_MONEY_SERVICE)) {
         await runToCompletion(ns, HACKNET_MONEY_SERVICE, [], log);
       }
@@ -505,7 +539,7 @@ export async function main(ns) {
     // The isUp check is not about duplicates but about STACKING: a hand-run
     // --dummy can still be going, and starting a second sweep on top of it would
     // have both attempting the same contracts.
-    if (!noContracts && !isUp(ns, CONTRACTS_SERVICE)) {
+    if (!noContracts && live("contracts") && !isUp(ns, CONTRACTS_SERVICE)) {
       await runToCompletion(ns, CONTRACTS_SERVICE, [], log);
     }
 
