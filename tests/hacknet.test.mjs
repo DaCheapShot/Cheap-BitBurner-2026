@@ -643,6 +643,41 @@ export const tests = {
     assert(plan.reason.includes("sale"), `reason was "${plan.reason}"`);
   },
 
+  // hashes.js logs plan.table so a sweep shows WHY, not only what. One row per
+  // (target, upgrade) from the first round, priced before any buy - a row per
+  // round would repeat the same pair once per level bought.
+  "the plan carries one first-round row per target and upgrade": async () => {
+    const mods = await loadScripts();
+    const m = mods["hacknet/math"];
+    const cfg = {
+      HASH_PRICE: 250000, HASH_HORIZON_S: 3600, HASH_VALUE_MARGIN: 2,
+      MONEY_SOFTCAP: 10e12,
+      MAX_MONEY_UPGRADE: "Increase Maximum Money",
+      MIN_SECURITY_UPGRADE: "Reduce Minimum Security",
+    };
+    const plan = m.planHashes({
+      hashes: 100000, capacity: 1e6,
+      levels: { "Increase Maximum Money": 0, "Reduce Minimum Security": 0 },
+      perLevel: { "Increase Maximum Money": 50, "Reduce Minimum Security": 50 },
+      income: 1e9,
+      targets: [
+        { host: "phantasy", moneyMax: 2.4e9, minSec: 20, reqSkill: 1000 },
+        { host: "n00dles", moneyMax: 1.75e6, minSec: 1, reqSkill: 1 },
+      ],
+      units: [{ index: 0, cache: 1 }], budget: 0,
+      mults: { purchaseCost: 1, levelCost: 1, ramCost: 1, coreCost: 1 },
+    }, cfg);
+
+    assert(plan.spends.length > 0, `expected spends (${plan.reason})`);
+    assert(plan.table.length === 4, `expected 4 rows, got ${plan.table.length}`);
+    const row = (h, u) => plan.table.find((r) => r.host === h && r.upgrade === u);
+    const sec = row("phantasy", "Reduce Minimum Security");
+    assert(sec.verdict === "worth buying" && sec.price === 50, JSON.stringify(sec));
+    assert(Math.abs(sec.bar - 50 * 250000 * 2) < 1, `bar ${sec.bar}`);
+    assert(row("n00dles", "Reduce Minimum Security").verdict === "at floor",
+      "minSec 1 has nothing left to buy");
+  },
+
   // Hashes nothing is going to spend are sold, because the game auto-sells only
   // the OVERFLOW: storeHashes() caps the balance at capacity and pays out just
   // the remainder, so everything at or below capacity sits forever. A cache-1
