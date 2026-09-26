@@ -1050,6 +1050,11 @@ rep), and at `getFavorToDonate()` the faction sells rep: `$ / 1e6 * mults.factio
 (`donation.ts`). The live bug: Bachman worked toward 375k with 150 favor already banked. `chooseAction`
 skips a donatable faction - `canDonate`: favor at the bar AND a non-empty work-type list, which is
 exactly the set `donateToFaction` accepts - and works it only when nothing else is left.
+**The same goes for a faction an install WOULD lift to the bar** (`bankedFavor`: favor +
+`getFactionFavorGain` >= the bar, re-read every aug pass since it moves with rep) - the second live
+bug was Bachman ground toward 375k when its rep already carried it to 150 at the next install. When
+nothing but such fallbacks is left (`installForFavor`), and no travel stop is still to collect, the
+aug pass forces an install - whatever fits, under `MIN_AUG_BATCH` - so the donations open.
 **Donating happens only as part of a batch that is bought** - the user's rule: money donated with no
 batch behind it is money the batcher could have had. `planAugBuys` treats an aug short of rep at a
 donatable seller as in reach, priced WITH the donation that reaches it, so the donation counts
@@ -1084,8 +1089,8 @@ Red Pill (`RED_PILL`: 2.5m Daedalus rep, `moneyCost: 0`) is bought the pass it i
 or by donation - and installed as a queue of one; `owned.pill` retries an install that failed. Its
 donation is reserved BEFORE the dearest-first loop, because at $0 it would otherwise be planned last
 and a dear aug could take the cash its rep needed. And while `RED_PILL_FACTION` is below the donate
-bar, the FAVOR_GAIN body (`getFactionFavorGain`, 2.35) asks whether an install now would carry it
-over; if so, whatever fits is bought and installed at any size. ~462k lifetime rep is 150 favor,
+bar, the FAVOR_GAIN body (`getFactionFavorGain`, 2.35, read for every joined faction short of the
+bar) asks whether an install now would carry it over - even with other work left; if so, whatever fits is bought and installed at any size. ~462k lifetime rep is 150 favor,
 so that install turns the remaining ~2m of the pill's rep from a grind into a donation. Nothing here
 touches `w0r1d_d43m0n` - destroying the node stays the user's call.
 

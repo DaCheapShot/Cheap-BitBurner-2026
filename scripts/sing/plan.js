@@ -198,6 +198,21 @@ export function canDonate(faction, state) {
 }
 
 /**
+ * Would an install NOW carry this faction to the donate bar? Then the rep it
+ * still wants is bought after the install instead of worked for now - the
+ * live case was Bachman worked toward 375k with 150 favor already earned.
+ * `favorGain` is getFactionFavorGain, re-read every aug pass (it moves with
+ * rep). A faction already at the bar is canDonate's, not this.
+ *
+ * @param state  { favor: {faction: n}, favorNeed: n, favorGain: {faction: n} }
+ */
+export function bankedFavor(faction, state) {
+  const f = state.favor?.[faction];
+  return state.favorNeed > 0 && f !== undefined && f < state.favorNeed &&
+    f + (state.favorGain?.[faction] ?? 0) >= state.favorNeed;
+}
+
+/**
  * WORK_ORDER's steps that can apply now, then every joined faction it does not
  * list. A faction step needs the faction joined; a company step needs nothing
  * here - chooseAction decides whether it is still worth working.
@@ -298,7 +313,7 @@ function walk(player, state, targets) {
     const target = repTarget(step.faction, targets);
     if (type && (state.rep[step.faction] ?? 0) < target) {
       const a = { kind: "faction", faction: step.faction, type, target };
-      if (!canDonate(step.faction, state)) return { action: a };
+      if (!canDonate(step.faction, state) && !bankedFavor(step.faction, state)) return { action: a };
       donatable ??= a;
     }
   }
@@ -350,12 +365,25 @@ export function chooseAction(player, state) {
     if (w.action) return { ...w.action, ...tag };
     if (w.donatable) donatable ??= { ...w.donatable, ...tag };
   }
-  if (donatable) return donatable;
+  if (donatable) return { ...donatable, fallback: true };
 
   // 4. Nothing to work. sing.js turns this into a money crime (bestCrime) -
   //    the usual state for the first stretch after an install, before any
   //    invite - and only when that cannot be read is it truly idle.
   return { kind: "idle" };
+}
+
+/**
+ * The joined factions an install now would lift to the donate bar that still
+ * want rep - but only when nothing else is worth working (chooseAction is idle
+ * or a fallback), since then the install is what opens their rep to money. []
+ * otherwise. A karma grind's gym or crime is not a fallback: it installs nothing.
+ */
+export function installForFavor(player, state) {
+  const a = chooseAction(player, state);
+  if (a.kind !== "idle" && !a.fallback) return [];
+  return player.factions.filter((f) => bankedFavor(f, state) &&
+    (state.rep[f] ?? 0) < repTarget(f, state.targets));
 }
 
 /**
