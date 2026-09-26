@@ -425,7 +425,12 @@ export function planStudy(s) {
  *                         MONEY_SOFTCAP, MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE }
  */
 export function planHashes(state, cfg) {
-  const none = (why, sell = 0) => ({ spends: [], cacheBuy: null, sell, reason: why });
+  // Every (target, upgrade) pair as the FIRST round priced it, so the log can
+  // show the comparison behind the decision, not just its outcome. Later
+  // rounds reprice after each buy and are not recorded: the spends say what
+  // they bought.
+  const table = [];
+  const none = (why, sell = 0) => ({ spends: [], cacheBuy: null, sell, reason: why, table });
 
   /**
    * How many Sell-for-Money purchases the balance covers, each HASH_SALE_COST
@@ -463,12 +468,15 @@ export function planHashes(state, cfg) {
   // boot.js), the same identifier tax gang/math.js dodges.
   const incomeShare = state.income / live.length;
 
-  for (;;) {
+  for (let first = true; ; first = false) {
     let best = null;
     for (const t of live) {
       for (const upgrade of upgrades) {
         const f = factorFor(upgrade, t);
-        if (f <= 1) continue;
+        const row = (verdict, price = 0, gain = 0, bar = 0) => {
+          if (first) table.push({ host: t.host, upgrade, f, price, gain, bar, verdict });
+        };
+        if (f <= 1) { row("at floor"); continue; }
         const price = bundlePrice(state.perLevel[upgrade], levels[upgrade], 1);
         // A perLevel of 0 (unreachable in this fork - both upgrades are
         // costPerLevel: 50 - but a fork can retune it) makes bundlePrice 0,
@@ -476,14 +484,16 @@ export function planHashes(state, cfg) {
         // the balance, so this never terminates. Wedges a 6.60 GB transient
         // that runToCompletion times out on but never kills, and boot's isUp
         // check then blocks every future hash sweep for the life of the process.
-        if (!(price > 0)) continue;
+        if (!(price > 0)) { row("no price"); continue; }
         const gain = (f - 1) * incomeShare * cfg.HASH_HORIZON_S;
+        const bar = price * cfg.HASH_PRICE * cfg.HASH_VALUE_MARGIN;
         // Eligibility BEFORE affordability, so "worth buying but out of reach"
         // is distinguishable from "not worth buying" - they need different
         // answers and only one of them is a reason to buy cache.
-        if (gain <= price * cfg.HASH_PRICE * cfg.HASH_VALUE_MARGIN) continue;
-        if (price > state.capacity) { capacityShort = Math.max(capacityShort, price); continue; }
-        if (price > left) { balanceShort = Math.max(balanceShort, price); continue; }
+        if (gain <= bar) { row("below bar", price, gain, bar); continue; }
+        if (price > state.capacity) { row("over capacity", price, gain, bar); capacityShort = Math.max(capacityShort, price); continue; }
+        if (price > left) { row("over balance", price, gain, bar); balanceShort = Math.max(balanceShort, price); continue; }
+        row("worth buying", price, gain, bar);
         const value = gain / price;
         if (!best || value > best.value) best = { upgrade, t, price, value };
       }
@@ -508,7 +518,7 @@ export function planHashes(state, cfg) {
   }
 
   const spends = [...counts.values()];
-  if (spends.length) return { spends, cacheBuy: null, sell: 0, reason: `${spends.length} spend(s) planned` };
+  if (spends.length) return { spends, cacheBuy: null, sell: 0, reason: `${spends.length} spend(s) planned`, table };
 
   // Capacity first: a store too small to HOLD the bundle can never fill, while
   // a balance too small fills on its own in a minute or two.
@@ -523,6 +533,7 @@ export function planHashes(state, cfg) {
       spends: [],
       cacheBuy,
       sell: 0,
+      table,
       reason: cacheBuy
         ? `hash capacity ${state.capacity} cannot hold a ${capacityShort}-hash buy - upgrading cache`
         : `hash capacity ${state.capacity} cannot hold a ${capacityShort}-hash buy, and cache does not fit the budget`,

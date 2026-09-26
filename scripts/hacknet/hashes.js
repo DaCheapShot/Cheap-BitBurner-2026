@@ -141,6 +141,29 @@ export async function main(ns) {
       MAX_MONEY_UPGRADE, MIN_SECURITY_UPGRADE,
     });
 
+  // The comparison behind the decision, every sweep: what the manager published,
+  // and each upgrade priced against the sale. A bare outcome ("nothing beats
+  // the sale price") cannot say whether the income read or the price is wrong.
+  const $ = (n) => `$${ns.format.number(n, 2)}`;
+  log(`targets from ${TARGETS_MARKER}: ${targets.length ? "" : "none"}`);
+  for (const t of targets) {
+    log(`  ${t.host}  max ${$(t.moneyMax)}  minSec ${ns.format.number(t.minSec, 2)}  ` +
+        `reqHack ${ns.format.number(t.reqSkill, 2, 1000, true)}`);
+  }
+  if (targets.length) {
+    log(`income ${$(income)}/s, ${$(income / targets.length)}/s per target; ` +
+        `gain = (f-1) x per-target x ${ns.format.time(HASH_HORIZON_S * 1000)}, ` +
+        `bar = hashes x ${$(HASH_PRICE)} sale x${HASH_VALUE_MARGIN}`);
+  }
+  for (const r of plan.table) {
+    log(`  ${r.upgrade} on ${r.host}: ` + (r.price
+      ? `+${ns.format.percent(r.f - 1, 2)} for ${r.price} hashes, gain ${$(r.gain)} vs bar ${$(r.bar)} - ${r.verdict}`
+      : r.verdict));
+  }
+  log(`  ${SELL_MONEY_UPGRADE}: ${HASH_SALE_COST} hashes -> ${$(HASH_SALE_COST * HASH_PRICE)}, ` +
+      `balance ${ns.format.number(ns.hacknet.numHashes(), 2, 1000, true)} of ` +
+      `${ns.format.number(capacity, 2, 1000, true)}`);
+
   // Saving toward a study level: hold the store, as planHashes does for its own
   // out-of-reach buys.
   if (study.saving && plan.sell) {
