@@ -7,7 +7,7 @@ import {
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTargets, planAugBuys,
-  canDonate, donationPerRep, bestCrime, chooseCityGroup, studyAction,
+  canDonate, bankedFavor, installForFavor, donationPerRep, bestCrime, chooseCityGroup, studyAction,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
@@ -322,10 +322,15 @@ return { favor, need: ns.getFavorToDonate() };
 `;
 
 /**
- * The favor an install would add (addRepToFavor(favor, rep) - favor). Its own
- * body, not FAVOR's: FAVOR is read once per process, and this moves with rep.
+ * The favor an install would add (addRepToFavor(favor, rep) - favor), per
+ * faction. Its own body, not FAVOR's: FAVOR is read once per process, and this
+ * moves with rep.
  */
-const FAVOR_GAIN = `return ns.singularity.getFactionFavorGain(args[0]);`;
+const FAVOR_GAIN = `
+const gain = {};
+for (const f of args) gain[f] = ns.singularity.getFactionFavorGain(f);
+return gain;
+`;
 
 /**
  * The node's FactionWorkRepGain, which prices a donation (donation.ts). Fixed
@@ -505,7 +510,8 @@ function describe(ns, a, r) {
   const tier = a.tier ? `, tier ${a.tier}` : "";
   if (a.kind === "faction") {
     return `faction ${a.faction} (${a.type}${tier}), rep ${n2(ns, r.rep[a.faction] ?? 0)} of ${n2(ns, a.target)}` +
-      (canDonate(a.faction, r) ? " - donatable, worked only for want of anything else" : "");
+      (canDonate(a.faction, r) ? " - donatable, worked only for want of anything else" : "") +
+      (bankedFavor(a.faction, r) ? " - an install banks donate favor, worked only for want of anything else" : "");
   }
   if (a.kind === "company") {
     return `company ${a.company} (${a.field}${tier}), company rep ${n2(ns, r.companyRep?.[a.company] ?? 0)}`;
@@ -594,6 +600,8 @@ export async function main(ns) {
   // Favor moves only at an install, which kills this process - read once.
   const favor = {};
   let favorNeed = 0;
+  // What an install would ADD - moves with rep, so re-read every aug pass.
+  let favorGain = {};
   let bnRepMult = null;
   let crimeStats = null;
   // Backdoors vanish at an install, which kills this process - so once none is
@@ -642,13 +650,11 @@ export async function main(ns) {
    * Red Pill's rep is bought with money instead of worked for. Asked only while
    * it can matter: joined, below the bar, and the Red Pill not yet bought.
    */
-  const crossesFavorBar = async (r, owned) => {
+  const crossesFavorBar = (r, owned) => {
     const f = RED_PILL_FACTION;
     if (!r.player.factions.includes(f) || owned.all.includes(RED_PILL)) return false;
-    if (!favorNeed || !(f in favor) || favor[f] >= favorNeed) return false;
-    const gain = await call("favor gain", FAVOR_GAIN, f);
-    if (gain === null || favor[f] + gain < favorNeed) return false;
-    log(`augs: installing now carries ${f} to ${n2(ns, favor[f] + gain)} favor (donates at ` +
+    if (!bankedFavor(f, { favor, favorNeed, favorGain })) return false;
+    log(`augs: installing now carries ${f} to ${n2(ns, favor[f] + favorGain[f])} favor (donates at ` +
       `${n2(ns, favorNeed)}) - buying what fits and installing, for the ${RED_PILL}`);
     return true;
   };
@@ -712,9 +718,22 @@ export async function main(ns) {
         favorNeed = v.need;
       }
     }
+    const short = r.player.factions.filter((f) => f in favor && favor[f] < favorNeed);
+    favorGain = short.length ? (await call("favor gain", FAVOR_GAIN, ...short)) ?? {} : {};
     const cash = r.player.money;
     const donate = await donateTerms(r);
-    const force = await crossesFavorBar(r, owned);
+    // Nothing left worth working, and an install would open some faction's rep
+    // to money: install now rather than grind rep a donation will buy. Not while
+    // a travel stop is still to collect - that invite is work to come.
+    const st = { ...r, targets, priorityTargets, favor, favorNeed, favorGain };
+    const banked = chooseTravel(r.player, { group: cities(), targets, grindKarma: r.grindKarma })
+      ? [] : installForFavor(r.player, st);
+    if (banked.length) {
+      log(`augs: nothing left worth working - installing now banks donate favor at ` +
+        `${banked.map((f) => `${f} (${n2(ns, favor[f])} -> ${n2(ns, favor[f] + favorGain[f])})`).join(", ")}` +
+        ` - buying what fits`);
+    }
+    const force = crossesFavorBar(r, owned) || banked.length > 0;
     const plan = planAugBuys({
       augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash, donate, priority, force,
       minBatch,
@@ -875,7 +894,7 @@ export async function main(ns) {
     const flew = city ? await call("travel", TRAVEL, city) : false;
     if (city) log(`travel: ${flew ? "flew" : "could not fly"} to ${city}`);
     if (r && !flew) {
-      const st = { ...r, targets, priorityTargets, favor, favorNeed };
+      const st = { ...r, targets, priorityTargets, favor, favorNeed, favorGain };
       let action = chooseAction(r.player, st);
       // Nothing to work - the first stretch after an install, before any
       // invite. Money beats idling: it is what TOR, the programs, the Tian Di

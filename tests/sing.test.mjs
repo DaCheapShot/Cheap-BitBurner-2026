@@ -271,6 +271,37 @@ export const tests = {
     assert(alone.faction === "Bachman & Associates", `nothing else: work it rather than idle, got ${JSON.stringify(alone)}`);
   },
 
+  "bankedFavor: an install now would carry the faction to the donate bar": async () => {
+    const { bankedFavor } = (await loadScripts())["sing/plan"];
+    const st = { favor: { A: 100, B: 100, C: 150 }, favorNeed: 150, favorGain: { A: 50, B: 49, C: 10, D: 500 } };
+    assert(bankedFavor("A", st), "100 + 50 reaches 150");
+    assert(!bankedFavor("B", st), "100 + 49 is short");
+    assert(!bankedFavor("C", st), "already at the bar is canDonate's");
+    assert(!bankedFavor("D", st), "favor unread is not a yes");
+  },
+
+  // The live case, the second time: Bachman worked toward 375k when its rep
+  // already carried it to 150 favor at the next install.
+  "a faction an install would bank is skipped, and alone it installs": async () => {
+    const { chooseAction, installForFavor } = (await loadScripts())["sing/plan"];
+    const p = player({ factions: ["Bachman & Associates", "CyberSec"] });
+    const st = state({
+      workTypes: { "Bachman & Associates": ["hacking"], CyberSec: ["hacking"] },
+      targets: { "Bachman & Associates": 375e3, CyberSec: 10e3 },
+      favor: { "Bachman & Associates": 20, CyberSec: 0 }, favorNeed: 150,
+      favorGain: { "Bachman & Associates": 140, CyberSec: 1 },
+    });
+    assert(chooseAction(p, st).faction === "CyberSec", "work moves on past the banked faction");
+    assert(installForFavor(p, st).length === 0, "CyberSec still has work - no install");
+    const alone = { ...st, targets: { ...st.targets, CyberSec: 0 } };
+    const a = chooseAction(p, alone);
+    assert(a.faction === "Bachman & Associates" && a.fallback, `alone: worked as a fallback, got ${JSON.stringify(a)}`);
+    const banked = installForFavor(p, alone);
+    assert(banked.length === 1 && banked[0] === "Bachman & Associates", `install for Bachman, got ${banked}`);
+    const none = { ...alone, favorGain: {} };
+    assert(installForFavor(p, none).length === 0, "nothing banked - no install, it is just work");
+  },
+
   // The user's rule: rep is bought only as part of a batch that is bought. The
   // donation is priced beside the aug it unlocks, and it counts against cash.
   "the batch buys rep by donation, and only as part of the batch": async () => {

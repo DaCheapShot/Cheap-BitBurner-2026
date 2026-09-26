@@ -408,7 +408,7 @@ export const tests = {
       OWNED: 6.60, FAC_AUGS: 6.60, PREREQ: 6.60, AUG_INFO: 6.60, BUY: 6.60,
       // Favor split from READ (full); DONATE is donateToFaction alone.
       FAVOR: 2.70, DONATE: 6.60, BN_MULTS: 5.60,
-      // getFactionFavorGain alone, for the Red Pill faction's favor-bar install.
+      // getFactionFavorGain alone, per joined faction short of the donate bar.
       FAVOR_GAIN: 2.35,
       // The install: the sweep (run + isRunning) is split off installAugmentations,
       // which is 5.00 alone - together 7.70.
