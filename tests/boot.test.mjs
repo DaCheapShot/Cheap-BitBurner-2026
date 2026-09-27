@@ -8,7 +8,7 @@ import { loadScripts, assert } from "./harness.mjs";
 // fails a test.
 const TRANSIENT = [
   "scripts/root.js", "scripts/deploy.js", "scripts/contracts/contracts.js",
-  "scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js",
+  "scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js", "scripts/sleeve/sleeve.js",
 ];
 
 /**
@@ -27,7 +27,11 @@ const TRANSIENT = [
 async function runBoot({
   args = [], files = {}, running = [], workers = [], ticks = 3, hasFormulas = false,
   inGang = false, onTprint = () => {}, onTick = (_tick, procs) => procs, onSleep = () => {},
+  sleeves = true,
 }) {
+  const ports = {};
+  const runs = [];
+  let rpcCalls = 0;
   const { main } = (await loadScripts())["boot"];
   let procs = running.map((f, i) => ({ filename: f, host: "home", pid: i + 1, args: [], threads: 1 }));
   let nextPid = procs.length + 1;
@@ -60,9 +64,22 @@ async function runBoot({
     scan: (h) => (h === "home" ? network.filter((x) => x !== "home") : []),
     ps: (host = "home") => procs.filter((p) => p.host === host).map((p) => ({ ...p })),
     kill: (pid) => { killed.push(procs.find((p) => p.pid === pid)?.filename); procs = procs.filter((p) => p.pid !== pid); return true; },
+    // Enough of a port for boot's one rpc call (HAS_SLEEVES): the transient's
+    // reply is queued the moment it is "run", as if it answered instantly.
+    getPortHandle: (n) => {
+      const q = (ports[n] ??= []);
+      return { clear: () => q.splice(0), nextWrite: async () => {}, empty: () => !q.length, read: () => q.shift() };
+    },
+    asleep: () => new Promise((r) => setTimeout(r, 1)),
     run: (file, threads, ...a) => {
       const stored = file.replace(/^\/+/, "");
+      if (stored.startsWith("tmp/rpc-")) {
+        rpcCalls++;
+        (ports[a[0]] ??= []).push(JSON.stringify({ v: sleeves }));
+        return nextPid++;
+      }
       launched.push(stored);
+      runs.push({ file: stored, args: a });
       procs.push({ filename: stored, host: "home", pid: nextPid, life: 2, args: a, threads: 1 });
       return nextPid++;
     },
@@ -76,7 +93,7 @@ async function runBoot({
   };
 
   try { await main(ns); } catch (e) { if (e.message !== "STOP") throw e; }
-  return { launched, killed, procs, store, logs };
+  return { launched, killed, procs, store, logs, rpcCalls, runs };
 }
 
 /** A killed manager's batches, still running out on the network. */
@@ -388,6 +405,69 @@ export const tests = {
     assert(runs >= 3, `expected a run per tick, got ${runs}: ${r.launched}`);
     assert(!r.procs.some((p) => p.filename === "scripts/contracts/contracts.js"),
       "it must not still be resident - that is the RAM this change exists to give back");
+  },
+
+  // The sleeve pass is the same shape: one pass per tick, nothing resident.
+  "boot runs the sleeve pass every tick, and holds nothing between": async () => {
+    const r = await runBoot({ ticks: 4 });
+    const runs = r.launched.filter((f) => f === "scripts/sleeve/sleeve.js").length;
+    assert(runs >= 3, `expected a run per tick, got ${runs}: ${r.launched}`);
+    assert(!r.procs.some((p) => p.filename === "scripts/sleeve/sleeve.js"), "it must not stay resident");
+  },
+
+  // Source-Files change only when a BitNode ends, which restarts boot - so the
+  // SF10 question is asked once, and a no means the pass never runs at all.
+  "no SF10: the sleeve pass never runs, and boot asks only once": async () => {
+    const r = await runBoot({ sleeves: false, ticks: 4, files: { "/data/share-sleeves.txt": "faction" } });
+    assert(!r.launched.includes("scripts/sleeve/sleeve.js"), `ran without SF10: ${r.launched}`);
+    assert(r.rpcCalls === 1, `asked ${r.rpcCalls} times`);
+    assert(r.store["/data/share-sleeves.txt"] === "", "a stale share release must be cleared");
+    const yes = await runBoot({ ticks: 4 });
+    assert(yes.rpcCalls === 1, `with SF10, still asked ${yes.rpcCalls} times`);
+  },
+
+  // The pass's own log dies with it, so boot's carries its status - once per
+  // change, not once per tick: shock and sync move every pass and are ignored.
+  "boot logs the sleeve status when it changes, not every tick": async () => {
+    const line = (shock, what) => `sleeve 0: ${what} (shock ${shock}, sync 100.0) - why`;
+    const r = await runBoot({
+      ticks: 4, files: { "/data/sleeves.txt": line("50.0", "crime Mug") },
+      onTick: (tick, procs, store) => {
+        store["/data/sleeves.txt"] = tick < 3 ? line(`${50 - tick}.0`, "crime Mug") : line("40.0", "shock recovery");
+        return procs;
+      },
+    });
+    const logged = r.logs.filter((l) => l.includes("sleeves: sleeve 0"));
+    assert(logged.filter((l) => l.includes("crime Mug")).length === 1, `logged every tick: ${logged}`);
+    assert(logged.some((l) => l.includes("shock recovery")), `a change was not logged: ${logged}`);
+  },
+
+  // Karma buys nothing but a gang, so --no-gang reaches the sleeve pass.
+  "--no-gang is passed through to the sleeve pass": async () => {
+    const argsOf = (r) => r.runs.filter((x) => x.file === "scripts/sleeve/sleeve.js").map((x) => x.args);
+    const off = argsOf(await runBoot({ args: ["--no-gang"], ticks: 2 }));
+    assert(off.length && off.every((a) => a.includes("--no-gang")), `--no-gang not passed: ${JSON.stringify(off)}`);
+    const on = argsOf(await runBoot({ ticks: 2 }));
+    assert(on.length && on.every((a) => !a.includes("--no-gang")), `passed without being asked: ${JSON.stringify(on)}`);
+  },
+
+  // Off either way, nothing will rewrite the sleeves' half of the share hold, so
+  // a stale "faction" would keep releasing sing's hold for no sleeve at all.
+  "--no-sleeve and sleeve.enabled off skip the pass and clear its share release": async () => {
+    for (const opts of [{ args: ["--no-sleeve"] }, { files: { "/data/settings.txt": '{"sleeve.enabled":0}' } }]) {
+      const r = await runBoot({ ...opts, ticks: 2, files: { ...opts.files, "/data/share-sleeves.txt": "faction" } });
+      assert(!r.launched.includes("scripts/sleeve/sleeve.js"), `${JSON.stringify(opts)}: launched ${r.launched}`);
+      assert(r.store["/data/share-sleeves.txt"] === "", `${JSON.stringify(opts)}: the release must be cleared`);
+    }
+  },
+
+  // Sing publishes the sleeves' rep work. Without sing nothing refreshes it, and
+  // sleeves would work a list frozen at whatever sing last wanted.
+  "--no-sing and sing.enabled off clear the sleeves' rep list": async () => {
+    for (const opts of [{ args: ["--no-sing"] }, { files: { "/data/settings.txt": '{"sing.enabled":0}' } }]) {
+      const r = await runBoot({ ...opts, ticks: 1, files: { ...opts.files, "/data/rep-want.txt": '{"factions":[]}' } });
+      assert(r.store["/data/rep-want.txt"] === "", `${JSON.stringify(opts)}: rep list left behind`);
+    }
   },
 
   "--no-contracts leaves the contract solver alone": async () => {

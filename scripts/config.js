@@ -119,17 +119,38 @@ export const SHARE_HOLD_MARKER = "/data/share-hold.txt";
 export const STUDY_MARKER = "/data/studying.txt";
 
 /**
+ * sing/sing.js publishes the rep work it wants done beyond the player's own
+ * job: JSON `{ factions: [{faction, types}], companies: [company] }`, tier 1
+ * first, the same walk and exclusions chooseAction uses (sing/plan.js
+ * repWant). sleeve/sleeve.js reads it and puts one sleeve on each entry.
+ * Missing, empty or unparseable means NO rep work - never a default, so a
+ * stopped sing sends sleeves to karma or money rather than to stale factions.
+ */
+export const REP_WANT_MARKER = "/data/rep-want.txt";
+
+/**
+ * "faction" while any sleeve does faction work, "" otherwise. Written by
+ * sleeve/sleeve.js. The share bonus multiplies SLEEVE faction rep too - the
+ * sleeve's rate is calculateFactionRep, the same three formulas - so sing's
+ * hold, which only knows what the player is doing, must not starve them.
+ */
+export const SLEEVE_FACTION_MARKER = "/data/share-sleeves.txt";
+
+/**
  * The share fraction actually in force: SHARE_MARKER's, unless sing holds it.
  * The manager and sharemode.js both read share through this, so they cannot
  * disagree about a hold. Pure, like everything in this file.
  */
-export function effectiveShareFraction(markerText, holdText) {
-  return shareHeld(holdText) ? 0 : shareFractionFrom(markerText);
+export function effectiveShareFraction(markerText, holdText, sleevesText = "") {
+  return shareHeld(holdText, sleevesText) ? 0 : shareFractionFrom(markerText);
 }
 
-/** Is SHARE_HOLD_MARKER's content a hold? The one parser, for the logs that say why share is off. */
-export function shareHeld(holdText) {
-  return String(holdText ?? "").trim() === "hold";
+/**
+ * Is share held? Sing's hold, unless a sleeve is doing faction work - the bonus
+ * pays there too. The one parser, for the logs that say why share is off.
+ */
+export function shareHeld(holdText, sleevesText = "") {
+  return String(holdText ?? "").trim() === "hold" && String(sleevesText ?? "").trim() !== "faction";
 }
 
 export function shareFractionFrom(text) {

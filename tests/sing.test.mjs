@@ -1178,12 +1178,15 @@ export const tests = {
     assert(faction.ns._files[SHARE_HOLD_MARKER] === "", "faction work must release it");
   },
 
-  // The manager's one share reader must honour the hold.
+  // The manager's one share reader must honour the hold - and the sleeves'
+  // release of it, since the bonus multiplies their faction rep too.
   "the manager reads share through the hold": () => {
     for (const f of ["continuous/lib/share"]) {
       const src = readScript(f).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-      assert(/effectiveShareFraction\(ns\.read\(SHARE_MARKER\),\s*holdText\)/.test(src),
-        `${f}.js must read share through effectiveShareFraction`);
+      assert(/effectiveShareFraction\(ns\.read\(SHARE_MARKER\),\s*holdText,\s*sleevesText\)/.test(src),
+        `${f}.js must read share through effectiveShareFraction, sleeves included`);
+      assert(/sleevesText\s*=\s*ns\.read\(SLEEVE_FACTION_MARKER\)/.test(src),
+        `${f}.js must read the sleeves' marker`);
       assert(!/shareFractionFrom\(ns\.read\(SHARE_MARKER\)\)/.test(src), `${f}.js reads the marker around the hold`);
     }
   },
@@ -1194,6 +1197,9 @@ export const tests = {
     assert(effectiveShareFraction("0.25", "") === 0.25, "an empty hold file is no hold");
     assert(effectiveShareFraction("0.25", undefined) === 0.25, "a missing hold file is no hold");
     assert(effectiveShareFraction("off", "") === 0, "the marker still decides when not held");
+    assert(effectiveShareFraction("0.25", "hold", "faction") === 0.25, "a sleeve on faction work releases the hold");
+    assert(effectiveShareFraction("0.25", "hold", "") === 0, "no sleeve on faction work: still held");
+    assert(effectiveShareFraction("off", "", "faction") === 0, "sleeves release a hold, they never turn share on");
   },
 
   // ------------------------------------------------------------ backdoor ----
