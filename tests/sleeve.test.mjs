@@ -29,7 +29,7 @@ const HACK = ["hacking", "field", "security"];
  * Sleeve.ts): no access without SF10, a faction or company another sleeve is
  * CURRENTLY working, the gang's faction, and an unjoined faction.
  */
-function sleeveApi(list, { access = true, joined = [], gangFaction = null } = {}) {
+function sleeveApi(list, { access = true, joined = [], gangFaction = null, node = 10, free = 1 } = {}) {
   const guard = () => { if (!access) throw NO_ACCESS; };
   const other = (i, pred) => list.some((s, j) => j !== i && s.task && pred(s.task));
   const calls = [];
@@ -62,6 +62,24 @@ function sleeveApi(list, { access = true, joined = [], gangFaction = null } = {}
         calls.push([i, { buy: name }]);
         return true;
       },
+      // SleeveCovenantPurchases.tsx: BN10, Covenant members, five at most.
+      purchaseSleeve: () => {
+        guard();
+        if (node !== 10) throw "purchaseSleeve: You must be in BitNode 10 to use this API.";
+        if (!joined.includes("The Covenant")) return { success: false, message: "not a member" };
+        if (list.length - free >= 5) return { success: false, message: "maximum" };
+        calls.push([list.length, { sleeve: true }]);
+        list.push(sleeve({ shock: 100, sync: 1 }));
+        return { success: true };
+      },
+      upgradeMemory: (i, n) => {
+        guard();
+        const m = list[i].memory ?? 1;
+        if (m + n > 100) return { success: false, message: "max 100" };
+        list[i].memory = m + n;
+        calls.push([i, { memory: n }]);
+        return { success: true };
+      },
       setToFactionWork: (i, factionName, factionWorkType) => {
         guard();
         if (!joined.includes(factionName)) throw `Cannot work for faction ${factionName} without being a member.`;
@@ -84,9 +102,10 @@ function sleeveApi(list, { access = true, joined = [], gangFaction = null } = {}
 
 /** One sleeve.js pass. `store` carries /data files between passes, as boot's ticks do. */
 async function pass(mods, list, {
-  store = {}, want = null, karma = 0, args = [], money = 0, augStats = null, canGang = false, inGang = false, access = true, joined = [], gangFaction = null,
+  store = {}, want = null, karma = 0, args = [], money = 0, augStats = null, node = null, sf10 = 0, canGang = false, inGang = false, access = true, joined = [], gangFaction = null,
 } = {}) {
-  const { api, calls } = sleeveApi(list, { access, joined, gangFaction });
+  const bn = node ?? (canGang ? 2 : 10);
+  const { api, calls } = sleeveApi(list, { access, joined, gangFaction, node: bn, free: Math.min(3, sf10 + (bn === 10 ? 1 : 0)) });
   const { REP_WANT_MARKER } = mods["sleeve/config"];
   if (want) store[REP_WANT_MARKER] = JSON.stringify(want);
   const ns = makeNs({
@@ -95,13 +114,13 @@ async function pass(mods, list, {
     extra: {
       sleeve: api,
       gang: { inGang: () => inGang },
-      getPlayer: () => ({ karma, skills: skills(1), money }),
+      getPlayer: () => ({ karma, skills: skills(1), money, factions: joined }),
       // Without augStats, getAugmentationStats throws as it does without SF4.
       singularity: { getAugmentationStats: (a) => {
         if (!augStats) throw "getAugmentationStats: This singularity function requires Source-File 4 to run.";
         return augStats[a] ?? {};
       } },
-      getResetInfo: () => ({ currentNode: canGang ? 2 : 10, ownedSF: new Map() }),
+      getResetInfo: () => ({ currentNode: bn, ownedSF: new Map(sf10 ? [[10, sf10]] : []) }),
     },
   });
   await mods["sleeve/sleeve"].main(ns);
@@ -366,6 +385,98 @@ export const tests = {
     const list = [sleeve({ shock: 0, shop: [{ name: "A", cost: 1 }] })];
     await pass(mods, list, { money: 1e12, store: { [SETTINGS_FILE]: JSON.stringify({ "sleeve.augCash": 0 }) } });
     assert(!list[0].owned, "bought with a zero budget");
+  },
+
+  // --------------------------------------------------------------- history --
+
+  // sleeves.txt is rewritten every pass, so what happened between two looks
+  // was lost. The history keeps it: events only, timestamped, capped.
+  "the history keeps what happened across passes, and only what happened": async () => {
+    const mods = await loadScripts();
+    const { HISTORY_FILE, HISTORY_KEEP } = mods["sleeve/config"];
+    const list = [sleeve()];
+    const one = await pass(mods, list, {});
+    const h1 = one.store[HISTORY_FILE].trim().split("\n");
+    assert(h1.length === 1 && h1[0].includes("sleeve 0: crime Mug") && h1[0].includes("[was idle]"),
+      `the change is logged: ${h1}`);
+    const two = await pass(mods, list, { store: one.store });
+    assert(two.store[HISTORY_FILE].trim().split("\n").length === 1, "a quiet pass adds nothing");
+    // A body that fails every pass is logged once, not once a minute.
+    const broken = { ...two.store };
+    await pass(mods, [], { access: false, store: broken });
+    await pass(mods, [], { access: false, store: broken });
+    const warns = broken[HISTORY_FILE].split("\n").filter((l) => l.includes("WARN"));
+    assert(warns.length === 1, `a repeating warning logged ${warns.length} times`);
+    // Capped, oldest dropped.
+    const full = { [HISTORY_FILE]: Array.from({ length: HISTORY_KEEP }, (_, i) => `old ${i}`).join("\n") };
+    await pass(mods, [sleeve()], { store: full });
+    const h = full[HISTORY_FILE].trim().split("\n");
+    assert(h.length === HISTORY_KEEP && h[0] === "old 1" && h.at(-1).includes("sleeve 0"), `cap: ${h.length}, first ${h[0]}`);
+  },
+
+  // --------------------------------------------------------- the covenant --
+
+  // Transcribed a second time, flat, from SleeveCovenantPurchases.tsx and
+  // Sleeve.getMemoryUpgradeCost.
+  "Covenant prices and the bought count are the game's": async () => {
+    const { covenantSleevePrice, memoryPointPrice, covenantBought } = (await loadScripts())["sleeve/plan"];
+    assert([0, 1, 2, 3, 4].map(covenantSleevePrice).join() === [10e12, 100e12, 1e15, 10e15, 100e15].join(), "10^k x $10t");
+    assert(covenantSleevePrice(5) === Infinity, "five at most");
+    assertClose(memoryPointPrice(1), 1e12, 1e-3, "first point $1t");
+    assertClose(memoryPointPrice(11), 1e12 * 1.02 ** 10, 1e-3, "1.02x a point");
+    assert(memoryPointPrice(100) === Infinity, "memory caps at 100");
+    assert(covenantBought(1, 0, 10) === 0, "BN10's free sleeve is not a purchase");
+    assert(covenantBought(5, 2, 10) === 2, "SF10.2 in BN10: 3 free");
+    assert(covenantBought(4, 5, 10) === 1, "free sleeves cap at 3");
+  },
+
+  "planCovenant: a sleeve when affordable, memory only from the surplus above the next one": async () => {
+    const { planCovenant } = (await loadScripts())["sleeve/plan"];
+    const two = [{ memory: 1 }, { memory: 3 }];
+    const base = { sleeves: two, sf10: 1, node: 10, factions: ["The Covenant"], frac: 0.5 };
+    assert(planCovenant({ ...base, node: 9, cash: 1e20 }) === null, "BN10 only");
+    assert(planCovenant({ ...base, factions: [], cash: 1e20 }) === null, "Covenant members only");
+    // $30t: the $10t sleeve fits half; the next one costs $100t, so nothing is surplus.
+    const a = planCovenant({ ...base, cash: 30e12 });
+    assert(a.sleeve === 10e12 && a.memory.length === 0, `sleeve, no memory: ${JSON.stringify(a)}`);
+    // $11t: no sleeve (it needs $20t at 50%), $10t of it reserved for that
+    // sleeve: $1t surplus, $0.5t to spend - under one $1t point. Saving.
+    const b = planCovenant({ ...base, cash: 11e12 });
+    assert(b.sleeve === null && b.memory.length === 0 && b.surplus === 1e12, `saving: ${JSON.stringify(b)}`);
+    // $15t: $5t surplus, $2.5t to spend - two points ($1t, $1.02t), both to
+    // the lower sleeve, since after one it is still the lower.
+    const d = planCovenant({ ...base, cash: 15e12 });
+    assert(d.memory.length === 1 && d.memory[0].i === 0 && d.memory[0].amount === 2,
+      `2 points to the lower sleeve: ${JSON.stringify(d.memory)}`);
+    // All five bought: no reserve, memory takes its share of everything.
+    const all = planCovenant({ ...base, sleeves: Array.from({ length: 7 }, () => ({ memory: 100 })), cash: 1e18 });
+    assert(all.sleeve === null && all.memory.length === 0 && !Number.isFinite(all.next), "maxed out: nothing to do");
+  },
+
+  "a pass buys the next Covenant sleeve and memory, and says what it waits for": async () => {
+    const mods = await loadScripts();
+    const { STATUS_FILE } = mods["sleeve/config"];
+    const list = [sleeve({ memory: 1 })];
+    const r = await pass(mods, list, { node: 10, joined: ["The Covenant"], money: 100e12 });
+    assert(list.length === 2, `no sleeve bought: ${r.store[STATUS_FILE]}`);
+    assert(r.store[STATUS_FILE].includes("covenant: bought sleeve 1 for $10.00t"), r.store[STATUS_FILE]);
+    // $100t - $10t - the $100t reserve: no surplus, memory waits.
+    assert(r.store[STATUS_FILE].includes("saving for the next sleeve"), r.store[STATUS_FILE]);
+    const rich = [sleeve({ memory: 1 })];
+    const r2 = await pass(mods, rich, { node: 10, joined: ["The Covenant"], money: 1e15 });
+    assert(rich[0].memory > 1, `no memory bought with surplus: ${r2.store[STATUS_FILE]}`);
+    assert(r2.store[STATUS_FILE].includes("memory: sleeve 0 +"), r2.store[STATUS_FILE]);
+    const none = [sleeve()];
+    const r3 = await pass(mods, none, { node: 10, joined: [], money: 1e18 });
+    assert(none.length === 1 && !r3.store[STATUS_FILE].includes("covenant"), "no Covenant: silent, no buy");
+  },
+
+  "a pass reports sleeve aug spending in dollars": async () => {
+    const mods = await loadScripts();
+    const { STATUS_FILE } = mods["sleeve/config"];
+    const shop = [{ name: "A", cost: 1e6 }, { name: "B", cost: 1e6 }, { name: "C", cost: 1e6 }];
+    const r = await pass(mods, [sleeve({ shock: 0, shop })], { money: 1e8, augStats: {} });
+    assert(r.store[STATUS_FILE].includes("($3.00m, exp wiped)"), `money needs its $: ${r.store[STATUS_FILE]}`);
   },
 
   // ----------------------------------------------------------- sing's side --

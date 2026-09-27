@@ -1,6 +1,7 @@
 import {
   SHOCK_RECOVER_ABOVE, MAX_SKILL_LEVEL, INT_CRIME_WEIGHT, SYNC_PER_SECOND, CRIMES,
   GANG_KARMA_TARGET, MONEY_CRIMES, GYM, GYM_CITY, GYM_EXP_PER_SECOND, GYM_STATS, JOB_MULTS,
+  COVENANT, COVENANT_MAX_SLEEVES, COVENANT_SLEEVE_BASE, MEMORY_BASE_COST, MEMORY_MULT, MEMORY_MAX,
 } from "./config.js";
 
 /**
@@ -413,4 +414,63 @@ export function planAugs({ sleeves, actions, avail, stats = {}, budget, minBatch
     }
   }
   return { buys, waits };
+}
+
+/** getSleeveCost: the k-th Covenant sleeve (0-based), Infinity past the fifth. */
+export function covenantSleevePrice(bought) {
+  return bought >= 0 && bought < COVENANT_MAX_SLEEVES ? 10 ** bought * COVENANT_SLEEVE_BASE : Infinity;
+}
+
+/** Sleeve.getMemoryUpgradeCost for ONE point at memory `memory`; Infinity at the cap. */
+export function memoryPointPrice(memory) {
+  return memory < MEMORY_MAX ? MEMORY_BASE_COST * MEMORY_MULT ** (memory - 1) : Infinity;
+}
+
+/**
+ * Sleeves bought from the Covenant so far. recalculateNumberOfOwnedSleeves:
+ * min(3, SF10 level + 1 in BN10) come free, the rest were bought.
+ */
+export function covenantBought(count, sf10, node) {
+  return Math.max(0, count - Math.min(3, (sf10 ?? 0) + (node === 10 ? 1 : 0)));
+}
+
+/**
+ * This pass's Covenant purchases, or null outside BN10 or without the faction.
+ *
+ * The next sleeve first, when its price is at most `frac` of cash - one a pass,
+ * since each costs 10x the last. Then memory, one point at a time to the
+ * lowest-memory sleeve, spending at most `frac` of the SURPLUS: cash minus the
+ * next sleeve still to buy. Without that reserve, $1t points would eat the
+ * savings for a $100t sleeve forever. With all five bought there is no reserve.
+ *
+ * @returns {{ sleeve: number|null, next: number, memory: {i, amount, cost}[],
+ *             nextPoint: number, surplus: number } | null}
+ */
+export function planCovenant({ sleeves, sf10, node, factions = [], cash, frac }) {
+  if (node !== 10 || !factions.includes(COVENANT)) return null;
+  const bought = covenantBought(sleeves.length, sf10, node);
+  const price = covenantSleevePrice(bought);
+  const sleeve = price <= frac * cash ? price : null;
+  const reserve = covenantSleevePrice(bought + (sleeve ? 1 : 0));
+  const surplus = Math.max(0, cash - (sleeve ?? 0) - (Number.isFinite(reserve) ? reserve : 0));
+  let left = frac * surplus;
+  const mem = sleeves.map((s) => s.memory ?? 1);
+  const add = new Map();
+  for (;;) {
+    let i = 0;
+    for (let j = 1; j < mem.length; j++) if (mem[j] < mem[i]) i = j;
+    const cost = memoryPointPrice(mem[i]);
+    if (!mem.length || cost > left) break;
+    left -= cost;
+    mem[i]++;
+    const a = add.get(i) ?? { i, amount: 0, cost: 0 };
+    a.amount++;
+    a.cost += cost;
+    add.set(i, a);
+  }
+  const low = mem.length ? Math.min(...mem) : MEMORY_MAX;
+  return {
+    sleeve, next: price, memory: [...add.values()],
+    nextPoint: memoryPointPrice(low), surplus,
+  };
 }

@@ -20,6 +20,14 @@ export const SLEEVE_SERVICE = "/scripts/sleeve/sleeve.js";
 export const STATUS_FILE = "/data/sleeves.txt";
 
 /**
+ * What HAPPENED, since STATUS_FILE only holds the latest pass: task changes,
+ * purchases, refusals and warnings, timestamped, oldest first, the last
+ * HISTORY_KEEP lines kept. `cat /data/sleeves.log.txt`.
+ */
+export const HISTORY_FILE = "/data/sleeves.log.txt";
+export const HISTORY_KEEP = 500;
+
+/**
  * The two contracts crossing into scripts/: what sing wants worked, and the
  * sleeve half of the share hold. Re-exports spelled the way RamCalculations.ts
  * resolves them - see CLAUDE.md on re-exports.
@@ -85,6 +93,28 @@ export const JOB_MULTS = {
   rep: ["faction_rep", "company_rep", "hacking", "hacking_exp", "charisma", "charisma_exp"],
   money: ["crime_money", "crime_success", "dexterity", "agility"],
 };
+
+// --------------------------------------------------------------- covenant ---
+
+/**
+ * The Covenant sells sleeves and sleeve memory - BitNode 10 only, members only
+ * (SleeveCovenantPurchases.tsx canPurchaseSleeve / canPurchaseMemoryUpgrade).
+ * Both are PERMANENT across every later BitNode, which is why the live
+ * `sleeve.covenantCash` defaults to half the cash, against 0.10 for augs.
+ *
+ * Every price is a formula, transcribed rather than read (4.00 GB each):
+ *   sleeve k (0-based, k < 5):  10^k x $10t          getSleeveCost
+ *   memory point at memory m:   $1t x 1.02^(m - 1)   Sleeve.getMemoryUpgradeCost
+ * Memory is the sync a sleeve starts the next BitNode at - worth less than a
+ * sleeve, so it only ever spends the surplus above the next sleeve's price.
+ */
+export const SLEEVE_COVENANT_CASH = 0.5;
+export const COVENANT = "The Covenant";
+export const COVENANT_MAX_SLEEVES = 5;
+export const COVENANT_SLEEVE_BASE = 10e12;
+export const MEMORY_BASE_COST = 1e12;
+export const MEMORY_MULT = 1.02;
+export const MEMORY_MAX = 100;
 
 /**
  * Where karma sleeves train, and how fast. Powerhouse Gym: expMult 10

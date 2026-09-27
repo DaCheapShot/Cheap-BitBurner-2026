@@ -83,8 +83,10 @@ run scripts/contracts/contracts.js --forget  # clear the skip list, after fixing
 run scripts/hacknet/hacknet.js --dry-run     # plan a hacknet buy and print it, buy nothing
 run scripts/hacknet/hashes.js --dry-run      # plan a hash spend and print it, spend nothing
 run scripts/sleeve/sleeve.js            # one sleeve assignment pass (boot runs it every tick)
-cat /data/sleeves.txt                   # what each sleeve is doing, and why
+cat /data/sleeves.txt                   # what each sleeve is doing now, and why
+cat /data/sleeves.log.txt               # what happened: task changes, purchases, warnings (last 500)
 run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
+run scripts/set.js sleeve.covenantCash 0.5  # BN10: fraction of cash a Covenant sleeve/memory buy may cost
 run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
 run scripts/expwatch.js 60              # hacking exp/s per 60 s window, in a tail
 run scripts/set.js                      # list live settings (budgets) and their defaults
@@ -343,7 +345,7 @@ editor's RAM panel when one moves.
 | `sleeve/config.js` | sleeve tunables, the crime table, `SHOCK_RECOVER_ABOVE` | 0 |
 | `sleeve/plan.js` | `assign` + the crime, sync and work-type math - pure | 0 |
 | `sleeve/sleeve.js` | entry: ONE assignment pass then exits; boot runs it every tick | 2.60 |
-| ↳ twelve bodies | transients: count, read, tasks, recover, sync, crime, gym, faction, company, avail, buy, stats | 5.60–6.60 |
+| ↳ fourteen bodies | transients: count, read, tasks, recover, sync, crime, gym, faction, company, avail, buy, stats, buy sleeve, memory | 5.60–6.60 |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
@@ -1115,8 +1117,8 @@ touches `w0r1d_d43m0n` - destroying the node stays the user's call.
 ### The sleeve subsystem (`scripts/sleeve/`)
 
 Sleeves (BitNode 10 / Source-File 10) doing four jobs, in the user's order: **gang karma > faction
-rep > company rep > money**, then buying their augs. BN10's Covenant `purchaseSleeve` /
-`upgradeMemory` is a later phase. Self-contained like `gang/`: it imports
+rep > company rep > money**, then buying their augs, then - in BN10 - more sleeves and memory
+from The Covenant. Self-contained like `gang/`: it imports
 `scripts/rpc.js`, `scripts/settings.js` and 0 GB constants, and boot reads one path out of it.
 
 **A transient, the contracts shape.** Sleeve work runs on its own - a crime loops, faction work
@@ -1128,7 +1130,10 @@ overwrites `/data/sleeves.txt` with a line per sleeve, a changed task marked `[w
 **prints nothing to the terminal** - the user's rule, pinned by a test. The same lines go to its
 own log (kept under Recently killed), and boot copies them into ITS log whenever an assignment
 changes - the shock/sync figures are ignored for that comparison, or it would be every tick. The
-first live run showed "zero output": a status file nobody is told about is not a log.
+first live run showed "zero output": a status file nobody is told about is not a log. And a
+snapshot is not a history - the next live report was that `sleeves.txt` "rotates every tick", so
+anything between two looks was gone. Events (a task change, a purchase, a refusal, a warning the
+first pass it appears) are also appended, timestamped, to `/data/sleeves.log.txt`, last 500 kept.
 
 **boot asks for SF10 once.** Its one rpc body, `HAS_SLEEVES` (`getResetInfo`, 2.60), runs on the
 first tick the sleeve step is live and the answer is kept for boot's life: Source-Files change
@@ -1184,6 +1189,17 @@ a multiplier the sleeve's rung uses (`JOB_MULTS`), cheapest first inside a tier.
 `getAugmentationStats`, cached in `/data/sleeve-aug-stats.txt`; it is singularity, x16 RAM at
 SF4.1, so without SF4 or RAM every aug is tier 2 and the pass says "unrated, cheapest first". Karma
 sleeves never recover shock, so they buy only once work has worn it down.
+
+**The Covenant sells permanent things, so it gets half the cash.** BN10 only, members only
+(`SleeveCovenantPurchases.tsx`). Up to five sleeves at 10^k x $10t, and memory to 100 per sleeve at
+$1t x 1.02^(m-1) a point - both persist through every later BitNode; memory is the sync a sleeve
+starts the next node at. Both prices are formulas in `plan.js`, so only the two purchases are
+bodies; the bought count is sleeves minus min(3, SF10 + 1 in BN10), off COUNT's source-file map.
+After the aug step, against cash less what it just spent: the next sleeve if it costs at most
+`sleeve.covenantCash` (0.5) of cash, one per pass; then memory, a point at a time to the lowest
+sleeve, from `covenantCash` of the **surplus above the next sleeve's price** - without that reserve
+$1t points would eat the savings for a $100t sleeve forever. Silent outside BN10 or without the
+faction.
 
 **Rep work comes from sing, one way.** `sing.js` publishes `REP_WANT_MARKER` each tick, on change.
 `repWant` walks the SAME candidate generator `chooseAction` does (`candidates()` in

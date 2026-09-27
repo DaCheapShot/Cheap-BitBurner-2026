@@ -1,5 +1,5 @@
-import { STATUS_FILE, REP_WANT_MARKER, SLEEVE_FACTION_MARKER, AUG_STATS_FILE } from "./config.js";
-import { assign, sameTask, parseWant, describeAction, describeTask, planAugs } from "./plan.js";
+import { STATUS_FILE, HISTORY_FILE, HISTORY_KEEP, REP_WANT_MARKER, SLEEVE_FACTION_MARKER, AUG_STATS_FILE } from "./config.js";
+import { assign, sameTask, parseWant, describeAction, describeTask, planAugs, planCovenant } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting } from "scripts/settings.js";
 
@@ -46,7 +46,10 @@ import { SETTINGS_FILE, setting } from "scripts/settings.js";
  */
 const COUNT = `
 const reset = ns.getResetInfo();
-return { n: ns.sleeve.getNumSleeves(), canGang: reset.currentNode === 2 || reset.ownedSF.has(2) };
+return {
+  n: ns.sleeve.getNumSleeves(), canGang: reset.currentNode === 2 || reset.ownedSF.has(2),
+  node: reset.currentNode, sf10: reset.ownedSF.get(10) ?? 0,
+};
 `;
 
 /**
@@ -61,12 +64,12 @@ const gains = (s, type, key) => ns.formulas.work.gymGains(s, type, "Powerhouse G
 const sleeves = [];
 for (let i = 0; i < args[0]; i++) {
   const s = ns.sleeve.getSleeve(i);
-  sleeves.push({ shock: s.shock, sync: s.sync, skills: s.skills, exp: s.exp, mults: s.mults, city: s.city,
+  sleeves.push({ shock: s.shock, sync: s.sync, memory: s.memory, skills: s.skills, exp: s.exp, mults: s.mults, city: s.city,
     gym: owned ? { strength: gains(s, "str", "strExp"), defense: gains(s, "def", "defExp"),
       dexterity: gains(s, "dex", "dexExp"), agility: gains(s, "agi", "agiExp") } : null });
 }
 const p = ns.getPlayer();
-return { sleeves, player: { karma: p.karma, skills: p.skills, money: p.money }, inGang: ns.gang.inGang() };
+return { sleeves, player: { karma: p.karma, skills: p.skills, money: p.money, factions: p.factions }, inGang: ns.gang.inGang() };
 `;
 
 /**
@@ -173,6 +176,19 @@ for (const a of JSON.parse(args[0])) out[a] = ns.singularity.getAugmentationStat
 return out;
 `;
 
+// The Covenant's two sales, BN10 only - both permanent. Prices are formulas
+// the planner computes, so only the purchases are bodies.
+
+const BUY_SLEEVE = `return ns.sleeve.purchaseSleeve();`;
+
+const MEMORY = `
+const out = [];
+for (const [i, n] of JSON.parse(args[0])) {
+  try { out.push([i, ns.sleeve.upgradeMemory(i, n).success]); } catch (e) { out.push([i, false]); }
+}
+return out;
+`;
+
 /**
  * In this order, and it matters: the game refuses a faction or company that
  * ANOTHER sleeve is working, so every sleeve leaving one must have left before
@@ -193,11 +209,30 @@ const ACTS = [
 export async function main(ns) {
   ns.disableLog("ALL");
   const lines = [];
+  // STATUS_FILE is a snapshot, rewritten every pass - so what HAPPENED between
+  // two looks (a task change, a purchase, a refusal) also goes to HISTORY_FILE,
+  // timestamped and kept. A line already in the last snapshot is not news: a
+  // warning that repeats every pass is logged the pass it first appears.
+  const before = new Set(ns.read(STATUS_FILE).split("\n"));
+  const events = [];
+  const say = {
+    line: (l) => lines.push(l),
+    event: (l) => {
+      lines.push(l);
+      if (!before.has(l)) events.push(l);
+    },
+  };
   const finish = (onFaction) => {
     // The log too, not just the file: it survives exit under "Recently killed"
     // in Active Scripts, and a hand-run with a tail shows it live.
     for (const l of lines) ns.print(l);
     ns.write(STATUS_FILE, lines.join("\n") + "\n", "w");
+    if (events.length) {
+      const stamp = new Date().toLocaleString();
+      const kept = ns.read(HISTORY_FILE).split("\n").filter(Boolean);
+      const all = [...kept, ...events.map((e) => `${stamp}  ${e}`)].slice(-HISTORY_KEEP);
+      ns.write(HISTORY_FILE, all.join("\n") + "\n", "w");
+    }
     const mark = onFaction ? "faction" : "";
     if (ns.read(SLEEVE_FACTION_MARKER) !== mark) ns.write(SLEEVE_FACTION_MARKER, mark, "w");
   };
@@ -205,7 +240,7 @@ export async function main(ns) {
     try {
       return await rpc(ns, body, ...args);
     } catch (e) {
-      lines.push(`WARN: ${tag} failed - ${String(e?.message ?? e)}`);
+      say.event(`WARN: ${tag} failed - ${String(e?.message ?? e)}`);
       return null;
     }
   };
@@ -213,7 +248,7 @@ export async function main(ns) {
   const count = await call("count", COUNT);
   if (!count) return finish(false);
   if (!count.n) {
-    lines.push("no sleeves");
+    say.line("no sleeves");
     return finish(false);
   }
   const read = await call("read", READ, count.n);
@@ -247,10 +282,11 @@ export async function main(ns) {
     const s = read.sleeves[i];
     const state = `shock ${ns.format.number(s.shock, 1)}, sync ${ns.format.number(s.sync, 1)}`;
     const was = changed.has(i) ? ` [was ${describeTask(tasks[i])}]` : "";
-    if (failed.has(i)) lines.push(`sleeve ${i}: could not start ${describeAction(a)} - ${failed.get(i)}`);
-    else lines.push(`sleeve ${i}: ${describeAction(a)} (${state}) - ${a.why}${was}`);
+    if (failed.has(i)) say.event(`sleeve ${i}: could not start ${describeAction(a)} - ${failed.get(i)}`);
+    else (was ? say.event : say.line)(`sleeve ${i}: ${describeAction(a)} (${state}) - ${a.why}${was}`);
   });
-  await buyAugs(ns, cfg, read, actions, lines);
+  const spent = await buyAugs(ns, cfg, read, actions, say);
+  await buyCovenant(ns, cfg, count, read, spent, say);
   finish(actions.some((a, i) => a.kind === "faction" && !failed.has(i)));
 }
 
@@ -259,14 +295,17 @@ export async function main(ns) {
  * the live sleeve.augCash, batches per planAugs. Its own try around every body:
  * a failed aug read must not cost the pass its status lines.
  */
-async function buyAugs(ns, cfg, read, actions, lines) {
+async function buyAugs(ns, cfg, read, actions, say) {
   const budget = setting(cfg, "sleeve.augCash") * (read.player.money ?? 0);
   const ready = read.sleeves.map((s, i) => i).filter((i) => read.sleeves[i].shock <= 0);
-  if (!(budget > 0) || !ready.length) return;
+  if (!(budget > 0) || !ready.length) return 0;
   const quiet = async (body, arg) => { try { return await rpc(ns, body, arg); } catch { return null; } };
 
   const avail = await quiet(AVAIL, JSON.stringify(ready));
-  if (!avail) return void lines.push("augs: could not read what the sleeves may buy");
+  if (!avail) {
+    say.event("augs: could not read what the sleeves may buy");
+    return 0;
+  }
   let stats = {};
   try { stats = JSON.parse(ns.read(AUG_STATS_FILE) || "{}"); } catch { stats = {}; }
   const unread = [...new Set(Object.values(avail).flat().map((a) => a.name))].filter((n) => !(n in stats));
@@ -276,22 +315,65 @@ async function buyAugs(ns, cfg, read, actions, lines) {
       stats = { ...stats, ...got };
       ns.write(AUG_STATS_FILE, JSON.stringify(stats), "w");
     } else {
-      lines.push(`augs: ${unread.length} aug(s) unrated - no RAM or no SF4 for getAugmentationStats, cheapest first`);
+      say.line(`augs: ${unread.length} aug(s) unrated - no RAM or no SF4 for getAugmentationStats, cheapest first`);
     }
   }
 
   const plan = planAugs({
     sleeves: read.sleeves, actions, avail, stats, budget, minBatch: setting(cfg, "sleeve.augMin"),
   });
+  let spent = 0;
   for (const b of plan.buys) {
     const got = (await quiet(BUY, JSON.stringify(b.names.map((n) => [b.i, n])))) ?? [];
     const names = got.map(([, n]) => n);
-    lines.push(names.length
-      ? `augs: sleeve ${b.i} bought ${names.length} (${ns.format.number(b.cost, 2)}, exp wiped) - ${names.join(", ")}`
+    spent += avail[b.i].filter((a) => names.includes(a.name)).reduce((t, a) => t + a.cost, 0);
+    say.event(names.length
+      ? `augs: sleeve ${b.i} bought ${names.length} ($${ns.format.number(b.cost, 2)}, exp wiped) - ${names.join(", ")}`
       : `augs: sleeve ${b.i} - the game refused all ${b.names.length} planned`);
   }
   for (const w of plan.waits) {
-    lines.push(`augs: sleeve ${w.i} waits - ${w.fit} of ${w.of} affordable at ` +
-      `${ns.format.number(budget, 2)}, batch min ${setting(cfg, "sleeve.augMin")}`);
+    say.line(`augs: sleeve ${w.i} waits - ${w.fit} of ${w.of} affordable at ` +
+      `$${ns.format.number(budget, 2)}, batch min ${setting(cfg, "sleeve.augMin")}`);
+  }
+  return spent;
+}
+
+/**
+ * The Covenant step: the next sleeve, then memory from the surplus above it -
+ * planCovenant decides, against cash less what the aug step just spent.
+ * Silent outside BN10 or before the faction is joined: nothing to say there.
+ */
+async function buyCovenant(ns, cfg, count, read, spent, say) {
+  const frac = setting(cfg, "sleeve.covenantCash");
+  const cash = (read.player.money ?? 0) - spent;
+  const plan = planCovenant({
+    sleeves: read.sleeves, sf10: count.sf10, node: count.node, factions: read.player.factions, cash, frac,
+  });
+  if (!plan || !(frac > 0)) return;
+  const $ = (v) => `$${ns.format.number(v, 2)}`;
+  if (plan.sleeve) {
+    let r = null;
+    try { r = await rpc(ns, BUY_SLEEVE); } catch (e) { r = { success: false, message: String(e?.message ?? e) }; }
+    say.event(r?.success
+      ? `covenant: bought sleeve ${read.sleeves.length} for ${$(plan.sleeve)} - it starts next pass`
+      : `covenant: the game refused a ${$(plan.sleeve)} sleeve - ${r?.message ?? "no reply"}`);
+  } else if (Number.isFinite(plan.next)) {
+    say.line(`covenant: next sleeve ${$(plan.next)}, buys at ${ns.format.percent(frac, 0)} of cash (${$(cash)})`);
+  } else {
+    say.line("covenant: all five sleeves bought");
+  }
+  if (plan.memory.length) {
+    let got = [];
+    try { got = await rpc(ns, MEMORY, JSON.stringify(plan.memory.map((m) => [m.i, m.amount]))); } catch { got = []; }
+    for (const m of plan.memory) {
+      const ok = got.some(([i, yes]) => i === m.i && yes);
+      const was = read.sleeves[m.i].memory ?? 1;
+      say.event(ok
+        ? `memory: sleeve ${m.i} +${m.amount} -> ${was + m.amount} for ${$(m.cost)}`
+        : `memory: the game refused +${m.amount} for sleeve ${m.i}`);
+    }
+  } else if (Number.isFinite(plan.nextPoint)) {
+    say.line(`memory: next point ${$(plan.nextPoint)}, surplus ${$(plan.surplus)}` +
+      (Number.isFinite(plan.next) ? " (saving for the next sleeve)" : ""));
   }
 }

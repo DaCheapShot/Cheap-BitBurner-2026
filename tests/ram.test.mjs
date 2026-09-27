@@ -469,6 +469,8 @@ export const tests = {
       // getAugmentationStats at its BN4 / SF4.3 price - x4 at SF4.2, x16 at SF4.1,
       // where it cannot run and the pass buys cheapest-first instead.
       AVAIL: 5.60, BUY: 5.60, STATS: 6.60,
+      // The Covenant, BN10: its prices are formulas in plan.js, so only the buys.
+      BUY_SLEEVE: 5.60, MEMORY: 5.60,
       RECOVER: 5.60, SYNC: 5.60, CRIME: 5.60, FACTION: 5.60, COMPANY: 5.60,
     };
     const got = bodiesOf("sleeve/sleeve");
