@@ -28,11 +28,11 @@ export const SETTINGS_FILE = "/data/settings.txt";
 /**
  * Keys are `<script>.<knob>`, and each script's knobs stay TOGETHER here:
  * set.js lists them in this order, a group per script, and a test holds every
- * prefix contiguous. Order: gang, cloud, hacknet, sing, contracts, boot.
+ * prefix contiguous. Order: gang, cloud, hacknet, sing, sleeve, contracts, boot.
  *
  * `<script>.enabled` is the live switch, read by boot.js every tick. Off STOPS
  * a running resident (cloud, gang, sing) and skips a transient (hacknet,
- * contracts). The manager has none: stopping it drags in killOrphanWorkers and
+ * sleeve, contracts). The manager has none: stopping it drags in killOrphanWorkers and
  * the retired-manager rules, which --no-manager already owns.
  *
  * Cadences are read at the top of each loop, so they apply from the next wait.
@@ -68,6 +68,10 @@ export const KNOBS = {
   "sing.grindKarma": { def: GRIND_GANG_KARMA ? 1 : 0, min: 0, max: 1, bool: true, doc: "grind Homicide + gym for gang karma (~15 h)" },
   "sing.idleStudy": { def: IDLE_STUDY ? 1 : 0, min: 0, max: 1, bool: true, doc: "nothing to work: a university class, not a money crime" },
   "sing.minAugBatch": { def: MIN_AUG_BATCH, min: 1, max: 100, int: true, doc: "augs a batch (plus the queue) must reach to buy" },
+
+  // No karma knob: sleeves grind karma only while gang.enabled is on - karma
+  // buys nothing but a gang, so a second switch could only disagree with it.
+  "sleeve.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "sleeve task assignment, once a boot tick" },
 
   "contracts.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },
 

@@ -20,6 +20,9 @@ export const SING_SERVICE = "/scripts/sing/sing.js";
  */
 export { SHARE_HOLD_MARKER } from "scripts/config.js";
 
+/** What sing wants worked beyond the player's own job - read by sleeve/sleeve.js. */
+export { REP_WANT_MARKER } from "scripts/config.js";
+
 // ---------------------------------------------------------------- cadence ---
 
 /**

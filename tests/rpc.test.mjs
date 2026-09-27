@@ -230,6 +230,8 @@ export const tests = {
         `crime stats, crime chance, company, apply, travel, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, bitnode mults, sweep, ` +
         `install, backdoors, donate), found ${per("sing/sing")}`);
     assert(per("contracts/contracts") === 3, `contracts.js should have 3 bodies (find, submit, dummy), found ${per("contracts/contracts")}`);
+    assert(per("sleeve/sleeve") === 9,
+      `sleeve.js should have 8 bodies (count, read, tasks, recover, sync, crime, gym, faction, company), found ${per("sleeve/sleeve")}`);
     for (const [name, body] of bodies) {
       // A ${} interpolation cannot be evaluated here, so it is rejected
       // outright: a body assembled at runtime is one no check can read, and it

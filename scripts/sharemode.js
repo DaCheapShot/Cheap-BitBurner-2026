@@ -2,7 +2,7 @@ import { ServerPool } from "scripts/continuous/lib/server";
 import {
   SHARE_MARKER, SHARE_PORT, SHARE_FRACTION, SHARE_MAX_FRACTION, SHARE_WORKER,
   SHARE_RAM_FALLBACK, HOME_RESERVE_GB,
-  shareFractionFrom, shareBonusFor, SHARE_HOLD_MARKER, shareHeld,
+  shareFractionFrom, shareBonusFor, SHARE_HOLD_MARKER, SLEEVE_FACTION_MARKER, shareHeld,
 } from "./config.js";
 
 /**
@@ -122,7 +122,7 @@ export async function main(ns) {
   ns.tprint(
     `\nshare mode: ${current > 0 ? `ON at ${pct(current)} of the pool` : "OFF"}` +
       // The setting survives a hold; what is in FORCE is off until faction work resumes.
-      `${shareHeld(ns.read(SHARE_HOLD_MARKER)) ? " - HELD by sing/sing.js: not doing faction work" : ""}\n` +
+      `${shareHeld(ns.read(SHARE_HOLD_MARKER), ns.read(SLEEVE_FACTION_MARKER)) ? " - HELD by sing/sing.js: not doing faction work" : ""}\n` +
       `  measured power   x${power.toFixed(4)}  (ns.getSharePower, includes the ` +
       `intelligence and home-core bonuses)\n` +
       `  pool             ${fmtRam(pool.usableRam)} usable across ${pool.servers.length} host(s)\n` +

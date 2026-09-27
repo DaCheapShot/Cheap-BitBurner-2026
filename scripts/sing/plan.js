@@ -290,6 +290,20 @@ export function chooseTravel(player, { group, targets = {}, grindKarma = false }
  */
 function walk(player, state, targets) {
   let donatable = null;
+  for (const c of candidates(player, state, targets)) {
+    if (!c.donatable) return { action: c.action };
+    donatable ??= c.action;
+  }
+  return { action: null, donatable };
+}
+
+/**
+ * Every step with work left against one tier's targets, in WORK_ORDER order,
+ * each flagged `donatable` when its rep is better bought than worked. walk()
+ * takes the first; repWant() takes them all - one set of predicates, so the
+ * player and the sleeves cannot disagree about what is worth working.
+ */
+function* candidates(player, state, targets) {
   for (const step of steps(player)) {
     if (step.company) {
       const c = step.company;
@@ -303,7 +317,8 @@ function walk(player, state, targets) {
       // Nothing left to buy there in this tier: the invite would buy nothing.
       if (targets?.[f] === 0) continue;
       if (!employed && player.skills.hacking < step.hacking) continue;
-      return { action: { kind: "company", company: c, field: step.field, employed } };
+      yield { action: { kind: "company", company: c, field: step.field, employed }, donatable: false };
+      continue;
     }
     // The gang's own faction offers no work - getFactionWorkTypes returns []
     // for it - so "has a work type" excludes it without knowing its name, which
@@ -313,11 +328,36 @@ function walk(player, state, targets) {
     const target = repTarget(step.faction, targets);
     if (type && (state.rep[step.faction] ?? 0) < target) {
       const a = { kind: "faction", faction: step.faction, type, target };
-      if (!canDonate(step.faction, state) && !bankedFavor(step.faction, state)) return { action: a };
-      donatable ??= a;
+      yield { action: a, donatable: canDonate(step.faction, state) || bankedFavor(step.faction, state) };
     }
   }
-  return { action: null, donatable };
+}
+
+/**
+ * The rep work sleeves should take on: REP_WANT_MARKER's content. Every
+ * faction and company step chooseAction would work - tier 1 first, then the
+ * rest - with the donatable and favor-banked ones left out, since their rep is
+ * bought rather than earned. A company only once the player holds the job
+ * there: setToCompanyWork needs Player.jobs[company]. The gang's faction never
+ * appears - it has no work types, the same test walk() uses.
+ *
+ * Nothing about the player's own action is removed: a sleeve on the player's
+ * faction adds to the same rep, which the game allows.
+ */
+export function repWant(player, state) {
+  const tiers = state.priorityTargets ? [state.priorityTargets, state.targets] : [state.targets];
+  const factions = [];
+  const companies = [];
+  for (const targets of tiers) {
+    for (const { action: a, donatable } of candidates(player, state, targets)) {
+      if (donatable) continue;
+      if (a.kind === "faction" && !factions.some((f) => f.faction === a.faction)) {
+        factions.push({ faction: a.faction, types: state.workTypes[a.faction] ?? [] });
+      }
+      if (a.kind === "company" && a.employed && !companies.includes(a.company)) companies.push(a.company);
+    }
+  }
+  return { factions, companies };
 }
 
 /**

@@ -1,13 +1,16 @@
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
          WORKER_LIST,
-         DEPLOY_LIST, DEPLOY_MANIFEST, SHARE_HOLD_MARKER, TARGETS_MARKER } from "./config.js";
+         DEPLOY_LIST, DEPLOY_MANIFEST, SHARE_HOLD_MARKER, TARGETS_MARKER,
+         REP_WANT_MARKER, SLEEVE_FACTION_MARKER } from "./config.js";
 // The gang supervisor's path. Same kind of import as the line above - that file
 // is constants only, no ns call anywhere in it, so this is 0 GB.
 import { GANG_SERVICE } from "./gang/config.js";
 import { CONTRACTS_SERVICE } from "./contracts/config.js";
 import { SING_SERVICE } from "./sing/config.js";
+import { SLEEVE_SERVICE, STATUS_FILE as SLEEVE_STATUS_FILE } from "./sleeve/config.js";
 import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE } from "./hacknet/config.js";
 import { SETTINGS_FILE, setting, settingsLog, BOOT_TICK_S } from "./settings.js";
+import { rpc } from "./rpc.js";
 
 /**
  * Supervisor: keeps the whole operation running from one script.
@@ -287,6 +290,17 @@ function ensureOneManager(ns, wanted, others, args, log) {
 }
 
 /**
+ * Does this save have the Sleeve API - BitNode 10, or Source-File 10? An rpc
+ * body because getResetInfo is 1.00 GB and boot is pinned at 3.50; rpc.js adds
+ * only ns.run, which boot already pays. ownedSF is a Map, which JSON turns into
+ * {}, so it is collapsed here, inside the transient.
+ */
+const HAS_SLEEVES = `
+const r = ns.getResetInfo();
+return r.currentNode === 10 || r.ownedSF.has(10);
+`;
+
+/**
  * Run a script and wait for it to exit.
  *
  * Polls ns.ps rather than ns.isRunning purely to avoid paying for a second API
@@ -333,9 +347,21 @@ export async function main(ns) {
   const noContracts = args.includes("--no-contracts");
   const noSing = args.includes("--no-sing");
   const noHacknet = args.includes("--no-hacknet");
-  // sing.js holds share off whenever the player is not doing faction work. With
-  // sing opted out nothing would ever release that hold, so clear it here.
-  if (noSing) ns.write(SHARE_HOLD_MARKER, "", "w");
+  const noSleeve = args.includes("--no-sleeve");
+  // sing.js holds share off whenever the player is not doing faction work, and
+  // publishes the rep work sleeves take on. With sing opted out nothing would
+  // ever release that hold or refresh that list, so clear both here.
+  if (noSing) {
+    ns.write(SHARE_HOLD_MARKER, "", "w");
+    ns.write(REP_WANT_MARKER, "", "w");
+  }
+  // The sleeves' half of the share hold: with no sleeve pass to rewrite it, a
+  // stale "faction" would release sing's hold for nothing.
+  if (noSleeve) ns.write(SLEEVE_FACTION_MARKER, "", "w");
+  // Whether the Sleeve API exists here; null until asked (see the sleeve step).
+  let hasSleeves = null;
+  // The sleeve status last copied into this log, shock/sync figures stripped.
+  let lastSleeveGist = null;
   const noManager = args.includes("--no-manager");
   const noFormulas = args.includes("--no-formulas");
   const tIdx = args.indexOf("--target");
@@ -510,6 +536,7 @@ export async function main(ns) {
       // --no-sing clears it at startup. Written only when set, so an off switch
       // is not a file write a minute.
       if (ns.read(SHARE_HOLD_MARKER) !== "") ns.write(SHARE_HOLD_MARKER, "", "w");
+      if (ns.read(REP_WANT_MARKER) !== "") ns.write(REP_WANT_MARKER, "", "w");
     } else if (!noSing) {
       killDuplicates(ns, SING_SERVICE, log);
       ensureService(ns, SING_SERVICE, [], log);
@@ -537,6 +564,32 @@ export async function main(ns) {
       // 5.45 + 6.60 = 12.05 instead of the larger of the two.
       if (!isUp(ns, HACKNET_MONEY_SERVICE) && !isUp(ns, HACKNET_HASH_SERVICE)) {
         await runToCompletion(ns, HACKNET_HASH_SERVICE, [], log);
+      }
+    }
+
+    // The sleeves, one assignment pass per tick - a TRANSIENT, the contracts
+    // shape: sleeve work runs on its own between passes, so nothing is held.
+    // Gated on SF10, asked ONCE: Source-Files change only when a BitNode ends,
+    // which restarts boot. A failed ask (no RAM yet) leaves it null for the
+    // next tick. --no-gang rides along: without a gang coming, karma is wasted.
+    // isUp against stacking on a hand-run pass, as for contracts.
+    const sleevesOn = !noSleeve && live("sleeve");
+    if (sleevesOn && hasSleeves === null) {
+      hasSleeves = await rpc(ns, HAS_SLEEVES).catch(() => null);
+      if (hasSleeves !== null) log(hasSleeves ? "sleeves: SF10 owned - assigning every tick" : "sleeves: no SF10 - not assigning");
+    }
+    if (!sleevesOn || hasSleeves === false) {
+      if (ns.read(SLEEVE_FACTION_MARKER) !== "") ns.write(SLEEVE_FACTION_MARKER, "", "w");
+    } else if (hasSleeves && !isUp(ns, SLEEVE_SERVICE)) {
+      await runToCompletion(ns, SLEEVE_SERVICE, noGang ? ["--no-gang"] : [], log);
+      // The pass's log dies with it, so boot's log - the tail you watch - carries
+      // its status, only when it changes: shock and sync tick every pass, so the
+      // comparison skips those figures or it would be a block of lines a minute.
+      const status = ns.read(SLEEVE_STATUS_FILE).trim();
+      const gist = status.replace(/\(shock [^)]*\)/g, "");
+      if (gist !== lastSleeveGist) {
+        lastSleeveGist = gist;
+        for (const l of status.split("\n")) if (l) log(`sleeves: ${l}`);
       }
     }
 

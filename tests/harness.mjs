@@ -49,6 +49,11 @@ const NESTED = [
   "hacknet/math.js",
   "hacknet/hacknet.js",
   "hacknet/hashes.js",
+  // The sleeve subsystem. plan.js is pure and holds every decision; sleeve.js
+  // holds ns calls only inside main() and its bodies are parsed by rpc.test.
+  "sleeve/config.js",
+  "sleeve/plan.js",
+  "sleeve/sleeve.js",
 ];
 
 /** Every .js under scripts/, as posix paths relative to it. */

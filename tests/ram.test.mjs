@@ -102,6 +102,15 @@ const COST = {
   getHacknetMultipliers: 0.25,
   // The batcher's income, for valuing a hash upgrade against the sale price.
   getTotalScriptIncome: 0.1,
+  // ns.sleeve, all 22 priced off RamCostConstants.SleeveBase = 4. The names to
+  // watch are the plain words: a local named `travel` is a full 4.00 GB (it is
+  // ns.sleeve.travel), and so are `getTask` and `getSleeve`.
+  getNumSleeves: 4, setToIdle: 4, setToShockRecovery: 4, setToSynchronize: 4,
+  setToCommitCrime: 4, setToUniversityCourse: 4, travel: 4, setToCompanyWork: 4,
+  setToFactionWork: 4, setToGymWorkout: 4, getTask: 4, getSleeve: 4,
+  getSleeveAugmentations: 4, getSleevePurchasableAugs: 4, purchaseSleeveAug: 4,
+  setToBladeburnerAction: 4, getSleeveAugmentationPrice: 4, getSleeveAugmentationRepReq: 4,
+  purchaseSleeve: 4, upgradeMemory: 4, getSleeveCost: 4, getMemoryUpgradeCost: 4,
   // Not functions. RamCalculations.ts resolves a ref named `window` or
   // `document` to RamCostConstants.Dom and adds it, whatever the ref really is.
   window: 25, document: 25,
@@ -432,6 +441,41 @@ export const tests = {
     }
   },
 
+  // Every ns.sleeve function is 4.00 GB, so the pass reading and acting in one
+  // process would be ~40 GB. sleeve.js holds none: 1.60 + ns.run 1.00, and every
+  // call lives in a body - gang.js's and sing.js's shape, as a transient.
+  "sleeve.js holds no sleeve API: 2.60 GB": () => {
+    const ram = ramOf("sleeve/sleeve");
+    assert(Math.abs(ram - 2.60) < 0.011, `expected 2.60 GB (1.60 + run 1.00), got ${ram.toFixed(2)}`);
+  },
+
+  // config.js is imported by boot.js (pinned at 3.50) and by settings.js, which
+  // every rpc body that reads a knob imports; plan.js by sleeve.js.
+  "the sleeve subsystem's shared modules are free to import": () => {
+    for (const mod of ["sleeve/config", "sleeve/plan"]) {
+      const ram = ramOf(mod);
+      assert(Math.abs(ram - BASE) < 0.011,
+        `${mod}.js costs ${(ram - BASE).toFixed(2)} GB to import; it must be 0`);
+    }
+  },
+
+  // One sleeve call per body, so each is 5.60, plus what rides along: COUNT
+  // carries getResetInfo (1.00) for the SF2 check and lands exactly on sing's
+  // 6.60 ceiling; READ carries getPlayer (0.50). ns.gang.inGang is 0.
+  "every sleeve body is priced, and none exceeds 6.60": () => {
+    const want = {
+      COUNT: 6.60, READ: 6.20, TASKS: 5.60, GYM: 5.60,
+      RECOVER: 5.60, SYNC: 5.60, CRIME: 5.60, FACTION: 5.60, COMPANY: 5.60,
+    };
+    const got = bodiesOf("sleeve/sleeve");
+    assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),
+      `sleeve.js bodies ${Object.keys(got)} - every body must be pinned here`);
+    for (const [name, gb] of Object.entries(want)) {
+      assert(Math.abs(got[name] - gb) < 0.011, `${name} body: expected ${gb.toFixed(2)} GB, got ${got[name].toFixed(2)}`);
+      assert(got[name] <= 6.60 + 0.001, `${name} body is ${got[name].toFixed(2)} GB - split it`);
+    }
+  },
+
   // ns.codingcontract is priced off CodingContractBase = 10, and reading plus
   // attempting in one process is ~22 GB with the network walk - more than a
   // fresh BitNode's 32 GB home has free beside boot, cloud and the continuous
@@ -483,6 +527,15 @@ export const tests = {
     assert(Math.abs(ram - 3.50) < 0.011, `expected 3.50 GB, got ${ram.toFixed(2)}`);
   },
 
+  // boot's one body: the SF10 check, asked once per boot. getResetInfo (1.00)
+  // there rather than in boot, which is pinned at 3.50 - and importing rpc.js
+  // costs boot nothing, since it already pays ns.run for runToCompletion.
+  "boot's SF10 check is its only body, at 2.60": () => {
+    const got = bodiesOf("boot");
+    assert(JSON.stringify(Object.keys(got)) === JSON.stringify(["HAS_SLEEVES"]), `boot bodies: ${Object.keys(got)}`);
+    assert(Math.abs(got.HAS_SLEEVES - 2.60) < 0.011, `HAS_SLEEVES: ${got.HAS_SLEEVES.toFixed(2)}`);
+  },
+
   // Vanilla's formatters. Neither exists in this fork - formatting is an
   // ns.format NAMESPACE - so either call is `undefined is not a function` at
   // the call site and nowhere earlier. Costs nothing to ban and cannot false
@@ -518,7 +571,7 @@ export const tests = {
     for (const entry of ["boot", "cloud", "deploy",
                          "root", "sharemode", "connectme",
                          "continuous/manager", "continuous/servers",
-                         "gang/gang", "contracts/contracts", "sing/sing"]) {
+                         "gang/gang", "contracts/contracts", "sing/sing", "sleeve/sleeve"]) {
       for (const mod of closure(entry)) seen.add(mod);
     }
 
@@ -548,13 +601,14 @@ export const tests = {
   // cheap ones (`hack`, `grow`, `weaken` as property names) are deliberate and
   // priced into the totals above.
   "no script names a variable after an expensive ns function": () => {
-    const BANNED = { window: 25, document: 25, attempt: 10, share: 2.4, run: 1, probe: 0.2, connect: 2 };
+    const BANNED = { window: 25, document: 25, attempt: 10, share: 2.4, run: 1, probe: 0.2, connect: 2,
+      travel: 4, getTask: 4, getSleeve: 4 };
     const entries = new Set();
     for (const e of ["boot", "cloud", "deploy",
                      "root", "sharemode", "connectme",
                      "continuous/manager", "continuous/servers",
                      "gang/gang", "contracts/contracts", "sing/sing",
-                     "hacknet/hacknet", "hacknet/hashes"]) {
+                     "hacknet/hacknet", "hacknet/hashes", "sleeve/sleeve"]) {
       for (const mod of closure(e)) entries.add(mod);
     }
 
@@ -574,7 +628,7 @@ export const tests = {
       //
       // The trailing (?!\s*:) skips object keys - `{ hack: 1.70 }` costs nothing,
       // because acorn-walk only walks a Property key when it is computed.
-      const BANNED_RE = /(?<![\w$])(\.?)(window|document|attempt|share|run|probe|connect)(?![\w$])(?!\s*:)/g;
+      const BANNED_RE = /(?<![\w$])(\.?)(window|document|attempt|share|run|probe|connect|travel|getTask|getSleeve)(?![\w$])(?!\s*:)/g;
       for (const m of src.matchAll(BANNED_RE)) {
         const name = m[2];
         if (calls.has(name)) continue;

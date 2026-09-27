@@ -52,6 +52,7 @@ run scripts/boot.js --no-formulas       # force the *Analyze math path
 run scripts/boot.js --no-contracts      # do not solve coding contracts
 run scripts/boot.js --no-sing           # do not run the singularity supervisor
 run scripts/boot.js --no-hacknet        # do not buy hacknet nodes or spend hashes
+run scripts/boot.js --no-sleeve         # do not assign sleeve tasks
 ```
 
 **There is one batcher**, `scripts/continuous/`. A second, the volley-firing "shotgun"
@@ -81,6 +82,8 @@ run scripts/contracts/contracts.js --dummy   # mint one contract of every type a
 run scripts/contracts/contracts.js --forget  # clear the skip list, after fixing a solver
 run scripts/hacknet/hacknet.js --dry-run     # plan a hacknet buy and print it, buy nothing
 run scripts/hacknet/hashes.js --dry-run      # plan a hash spend and print it, spend nothing
+run scripts/sleeve/sleeve.js            # one sleeve assignment pass (boot runs it every tick)
+cat /data/sleeves.txt                   # what each sleeve is doing, and why
 run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
 run scripts/expwatch.js 60              # hacking exp/s per 60 s window, in a tail
 run scripts/set.js                      # list live settings (budgets) and their defaults
@@ -336,6 +339,10 @@ editor's RAM panel when one moves.
 | `hacknet/math.js` | cost ladders, gain ratios, both plans - pure | 0 |
 | `hacknet/hacknet.js` | entry: ONE money sweep then exits; boot runs it every other tick | 5.45 |
 | `hacknet/hashes.js` | entry: ONE hash sweep then exits; a no-op outside BitNode 9 | 6.60 |
+| `sleeve/config.js` | sleeve tunables, the crime table, `SHOCK_RECOVER_ABOVE` | 0 |
+| `sleeve/plan.js` | `assign` + the crime, sync and work-type math - pure | 0 |
+| `sleeve/sleeve.js` | entry: ONE assignment pass then exits; boot runs it every tick | 2.60 |
+| ↳ eight bodies | transients: count, read, tasks, recover, sync, crime, faction, company | 5.60–6.60 |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
@@ -362,9 +369,10 @@ which stays the one home of a default. `setting()` never throws - a mangled file
 defaults - and `setSetting()` is where bad input is refused. Home-only file is fine because every
 reader runs on home; a worker on another host would need a port (see share).
 
-**Switches** (`cloud.enabled|gang|sing|hacknet|contracts`, on/off) are read by `boot.js` every
-tick. Off STOPS a running resident (cloud, gang, sing) and skips a transient; sing off also clears
-`SHARE_HOLD_MARKER`, since a killed sing cannot. The `--no-X` flags keep their old meaning (don't
+**Switches** (`cloud.enabled|gang|sing|hacknet|sleeve|contracts`, on/off) are read by `boot.js`
+every tick. Off STOPS a running resident (cloud, gang, sing) and skips a transient; sing off also
+clears `SHARE_HOLD_MARKER` and `REP_WANT_MARKER`, since a killed sing cannot, and sleeve off clears
+`SLEEVE_FACTION_MARKER`. The `--no-X` flags keep their old meaning (don't
 start, never kill) - a switch that left gang.js running would change nothing visible. The manager
 has no switch: stopping it belongs to `--no-manager` and the retired-manager/orphan-kill rules.
 
@@ -918,6 +926,9 @@ transient; a test asserts the body touches it only through `.has()`.
 tick about it buries the warning that matters. `HOME_RESERVE_GB` was left at 32 deliberately: the
 worst overlap of awaited transients from three processes (contracts find 12.00 + gang equip
 14.70 + CRIME 6.60) is 33.30, and the failure that 1.30 GB buys is one deduped WARN and a retry.
+The sleeve pass adds a fourth process (2.60 + a 6.60 body) for about a second a minute. boot awaits
+it and the contract sweep one after the other, so the two never overlap; the same one-WARN failure
+covers the rare tick where it lands on a gang equip and a sing CRIME.
 
 **The gang grind is opt-in, and LIVE.** `GRIND_GANG_KARMA` defaults off: -54000 karma is ~18000
 successful homicides, ~15 hours even at 100% success, that earn no rep anywhere. The gym goes with
@@ -1017,6 +1028,12 @@ empty hold file is no hold, so without sing share behaves exactly as before - an
 sing can stop while holding both release it: a parked `sing.js` clears it, and so does
 `boot.js --no-sing`.
 
+**Sleeves release the hold too.** A sleeve's faction rep is `calculateFactionRep` - the same three
+formulas, share bonus included - so a player at crime while a sleeve works a faction still wants
+share. `sleeve.js` writes `SLEEVE_FACTION_MARKER` (`"faction"` or `""`), and share is held only when
+sing holds it AND no sleeve works a faction: `effectiveShareFraction(marker, hold, sleeves)`. A
+sleeve never turns share ON - only the user's fraction does.
+
 Every invite outside the chosen city group is accepted: only the city factions have enemies in
 this fork, so there is nothing else to deny.
 
@@ -1093,6 +1110,88 @@ bar, the FAVOR_GAIN body (`getFactionFavorGain`, 2.35, read for every joined fac
 bar) asks whether an install now would carry it over - even with other work left; if so, whatever fits is bought and installed at any size. ~462k lifetime rep is 150 favor,
 so that install turns the remaining ~2m of the pill's rep from a grind into a donation. Nothing here
 touches `w0r1d_d43m0n` - destroying the node stays the user's call.
+
+### The sleeve subsystem (`scripts/sleeve/`)
+
+Sleeves (BitNode 10 / Source-File 10) doing four jobs, in the user's order: **gang karma > faction
+rep > company rep > money**. Phase 1 is task assignment only; sleeve augs and BN10's Covenant
+`purchaseSleeve` / `upgradeMemory` are later phases. Self-contained like `gang/`: it imports
+`scripts/rpc.js`, `scripts/settings.js` and 0 GB constants, and boot reads one path out of it.
+
+**A transient, the contracts shape.** Sleeve work runs on its own - a crime loops, faction work
+accrues - so one decision a minute loses nothing, and nothing is worth holding between passes.
+boot runs `sleeve.js` with `runToCompletion` every tick; resident, it would pin 2.60 GB to buy a
+log window. Every `ns.sleeve` function is **4.00 GB** (`SleeveBase`), so each call is its own rpc
+body (5.60; COUNT is 6.60 with `getResetInfo`). A transient's `ns.print` dies with it, so the pass
+overwrites `/data/sleeves.txt` with a line per sleeve, a changed task marked `[was ...]`, and
+**prints nothing to the terminal** - the user's rule, pinned by a test. The same lines go to its
+own log (kept under Recently killed), and boot copies them into ITS log whenever an assignment
+changes - the shock/sync figures are ignored for that comparison, or it would be every tick. The
+first live run showed "zero output": a status file nobody is told about is not a log.
+
+**boot asks for SF10 once.** Its one rpc body, `HAS_SLEEVES` (`getResetInfo`, 2.60), runs on the
+first tick the sleeve step is live and the answer is kept for boot's life: Source-Files change
+only when a BitNode ends, which restarts boot. A failed ask (no RAM yet) stays null and is asked
+again next tick. Without SF10 the pass never runs. Importing `rpc.js` costs boot nothing - it
+already pays `ns.run` - so boot stays at 3.50.
+
+**The name tax is at its worst here.** `travel`, `getTask` and `getSleeve` are 4.00 GB each as
+identifiers anywhere in the closure; `tests/ram.test.mjs` bans them and pins `sleeve/plan.js` and
+`sleeve/config.js` at the base.
+
+**Shock gates rep, and nothing else.** A sleeve starts at shock 100; rep and exp are x
+`(100-shock)/100`, so a fresh sleeve earns **zero** rep, while crime money and karma ignore shock.
+Any work lowers shock at `a` = 0.0001/cycle and recovery at 3a, and recovery **stops itself to
+idle at 0**. `SHOCK_RECOVER_ABOVE` = **100/3** is derived, not tuned: recovering forgoes
+`(100-s) dt` of rep now and saves `2s dt` of future loss over working, so recover while
+`s > 100/3`. The int bonus is in both rates and cancels. A test simulates the grind and finds the
+same number. Only as many sleeves recover as there are rep entries left open, least shocked
+first; the spares earn money.
+
+**Sync gates karma, and the switch point is computed.** Karma per sleeve crime is
+`crime.karma x sync/100`. Sync starts at 1 (`memory`) and climbs ~0.001/s, **stopping itself to
+idle at 100** after ~27 hours. Syncing to S and then earning k karma/s pays off K owed in
+`(S-now)/r + 100K/(kS)`, minimised at `S* = sqrt(100 K r / k)`: ~26 for eight sleeves at full
+Homicide odds, ~42 for three. K falls and k rises as the run goes, so S* only falls - a sleeve that
+turns to crime never turns back. Karma needs a gang to be foundable (BN2 or SF2, read in COUNT)
+and none yet, and it follows **the gang switch**: `gang.enabled` off, or boot's `--no-gang` (passed
+through to the pass), and no sleeve farms karma - it buys nothing but a gang, so there is no
+separate sleeve knob to disagree with it.
+
+**Karma sleeves train first, while it pays.** The first live run had a synced sleeve at 16 combat
+doing Homicide at 8.2% - the right crime (2.5x Shoplift's karma/s at those odds) and ~180 hours to
+the bar alone. Crime trains badly (a failure pays 25% exp); Powerhouse Gym gives 10 exp/s per stat
+at $2,400/s, no money guard (the user's call). And **gym exp is shared**: `applySleeveGains` gives
+every OTHER sleeve the exp x sync x its (1 - shock), and the player too - so one trainer per stat
+raises every sleeve. `gymPlan` hands each free sleeve in Sector-12 (least productive first) the
+stat that pays most right now, while (karma/s it adds across all sleeves) x (time left to the bar)
+beats the karma/s it forgoes; levels get dearer and the karma owed shrinks, so training stops by
+itself. The level multiplier is read back off each sleeve's own skill and exp (`levelRate`), and
+the gym rate comes from `formulas.work.gymGains` when Formulas.exe is owned (x1 otherwise). A fixed
+stat order spent 8 of 13 simulated training hours on Strength; best-stat-first trains 8 hours to
+~70/70/52/52 and finishes one sleeve's run in ~48 h. A sleeve keeps its stat unless another pays
+1.25x more - switching is free, but each switch is a line in boot's log.
+
+**Rep work comes from sing, one way.** `sing.js` publishes `REP_WANT_MARKER` each tick, on change.
+`repWant` walks the SAME candidate generator `chooseAction` does (`candidates()` in
+`sing/plan.js`): tier 1 first, donatable and favor-banked factions out, companies only where the
+player holds the job (`setToCompanyWork` needs `Player.jobs`). Sing does not change its own choice
+to suit the sleeves - that waits until sleeves are proven live. A sleeve MAY work the player's
+faction (the game allows it and the rep adds up), but **one sleeve per faction or company**, which
+the game enforces by throwing. A missing or unparseable file is no rep work; a parked or stopped
+sing clears it.
+
+**Acts run in a fixed order: recover, sync, crime, then faction, company.** The faction and company
+setters throw when ANOTHER sleeve currently works the job, so a sleeve leaving one must be gone
+before another is put on it. Each body catches per sleeve. A sleeve already on a wanted entry
+KEEPS it before anything is handed out, and an action runs only on a difference from `getTask`
+(`sameTask`) - restarting a crime zeroes its progress.
+
+**Crimes are transcribed, not read.** `getCrimeChance` / `getCrimeStats` are singularity and price
+the PLAYER; `ns.formulas.work` needs Formulas.exe. `Crime.successRate` and the `Crimes.ts` table are
+copied into `sleeve/config.js`, and `getSleeve` returns exactly the skills and mults that formula
+takes. Picks come from sing's `MONEY_CRIMES`, for the reason sing restricts itself: a switch
+forfeits the running unit.
 
 ### The hacknet subsystem (`scripts/hacknet/`)
 

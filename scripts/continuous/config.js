@@ -45,7 +45,7 @@ export {
   BATCH_OPS, OP_WORKER, HOME_RESERVE_GB, PORT_CAPACITY,
   SHARE_MARKER, SHARE_PORT, SHARE_WORKER, SHARE_RAM_FALLBACK, SHARE_FRACTION,
   SHARE_MAX_FRACTION, shareFractionFrom,
-  SHARE_HOLD_MARKER, effectiveShareFraction, shareHeld,
+  SHARE_HOLD_MARKER, SLEEVE_FACTION_MARKER, effectiveShareFraction, shareHeld,
   WORKER_FILES, WORKER_LIST, WORKER_RAM_FALLBACK,
   // Values a second party reads without knowing which batcher is up: the
   // hacknet reads the target list, and both pools skip hacknet servers.

@@ -3,11 +3,11 @@ import {
   CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
-  STUDY_MARKER,
+  STUDY_MARKER, REP_WANT_MARKER,
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTargets, planAugBuys,
-  canDonate, bankedFavor, installForFavor, donationPerRep, bestCrime, chooseCityGroup, studyAction,
+  canDonate, bankedFavor, installForFavor, donationPerRep, bestCrime, chooseCityGroup, studyAction, repWant,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
@@ -558,8 +558,10 @@ export async function main(ns) {
         // startup must not idle the subsystem for the whole BitNode.
         log("no Source-File 4 and not in BitNode 4 - singularity is unavailable. Parked; " +
           "boot.js --no-sing reclaims this 2.60 GB.");
-        // A parked sing must not leave share held with nobody to release it.
+        // A parked sing must not leave share held with nobody to release it,
+        // nor sleeves working a list nobody will ever update.
         ns.write(SHARE_HOLD_MARKER, "", "w");
+        ns.write(REP_WANT_MARKER, "", "w");
         // Not an exit: boot's ensureService would relaunch it every tick forever.
         while (true) await ns.sleep(PARKED_MS);
       }
@@ -828,6 +830,15 @@ export async function main(ns) {
     log(`share: ${want ? "HELD - not doing faction work, the only work it multiplies" : "released - faction work"}`);
   };
 
+  /**
+   * REP_WANT_MARKER, only on a change: every step chooseAction could work, for
+   * the sleeves - see repWant. sleeve/sleeve.js reads it once a boot tick.
+   */
+  const publishWant = (r) => {
+    const want = JSON.stringify(repWant(r.player, { ...r, targets, priorityTargets, favor, favorNeed, favorGain }));
+    if (ns.read(REP_WANT_MARKER) !== want) ns.write(REP_WANT_MARKER, want, "w");
+  };
+
   /** STUDY_MARKER, only on a change - hashes.js buys Improve Studying off it. */
   const markStudy = (studying) => {
     const want = studying ? "study" : "";
@@ -878,6 +889,8 @@ export async function main(ns) {
         log(`join: ${joinLine(invites, joined, deny)}`);
       }
     }
+
+    if (r) publishWant(r);
 
     // Every tick. The action body runs only on a DIFFERENCE: restarting a crime
     // resets its progress, and one longer than the tick would never complete.

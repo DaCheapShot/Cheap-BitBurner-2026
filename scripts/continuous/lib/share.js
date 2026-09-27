@@ -4,6 +4,7 @@ import {
   SHARE_RAM_FALLBACK,
   SHARE_WORKER,
   SHARE_HOLD_MARKER,
+  SLEEVE_FACTION_MARKER,
   effectiveShareFraction,
   shareHeld,
 } from "scripts/continuous/config";
@@ -271,9 +272,11 @@ export function topUpShare(ns, pool, ramPerThread, fraction, alive, aliveByHost 
 export function serviceShare(ns, pool, log, opts = {}) {
   const { ramPerThread = SHARE_RAM_FALLBACK, indent = "  " } = opts;
   // Through the hold, not the marker alone: sing/sing.js holds share off while
-  // the player is not doing faction work, the only work the bonus multiplies.
+  // the player is not doing faction work, the only work the bonus multiplies -
+  // unless a sleeve is, which the bonus multiplies just the same.
   const holdText = ns.read(SHARE_HOLD_MARKER);
-  const fraction = effectiveShareFraction(ns.read(SHARE_MARKER), holdText);
+  const sleevesText = ns.read(SLEEVE_FACTION_MARKER);
+  const fraction = effectiveShareFraction(ns.read(SHARE_MARKER), holdText, sleevesText);
 
   // Broadcast BEFORE anything is launched, and unconditionally - including when
   // share is off, so any worker still running sees the 0 and retires.
@@ -293,7 +296,7 @@ export function serviceShare(ns, pool, log, opts = {}) {
     // share calls. Nothing to do but report it, so RAM that looks busy for one
     // more rescan is not mistaken for a leak.
     log(
-      `${indent}share ${shareHeld(holdText) ? "HELD (no faction work)" : "OFF"} - ` +
+      `${indent}share ${shareHeld(holdText, sleevesText) ? "HELD (no faction work)" : "OFF"} - ` +
         `${census.threads}t still winding down, gone within 10s ` +
         `(${fmtRam(census.threads * ramPerThread)} returns to the pool)`,
     );
