@@ -465,6 +465,10 @@ export const tests = {
   "every sleeve body is priced, and none exceeds 6.60": () => {
     const want = {
       COUNT: 6.60, READ: 6.20, TASKS: 5.60, GYM: 5.60,
+      // The aug step: the shop and the purchase, 4.00 each; STATS is
+      // getAugmentationStats at its BN4 / SF4.3 price - x4 at SF4.2, x16 at SF4.1,
+      // where it cannot run and the pass buys cheapest-first instead.
+      AVAIL: 5.60, BUY: 5.60, STATS: 6.60,
       RECOVER: 5.60, SYNC: 5.60, CRIME: 5.60, FACTION: 5.60, COMPANY: 5.60,
     };
     const got = bodiesOf("sleeve/sleeve");

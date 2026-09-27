@@ -1,6 +1,7 @@
 import { CLOUD_BUDGET_FRACTION } from "./config.js";
 import { HACKNET_CASH_FRACTION, PAYBACK_SECONDS, HACKNET_EVERY, STUDY_LEVELS } from "./hacknet/config.js";
 import { EQUIP_BUDGET_FRACTION, TICK_EVERY, WAR_EVERY, ASCEND_EVERY, EQUIP_EVERY } from "./gang/config.js";
+import { SLEEVE_AUG_CASH, SLEEVE_AUG_MIN } from "./sleeve/config.js";
 import {
   HOME_RAM_BUDGET_FRACTION, HOME_CORES_BUDGET_FRACTION, PROG_BUDGET_FRACTION, SING_TICK_MS,
   AUTO_INSTALL, GRIND_GANG_KARMA, MIN_AUG_BATCH, IDLE_STUDY,
@@ -72,6 +73,8 @@ export const KNOBS = {
   // No karma knob: sleeves grind karma only while gang.enabled is on - karma
   // buys nothing but a gang, so a second switch could only disagree with it.
   "sleeve.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "sleeve task assignment, once a boot tick" },
+  "sleeve.augCash": { def: SLEEVE_AUG_CASH, min: 0, max: 1, doc: "fraction of cash one sleeve pass may spend on sleeve augs" },
+  "sleeve.augMin": { def: SLEEVE_AUG_MIN, min: 1, max: 50, int: true, doc: "augs a sleeve's batch must reach (each buy wipes its exp)" },
 
   "contracts.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },
 

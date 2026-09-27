@@ -47,6 +47,45 @@ export { GANG_KARMA_TARGET, MONEY_CRIMES } from "scripts/sing/config.js";
  */
 export const SHOCK_RECOVER_ABOVE = 100 / 3;
 
+// ------------------------------------------------------------------- augs ---
+
+/**
+ * Sleeve augs. Priced at the aug's flat base cost - no 1.9x queue ladder, and
+ * the player's prices do not move - and they last the whole BitNode: a player
+ * install leaves sleeves alone, only a new node resets them.
+ *
+ * THE CATCH: Sleeve.installAugmentation zeroes the sleeve's exp in every stat,
+ * on EVERY purchase. So a sleeve buys in batches - everything the budget covers
+ * in one pass, one wipe - and only when the batch reaches the live
+ * `sleeve.augMin`, or is all that is left for it.
+ *
+ * `sleeve.augCash` (live) is the fraction of cash one pass may spend across all
+ * sleeves, priced once per pass like hacknet's. sing's aug batch, cloud and the
+ * hacknet bid for the same wallet.
+ */
+export const SLEEVE_AUG_CASH = 0.10;
+export const SLEEVE_AUG_MIN = 3;
+
+/**
+ * What each aug multiplies, keyed by name, from getAugmentationStats. Fixed for
+ * the game, so read once and kept - this pass is a transient and forgets.
+ */
+export const AUG_STATS_FILE = "/data/sleeve-aug-stats.txt";
+
+/**
+ * The multipliers each rung's work uses: an aug raising any of them is tier 1
+ * for a sleeve on that rung. Keys of getAugmentationStats (Multipliers).
+ *   karma: Homicide's stats and the gym's exp, and the odds themselves
+ *   rep:   faction work's hacking/combat formula, company rep's charisma
+ *   money: the money crimes' odds and pay
+ */
+export const JOB_MULTS = {
+  karma: ["strength", "defense", "dexterity", "agility",
+    "strength_exp", "defense_exp", "dexterity_exp", "agility_exp", "crime_success"],
+  rep: ["faction_rep", "company_rep", "hacking", "hacking_exp", "charisma", "charisma_exp"],
+  money: ["crime_money", "crime_success", "dexterity", "agility"],
+};
+
 /**
  * Where karma sleeves train, and how fast. Powerhouse Gym: expMult 10
  * (LocationsMetadata.ts), and a gym class earns 1 exp per second per 1 of

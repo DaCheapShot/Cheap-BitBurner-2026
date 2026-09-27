@@ -49,6 +49,19 @@ function sleeveApi(list, { access = true, joined = [], gangFaction = null } = {}
         if (location !== "Powerhouse Gym" || list[i].city !== "Sector-12") return false;
         return set(i, { type: "CLASS", classType, location });
       },
+      // Sleeve.findPurchasableAugs / purchaseAugmentation: the shop minus what it
+      // owns; a buy needs shock 0 and zeroes the sleeve's exp.
+      getSleevePurchasableAugs: (i) => { guard(); return (list[i].shop ?? []).filter((a) => !(list[i].owned ?? []).includes(a.name)); },
+      purchaseSleeveAug: (i, name) => {
+        guard();
+        const s = list[i];
+        calls.push([i, { try: name }]);
+        if (s.shock > 0 || !(s.shop ?? []).some((a) => a.name === name) || (s.owned ?? []).includes(name)) return false;
+        (s.owned ??= []).push(name);
+        s.exp = Object.fromEntries(Object.keys(s.exp ?? {}).map((k) => [k, 0]));
+        calls.push([i, { buy: name }]);
+        return true;
+      },
       setToFactionWork: (i, factionName, factionWorkType) => {
         guard();
         if (!joined.includes(factionName)) throw `Cannot work for faction ${factionName} without being a member.`;
@@ -71,7 +84,7 @@ function sleeveApi(list, { access = true, joined = [], gangFaction = null } = {}
 
 /** One sleeve.js pass. `store` carries /data files between passes, as boot's ticks do. */
 async function pass(mods, list, {
-  store = {}, want = null, karma = 0, args = [], canGang = false, inGang = false, access = true, joined = [], gangFaction = null,
+  store = {}, want = null, karma = 0, args = [], money = 0, augStats = null, canGang = false, inGang = false, access = true, joined = [], gangFaction = null,
 } = {}) {
   const { api, calls } = sleeveApi(list, { access, joined, gangFaction });
   const { REP_WANT_MARKER } = mods["sleeve/config"];
@@ -82,7 +95,12 @@ async function pass(mods, list, {
     extra: {
       sleeve: api,
       gang: { inGang: () => inGang },
-      getPlayer: () => ({ karma, skills: skills(1) }),
+      getPlayer: () => ({ karma, skills: skills(1), money }),
+      // Without augStats, getAugmentationStats throws as it does without SF4.
+      singularity: { getAugmentationStats: (a) => {
+        if (!augStats) throw "getAugmentationStats: This singularity function requires Source-File 4 to run.";
+        return augStats[a] ?? {};
+      } },
       getResetInfo: () => ({ currentNode: canGang ? 2 : 10, ownedSF: new Map() }),
     },
   });
@@ -289,6 +307,65 @@ export const tests = {
     assert(list[0].task?.type === "CLASS" && list[0].task.classType === "str", `not at the gym: ${JSON.stringify(list[0].task)}`);
     const two = await pass(mods, list, { canGang: true, store: one.store });
     assert(two.calls.length === 0, `restarted the workout: ${JSON.stringify(two.calls)}`);
+  },
+
+  // ------------------------------------------------------------- the augs --
+
+  "planAugs: least-exp sleeve first, tier 1 by rung, cheapest within, one shared budget": async () => {
+    const { planAugs } = (await loadScripts())["sleeve/plan"];
+    const shop = [{ name: "Rep", cost: 50 }, { name: "Cheap", cost: 10 }, { name: "Combat", cost: 40 }];
+    const stats = { Rep: { faction_rep: 1.1 }, Cheap: {}, Combat: { strength: 1.1 } };
+    const sleeves = [{ exp: { strength: 5000 } }, { exp: { strength: 10 } }];
+    const actions = [{ rung: "rep" }, { rung: "karma" }];
+    // Budget for one sleeve's whole shop and no more: the fresh one gets it.
+    const p = planAugs({ sleeves, actions, avail: { 0: shop, 1: shop }, stats, budget: 100, minBatch: 1 });
+    assert(p.buys.length === 1 && p.buys[0].i === 1, `least exp first: ${JSON.stringify(p.buys)}`);
+    assert(p.buys[0].names[0] === "Combat", `a karma sleeve's tier 1 is combat: ${p.buys[0].names}`);
+    assert(p.buys[0].names.join() === "Combat,Cheap,Rep", `then cheapest: ${p.buys[0].names}`);
+    assert(p.waits.length === 1 && p.waits[0].i === 0 && p.waits[0].fit === 0, `the other waits: ${JSON.stringify(p.waits)}`);
+    const rep = planAugs({ sleeves: [sleeves[0]], actions: [actions[0]], avail: { 0: shop }, stats, budget: 1e9, minBatch: 1 });
+    assert(rep.buys[0].names[0] === "Rep", "a rep sleeve's tier 1 is faction_rep");
+    const blind = planAugs({ sleeves: [sleeves[0]], actions: [actions[0]], avail: { 0: shop }, stats: {}, budget: 1e9, minBatch: 1 });
+    assert(blind.buys[0].names.join() === "Cheap,Combat,Rep", "no stats: plain cheapest-first");
+  },
+
+  // Each buy wipes the sleeve's exp, so a batch too small to be worth a wipe
+  // waits - unless it is everything the sleeve has left to buy.
+  "planAugs: a batch under augMin waits, unless it is all that is left": async () => {
+    const { planAugs } = (await loadScripts())["sleeve/plan"];
+    const three = [{ name: "A", cost: 10 }, { name: "B", cost: 10 }, { name: "C", cost: 10 }];
+    const base = { sleeves: [{ exp: {} }], actions: [{ rung: "money" }], stats: {}, minBatch: 3 };
+    assert(planAugs({ ...base, avail: { 0: three }, budget: 20 }).buys.length === 0, "2 of 3 affordable, min 3: wait");
+    assert(planAugs({ ...base, avail: { 0: three }, budget: 30 }).buys[0].names.length === 3, "3 affordable: buy");
+    const tail = planAugs({ ...base, avail: { 0: three.slice(0, 2) }, budget: 20 });
+    assert(tail.buys[0]?.names.length === 2, `the last two go even under the minimum: ${JSON.stringify(tail)}`);
+  },
+
+  "a pass buys a batch for a shock-0 sleeve, caches the stats, and never for a shocked one": async () => {
+    const mods = await loadScripts();
+    const { STATUS_FILE, AUG_STATS_FILE } = mods["sleeve/config"];
+    const shop = [{ name: "A", cost: 1e6 }, { name: "B", cost: 1e6 }, { name: "C", cost: 1e6 }];
+    const list = [sleeve({ shock: 0, shop, exp: { strength: 999 } }), sleeve({ shock: 5, shop })];
+    const r = await pass(mods, list, { money: 1e8, augStats: { A: {}, B: {}, C: {} } });
+    assert(JSON.stringify(list[0].owned) === JSON.stringify(["A", "B", "C"]), `bought: ${list[0].owned} / ${r.store[STATUS_FILE]}`);
+    assert(list[0].exp.strength === 0, "the game wiped its exp - the status line says so");
+    assert(!r.calls.some(([i, c]) => i === 1 && c.try), "a shocked sleeve is never even tried");
+    assert(r.store[STATUS_FILE].includes("sleeve 0 bought 3") && r.store[STATUS_FILE].includes("exp wiped"), r.store[STATUS_FILE]);
+    assert(JSON.parse(r.store[AUG_STATS_FILE]).A, "stats are cached for the next pass");
+    // 10% of $10m is $1m: one aug fits, min 3 - the sleeve waits and says why.
+    const poor = [sleeve({ shock: 0, shop })];
+    const w = await pass(mods, poor, { money: 1e7 });
+    assert(!poor[0].owned, "under the batch minimum nothing is bought");
+    assert(w.store[STATUS_FILE].includes("waits - 1 of 3 affordable"), w.store[STATUS_FILE]);
+    assert(w.store[STATUS_FILE].includes("unrated"), "no SF4: said, and it still plans cheapest-first");
+  },
+
+  "sleeve.augCash 0 buys nothing": async () => {
+    const mods = await loadScripts();
+    const { SETTINGS_FILE } = mods["settings"];
+    const list = [sleeve({ shock: 0, shop: [{ name: "A", cost: 1 }] })];
+    await pass(mods, list, { money: 1e12, store: { [SETTINGS_FILE]: JSON.stringify({ "sleeve.augCash": 0 }) } });
+    assert(!list[0].owned, "bought with a zero budget");
   },
 
   // ----------------------------------------------------------- sing's side --

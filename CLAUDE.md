@@ -84,6 +84,7 @@ run scripts/hacknet/hacknet.js --dry-run     # plan a hacknet buy and print it, 
 run scripts/hacknet/hashes.js --dry-run      # plan a hash spend and print it, spend nothing
 run scripts/sleeve/sleeve.js            # one sleeve assignment pass (boot runs it every tick)
 cat /data/sleeves.txt                   # what each sleeve is doing, and why
+run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
 run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
 run scripts/expwatch.js 60              # hacking exp/s per 60 s window, in a tail
 run scripts/set.js                      # list live settings (budgets) and their defaults
@@ -342,7 +343,7 @@ editor's RAM panel when one moves.
 | `sleeve/config.js` | sleeve tunables, the crime table, `SHOCK_RECOVER_ABOVE` | 0 |
 | `sleeve/plan.js` | `assign` + the crime, sync and work-type math - pure | 0 |
 | `sleeve/sleeve.js` | entry: ONE assignment pass then exits; boot runs it every tick | 2.60 |
-| ↳ eight bodies | transients: count, read, tasks, recover, sync, crime, faction, company | 5.60–6.60 |
+| ↳ twelve bodies | transients: count, read, tasks, recover, sync, crime, gym, faction, company, avail, buy, stats | 5.60–6.60 |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
@@ -1114,8 +1115,8 @@ touches `w0r1d_d43m0n` - destroying the node stays the user's call.
 ### The sleeve subsystem (`scripts/sleeve/`)
 
 Sleeves (BitNode 10 / Source-File 10) doing four jobs, in the user's order: **gang karma > faction
-rep > company rep > money**. Phase 1 is task assignment only; sleeve augs and BN10's Covenant
-`purchaseSleeve` / `upgradeMemory` are later phases. Self-contained like `gang/`: it imports
+rep > company rep > money**, then buying their augs. BN10's Covenant `purchaseSleeve` /
+`upgradeMemory` is a later phase. Self-contained like `gang/`: it imports
 `scripts/rpc.js`, `scripts/settings.js` and 0 GB constants, and boot reads one path out of it.
 
 **A transient, the contracts shape.** Sleeve work runs on its own - a crime loops, faction work
@@ -1171,6 +1172,18 @@ the gym rate comes from `formulas.work.gymGains` when Formulas.exe is owned (x1 
 stat order spent 8 of 13 simulated training hours on Strength; best-stat-first trains 8 hours to
 ~70/70/52/52 and finishes one sleeve's run in ~48 h. A sleeve keeps its stat unless another pays
 1.25x more - switching is free, but each switch is a line in boot's log.
+
+**Sleeve augs are bought in batches, because every purchase wipes the sleeve.**
+`Sleeve.installAugmentation` zeroes the sleeve's exp in every stat, on each aug. Prices are the flat
+base cost (no 1.9x ladder, the player's prices do not move), and a player install leaves sleeves
+alone, so an aug lasts the node. After acting, each pass: shock-0 sleeves only (the game refuses
+otherwise), a budget of `sleeve.augCash` x cash priced once and shared, the sleeve with the
+**least total exp first** (its wipe costs least), and each buys everything the budget still covers
+in ONE batch - only when that reaches `sleeve.augMin` or is all it has left. Tier 1 is augs raising
+a multiplier the sleeve's rung uses (`JOB_MULTS`), cheapest first inside a tier. Stats come from
+`getAugmentationStats`, cached in `/data/sleeve-aug-stats.txt`; it is singularity, x16 RAM at
+SF4.1, so without SF4 or RAM every aug is tier 2 and the pass says "unrated, cheapest first". Karma
+sleeves never recover shock, so they buy only once work has worn it down.
 
 **Rep work comes from sing, one way.** `sing.js` publishes `REP_WANT_MARKER` each tick, on change.
 `repWant` walks the SAME candidate generator `chooseAction` does (`candidates()` in

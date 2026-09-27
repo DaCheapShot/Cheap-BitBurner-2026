@@ -1,5 +1,5 @@
-import { STATUS_FILE, REP_WANT_MARKER, SLEEVE_FACTION_MARKER } from "./config.js";
-import { assign, sameTask, parseWant, describeAction, describeTask } from "./plan.js";
+import { STATUS_FILE, REP_WANT_MARKER, SLEEVE_FACTION_MARKER, AUG_STATS_FILE } from "./config.js";
+import { assign, sameTask, parseWant, describeAction, describeTask, planAugs } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting } from "scripts/settings.js";
 
@@ -66,7 +66,7 @@ for (let i = 0; i < args[0]; i++) {
       dexterity: gains(s, "dex", "dexExp"), agility: gains(s, "agi", "agiExp") } : null });
 }
 const p = ns.getPlayer();
-return { sleeves, player: { karma: p.karma, skills: p.skills }, inGang: ns.gang.inGang() };
+return { sleeves, player: { karma: p.karma, skills: p.skills, money: p.money }, inGang: ns.gang.inGang() };
 `;
 
 /**
@@ -143,6 +143,36 @@ for (const [i, company] of JSON.parse(args[0])) {
 return failed;
 `;
 
+// The aug bodies. getSleevePurchasableAugs lists what a sleeve may buy NOW -
+// joined factions, the player's rep over each aug's requirement, and only augs
+// with a multiplier a sleeve can use - with the flat base price.
+
+const AVAIL = `
+const out = {};
+for (const i of JSON.parse(args[0])) out[i] = ns.sleeve.getSleevePurchasableAugs(i);
+return out;
+`;
+
+/** In plan order. The game refuses at shock > 0 or short cash; the rest go on. */
+const BUY = `
+const bought = [];
+for (const [i, name] of JSON.parse(args[0])) {
+  try { if (ns.sleeve.purchaseSleeveAug(i, name)) bought.push([i, name]); } catch (e) {}
+}
+return bought;
+`;
+
+/**
+ * What each aug multiplies, for the tiers. Singularity: 5.00 at SF4.3 or in
+ * BN4, x4 at SF4.2 and x16 at SF4.1 (SF4Cost), where it will not fit and the
+ * pass buys cheapest-first instead. Cached in AUG_STATS_FILE - stats are fixed.
+ */
+const STATS = `
+const out = {};
+for (const a of JSON.parse(args[0])) out[a] = ns.singularity.getAugmentationStats(a);
+return out;
+`;
+
 /**
  * In this order, and it matters: the game refuses a faction or company that
  * ANOTHER sleeve is working, so every sleeve leaving one must have left before
@@ -192,10 +222,11 @@ export async function main(ns) {
   // sleeves on one faction, which the game refuses.
   if (!tasks) return finish(ns.read(SLEEVE_FACTION_MARKER) === "faction");
 
+  const cfg = ns.read(SETTINGS_FILE);
   const actions = assign({
     sleeves: read.sleeves, tasks, player: read.player,
     want: parseWant(ns.read(REP_WANT_MARKER)),
-    karma: setting(ns.read(SETTINGS_FILE), "gang.enabled") === 1 && !ns.args.includes("--no-gang"),
+    karma: setting(cfg, "gang.enabled") === 1 && !ns.args.includes("--no-gang"),
     canGang: count.canGang, inGang: read.inGang,
   });
 
@@ -219,5 +250,48 @@ export async function main(ns) {
     if (failed.has(i)) lines.push(`sleeve ${i}: could not start ${describeAction(a)} - ${failed.get(i)}`);
     else lines.push(`sleeve ${i}: ${describeAction(a)} (${state}) - ${a.why}${was}`);
   });
+  await buyAugs(ns, cfg, read, actions, lines);
   finish(actions.some((a, i) => a.kind === "faction" && !failed.has(i)));
+}
+
+/**
+ * The aug step: shock-0 sleeves only (the game refuses otherwise), budget from
+ * the live sleeve.augCash, batches per planAugs. Its own try around every body:
+ * a failed aug read must not cost the pass its status lines.
+ */
+async function buyAugs(ns, cfg, read, actions, lines) {
+  const budget = setting(cfg, "sleeve.augCash") * (read.player.money ?? 0);
+  const ready = read.sleeves.map((s, i) => i).filter((i) => read.sleeves[i].shock <= 0);
+  if (!(budget > 0) || !ready.length) return;
+  const quiet = async (body, arg) => { try { return await rpc(ns, body, arg); } catch { return null; } };
+
+  const avail = await quiet(AVAIL, JSON.stringify(ready));
+  if (!avail) return void lines.push("augs: could not read what the sleeves may buy");
+  let stats = {};
+  try { stats = JSON.parse(ns.read(AUG_STATS_FILE) || "{}"); } catch { stats = {}; }
+  const unread = [...new Set(Object.values(avail).flat().map((a) => a.name))].filter((n) => !(n in stats));
+  if (unread.length) {
+    const got = await quiet(STATS, JSON.stringify(unread));
+    if (got) {
+      stats = { ...stats, ...got };
+      ns.write(AUG_STATS_FILE, JSON.stringify(stats), "w");
+    } else {
+      lines.push(`augs: ${unread.length} aug(s) unrated - no RAM or no SF4 for getAugmentationStats, cheapest first`);
+    }
+  }
+
+  const plan = planAugs({
+    sleeves: read.sleeves, actions, avail, stats, budget, minBatch: setting(cfg, "sleeve.augMin"),
+  });
+  for (const b of plan.buys) {
+    const got = (await quiet(BUY, JSON.stringify(b.names.map((n) => [b.i, n])))) ?? [];
+    const names = got.map(([, n]) => n);
+    lines.push(names.length
+      ? `augs: sleeve ${b.i} bought ${names.length} (${ns.format.number(b.cost, 2)}, exp wiped) - ${names.join(", ")}`
+      : `augs: sleeve ${b.i} - the game refused all ${b.names.length} planned`);
+  }
+  for (const w of plan.waits) {
+    lines.push(`augs: sleeve ${w.i} waits - ${w.fit} of ${w.of} affordable at ` +
+      `${ns.format.number(budget, 2)}, batch min ${setting(cfg, "sleeve.augMin")}`);
+  }
 }

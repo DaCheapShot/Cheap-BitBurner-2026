@@ -1,6 +1,6 @@
 import {
   SHOCK_RECOVER_ABOVE, MAX_SKILL_LEVEL, INT_CRIME_WEIGHT, SYNC_PER_SECOND, CRIMES,
-  GANG_KARMA_TARGET, MONEY_CRIMES, GYM, GYM_CITY, GYM_EXP_PER_SECOND, GYM_STATS,
+  GANG_KARMA_TARGET, MONEY_CRIMES, GYM, GYM_CITY, GYM_EXP_PER_SECOND, GYM_STATS, JOB_MULTS,
 } from "./config.js";
 
 /**
@@ -299,7 +299,7 @@ export function assign({ sleeves, tasks = [], player, want, karma, canGang, inGa
     sleeves.forEach((s, i) => {
       const best = bestCrime(s, "karma");
       const target = karmaSyncTarget(owed, sleeves.length, player.skills?.intelligence, best.rate);
-      if (s.sync < target) out[i] = { kind: "sync", why: `karma: sync ${s.sync.toFixed(1)} of ${target.toFixed(1)} before crime` };
+      if (s.sync < target) out[i] = { kind: "sync", rung: "karma", why: `karma: sync ${s.sync.toFixed(1)} of ${target.toFixed(1)} before crime` };
       else synced.push(i);
     });
     const gym = gymPlan(sleeves, synced, owed, tasks);
@@ -307,9 +307,9 @@ export function assign({ sleeves, tasks = [], player, want, karma, canGang, inGa
       const g = gym.get(i);
       const best = bestCrime(sleeves[i], "karma");
       out[i] = g
-        ? { kind: "gym", gym: GYM, stat: g.type, why: `karma: training ${g.stat} pays more than ${best.crime} ` +
+        ? { kind: "gym", rung: "karma", gym: GYM, stat: g.type, why: `karma: training ${g.stat} pays more than ${best.crime} ` +
             `at ${(crimeChance(sleeves[i], best.crime) * 100).toFixed(1)}% (shared with every sleeve)` }
-        : { kind: "crime", crime: best.crime,
+        : { kind: "crime", rung: "karma", crime: best.crime,
             why: `karma for a gang, ${best.crime} at ${(crimeChance(sleeves[i], best.crime) * 100).toFixed(1)}%` };
     }
     return out;
@@ -327,8 +327,8 @@ export function assign({ sleeves, tasks = [], player, want, karma, canGang, inGa
     : t.type === "COMPANY" && t.companyName === j.company);
   const fit = (s) => s.shock <= SHOCK_RECOVER_ABOVE;
   const place = (s, j) => (j.kind === "faction"
-    ? { kind: "faction", faction: j.faction, type: bestWorkType(s.skills, j.types), why: "faction rep sing wants" }
-    : { kind: "company", company: j.company, why: "company rep for its faction's invite" });
+    ? { kind: "faction", rung: "rep", faction: j.faction, type: bestWorkType(s.skills, j.types), why: "faction rep sing wants" }
+    : { kind: "company", rung: "rep", company: j.company, why: "company rep for its faction's invite" });
 
   // 1. Keep.
   const taken = new Set();
@@ -350,7 +350,7 @@ export function assign({ sleeves, tasks = [], player, want, karma, canGang, inGa
     if (out[i] || !open.length) continue;
     const j = open.shift();
     out[i] = {
-      kind: "recover",
+      kind: "recover", rung: "rep",
       why: `shock ${sleeves[i].shock.toFixed(1)} over ${SHOCK_RECOVER_ABOVE.toFixed(1)}, recovering for ` +
         `${j.kind === "faction" ? j.faction : j.company}`,
     };
@@ -358,7 +358,59 @@ export function assign({ sleeves, tasks = [], player, want, karma, canGang, inGa
 
   // 4. Money.
   sleeves.forEach((s, i) => {
-    if (!out[i]) out[i] = { kind: "crime", crime: bestCrime(s, "money").crime, why: "money - no rep work open" };
+    if (!out[i]) out[i] = { kind: "crime", rung: "money", crime: bestCrime(s, "money").crime, why: "money - no rep work open" };
   });
   return out;
+}
+
+/**
+ * Which sleeves buy which augs this pass. Every purchase zeroes that sleeve's
+ * exp (Sleeve.installAugmentation), so:
+ *
+ *   - the sleeve with the LEAST total exp goes first - its wipe costs least;
+ *   - each sleeve buys everything the budget still covers in one batch, and
+ *     only when that batch reaches `minBatch` or is all that is left for it -
+ *     otherwise it waits, and the budget passes to the next sleeve;
+ *   - tier 1 first: augs raising a multiplier the sleeve's current rung uses
+ *     (JOB_MULTS), then the rest; cheapest first inside a tier, so a wipe buys
+ *     as many as it can. An aug with no stats read is tier 2 - with no stats at
+ *     all that is plain cheapest-first.
+ *
+ * The budget is priced once for the pass and shared: re-pricing per sleeve
+ * would ratchet down as cash fell, and spend a different fraction depending on
+ * nothing but how many sleeves happened to buy.
+ *
+ * @param o.sleeves  READ's sleeves - exp is what ranks them
+ * @param o.actions  assign()'s, for each sleeve's rung
+ * @param o.avail    {sleeve: [{name, cost}]} from getSleevePurchasableAugs
+ * @param o.stats    {aug: Multipliers}, possibly partial or empty
+ * @param o.budget   money this pass may spend
+ * @param o.minBatch the live `sleeve.augMin`
+ * @returns {{ buys: {i, names, cost}[], waits: {i, fit, of}[] }}
+ */
+export function planAugs({ sleeves, actions, avail, stats = {}, budget, minBatch }) {
+  const spentExp = (i) => Object.values(sleeves[i].exp ?? {}).reduce((a, b) => a + b, 0);
+  const order = Object.keys(avail).map(Number).filter((i) => avail[i]?.length).sort((a, b) => spentExp(a) - spentExp(b));
+  let left = budget;
+  const buys = [];
+  const waits = [];
+  for (const i of order) {
+    const keys = JOB_MULTS[actions[i]?.rung] ?? [];
+    const tier = (a) => (keys.some((k) => (stats[a.name]?.[k] ?? 1) > 1) ? 0 : 1);
+    const ranked = [...avail[i]].sort((a, b) => tier(a) - tier(b) || a.cost - b.cost);
+    const names = [];
+    let cost = 0;
+    for (const a of ranked) {
+      if (cost + a.cost > left) continue;
+      names.push(a.name);
+      cost += a.cost;
+    }
+    if (names.length && (names.length >= minBatch || names.length === ranked.length)) {
+      buys.push({ i, names, cost });
+      left -= cost;
+    } else {
+      waits.push({ i, fit: names.length, of: ranked.length });
+    }
+  }
+  return { buys, waits };
 }
