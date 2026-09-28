@@ -1,5 +1,5 @@
+import { SETTINGS_FILE, shareFraction } from "scripts/settings";
 import {
-  SHARE_MARKER,
   SHARE_PORT,
   SHARE_RAM_FALLBACK,
   SHARE_WORKER,
@@ -7,6 +7,7 @@ import {
   SLEEVE_FACTION_MARKER,
   effectiveShareFraction,
   shareHeld,
+  shareBonusFor,
 } from "scripts/continuous/config";
 
 /**
@@ -44,7 +45,7 @@ import {
  *
  * ns.kill (0.50 GB). Share NEVER shrinks from this side. Lowering the fraction
  * or turning share off is the workers' own job - they peek the port between
- * 10 s share calls and retire themselves - which is what makes `sharemode.js
+ * 10 s share calls and retire themselves - which is what makes `share.enabled
  * off` work in under 10 s even with no manager running at all.
  */
 
@@ -58,9 +59,6 @@ import {
 const normPath = (p) => String(p).replace(/^\/+/, "");
 
 const fmtRam = (gb) => (gb >= 1024 ? `${(gb / 1024).toFixed(2)}TB` : `${Math.round(gb)}GB`);
-
-/** From src/NetworkShare/Share.ts: calculateShareBonus is 1 + ln(threads)/25. */
-const bonusFor = (threads) => (threads > 0 ? 1 + Math.log(threads) / 25 : 1);
 
 /**
  * How many share threads are already running on the network.
@@ -271,17 +269,17 @@ export function topUpShare(ns, pool, ramPerThread, fraction, alive, aliveByHost 
  */
 export function serviceShare(ns, pool, log, opts = {}) {
   const { ramPerThread = SHARE_RAM_FALLBACK, indent = "  " } = opts;
-  // Through the hold, not the marker alone: sing/sing.js holds share off while
+  // Through the hold, not the setting alone: sing/sing.js holds share off while
   // the player is not doing faction work, the only work the bonus multiplies -
   // unless a sleeve is, which the bonus multiplies just the same.
   const holdText = ns.read(SHARE_HOLD_MARKER);
   const sleevesText = ns.read(SLEEVE_FACTION_MARKER);
-  const fraction = effectiveShareFraction(ns.read(SHARE_MARKER), holdText, sleevesText);
+  const fraction = effectiveShareFraction(shareFraction(ns.read(SETTINGS_FILE)), holdText, sleevesText);
 
   // Broadcast BEFORE anything is launched, and unconditionally - including when
   // share is off, so any worker still running sees the 0 and retires.
   //
-  // The marker is read here, on home, and republished on a port because that is
+  // The setting is read here, on home, and republished on a port because that is
   // the only channel the fleet can hear. clear-then-write keeps exactly one
   // value in the queue for the workers to peek at.
   const gate = ns.getPortHandle(SHARE_PORT);
@@ -313,7 +311,7 @@ export function serviceShare(ns, pool, log, opts = {}) {
   log(
     `${indent}share ${total}t on ${hosts} host(s) ` +
       `(${fmtRam(held)}, ${((held / pool.usableRam) * 100).toFixed(1)}% of pool)  ` +
-      `worth x${bonusFor(total).toFixed(4)}` +
+      `worth x${shareBonusFor(total).toFixed(4)}` +
       (res.launched > 0 ? `  +${res.launched}t this rescan` : ""),
   );
 

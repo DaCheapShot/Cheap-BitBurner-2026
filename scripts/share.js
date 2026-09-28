@@ -13,8 +13,8 @@
  * empty port means off.
  *
  * IT MUST BE A PORT, NOT A FILE, and this script used to read a file. ns.read
- * resolves against the server the script is RUNNING on, so /data/share.txt - a
- * file that exists on home alone - read as "" on every purchased server, parsed
+ * resolves against the server the script is RUNNING on, so the share file - which
+ * existed on home alone - read as "" on every purchased server, parsed
  * as off, and this worker exited within milliseconds. exec had already returned
  * a pid, so the manager counted 66 hosts sharing while 65 had quit. Ports are
  * global to every host; files are not.

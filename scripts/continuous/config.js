@@ -13,7 +13,7 @@
  * and POOL_WAIT_* are defined twice on purpose even where they match today.
  *
  * CONTRACTS are imported, below. Those are values a second party reads without
- * knowing which batcher is up - sharemode.js and share.js, the shared worker
+ * knowing which batcher is up - share.js, the shared worker
  * files, the home the manager lives on - so a copy here was never free to
  * diverge. It was a second place to forget, pinned by a test.
  *
@@ -34,18 +34,17 @@
 /**
  * Defined once in scripts/config.js, because a second party reads them.
  *
- * The share protocol (marker, gate port, worker, fraction bounds and the parser)
- * is written by sharemode.js and peeked by share.js, neither of which knows
- * which batcher is running; a different port here left `sharemode.js on`
- * looking broken under continuous. The batch workers are the same files the
+ * The share protocol (gate port, worker, fraction bounds) is peeked by
+ * share.js, which does not know which batcher is running; a different port
+ * here once left share looking broken under continuous. The batch workers are the same files the
  * retired shotgun ran - the report port was always an argument - so boot's
  * orphan kill covers a stale shotgun's batches with the same list.
  */
 export {
   BATCH_OPS, OP_WORKER, HOME_RESERVE_GB, PORT_CAPACITY,
-  SHARE_MARKER, SHARE_PORT, SHARE_WORKER, SHARE_RAM_FALLBACK, SHARE_FRACTION,
-  SHARE_MAX_FRACTION, shareFractionFrom,
-  SHARE_HOLD_MARKER, SLEEVE_FACTION_MARKER, effectiveShareFraction, shareHeld,
+  SHARE_PORT, SHARE_WORKER, SHARE_RAM_FALLBACK, SHARE_FRACTION,
+  SHARE_MAX_FRACTION,
+  SHARE_HOLD_MARKER, SLEEVE_FACTION_MARKER, effectiveShareFraction, shareHeld, shareBonusFor,
   WORKER_FILES, WORKER_LIST, WORKER_RAM_FALLBACK,
   // Values a second party reads without knowing which batcher is up: the
   // hacknet reads the target list, and both pools skip hacknet servers.

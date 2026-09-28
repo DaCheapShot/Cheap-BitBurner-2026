@@ -215,7 +215,7 @@ function reachableHosts(ns) {
  * bounded fraction of the pool by design rather than a whole volley's worth;
  * and the incoming manager ADOPTS them through shareCensus instead of launching
  * duplicates. Killing them would drop the reputation bonus for a tick and buy
- * nothing. Turning share off is the marker's job - see scripts/sharemode.js.
+ * nothing. Turning share off is the `share.enabled` setting's job.
  */
 function killOrphanWorkers(ns, log) {
   const workers = new Set(WORKER_LIST.map(normPath));

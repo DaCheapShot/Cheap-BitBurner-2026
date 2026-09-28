@@ -178,9 +178,11 @@ return joined;
  * Map into {} - returned raw, the SF2 gate would read false forever with no
  * error - so it is collapsed to a boolean here, inside the transient.
  *
- * The `sing.grindKarma` setting rides along for a different reason: a body
- * reads it every run, so the flag is LIVE - `set.js sing.grindKarma on` and the
- * next tick obeys. Read resident, it would be frozen until sing restarted.
+ * The gang karma grind follows `gang.enabled`, read here for a different
+ * reason: a body reads it every run, so the switch is LIVE - `set.js
+ * gang.enabled off` and the next tick stops grinding. Read resident, it would
+ * be frozen until sing restarted. Karma buys nothing but a gang, so a sing
+ * knob of its own could only disagree with the gang switch.
  */
 const READ = `
 import { WORK_ORDER } from "/scripts/sing/config.js";
@@ -203,7 +205,7 @@ return {
   // call throws without it, so nothing graft-related runs unless this is true.
   canGraft: reset.currentNode === 10 || reset.ownedSF.has(10),
   inGang: ns.gang.inGang(),
-  grindKarma: setting(ns.read(SETTINGS_FILE), "sing.grindKarma") === 1,
+  grindKarma: setting(ns.read(SETTINGS_FILE), "gang.enabled") === 1,
   idleStudy: setting(ns.read(SETTINGS_FILE), "sing.idleStudy") === 1,
   rep, workTypes, companyRep,
 };

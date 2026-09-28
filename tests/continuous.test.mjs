@@ -4207,11 +4207,11 @@ export const tests = {
 
   // -------------------------------------------------------------- share -----
 
-  // scripts/sharemode.js writes the marker and broadcasts the port, and
+  // The manager broadcasts the port, and
   // scripts/share.js peeks that port to decide whether to keep running. Neither
   // knows which batcher is up, so the two configs are not two settings - they
   // are one protocol read from two places. A divergence here does not fail
-  // loudly: `sharemode.js on` would launch workers that read an empty port,
+  // loudly: share on would launch workers that read an empty port,
   // parse it as off, and exit a millisecond after a perfectly valid pid.
   //
   // So they are IMPORTED, not copied. This pins that a copy does not creep
@@ -4220,8 +4220,8 @@ export const tests = {
   "the share protocol and workers are scripts/config.js's, not a copy": async () => {
     const { sources } = await loadContinuous();
     const src = stripComments(sources.get("config.js"));
-    for (const key of ["SHARE_MARKER", "SHARE_PORT", "SHARE_WORKER", "SHARE_FRACTION",
-                       "SHARE_MAX_FRACTION", "SHARE_RAM_FALLBACK", "shareFractionFrom",
+    for (const key of ["SHARE_PORT", "SHARE_WORKER", "SHARE_FRACTION",
+                       "SHARE_MAX_FRACTION", "SHARE_RAM_FALLBACK", "shareBonusFor",
                        "WORKER_FILES", "WORKER_LIST", "WORKER_RAM_FALLBACK"]) {
       assert(!new RegExp(`export\\s+(const|function)\\s+${key}\\b`).test(src),
         `continuous/config.js defines ${key} locally - it must re-export scripts/config.js's`);
@@ -4343,21 +4343,22 @@ export const tests = {
 
   // Off must reach the fleet even when nothing is launched, and it can only get
   // there on the PORT: ns.read resolves against the server the CALLING script
-  // runs on, and /data/share.txt exists on home alone. A worker anywhere else
+  // runs on, and the settings file exists on home alone. A worker anywhere else
   // reading the file gets "" and stops dead - which is how the shotgun once
   // counted 66 hosts sharing while 65 had already quit.
   "the fraction is published on the port even when share is off": async () => {
     const { ns, pool, mods } = await makePool({ home: 1024 });
     const { serviceShare } = mods["lib/share"];
-    const { SHARE_PORT, SHARE_MARKER } = mods["config"];
+    const { SHARE_PORT } = mods["config"];
+    const S = "/data/settings.txt";
 
-    ns._files[SHARE_MARKER] = "off";
+    ns._files[S] = '{"share.enabled":0}';
     const off = serviceShare(ns, pool, () => {});
     assert(off === null, "share off with nothing running should say nothing");
     assert(Number(ns.getPortHandle(SHARE_PORT).peek()) === 0,
       "off must still be broadcast, or running workers never hear it");
 
-    ns._files[SHARE_MARKER] = "0.25";
+    ns._files[S] = '{"share.enabled":1,"share.fraction":0.25}';
     ns._files["/scripts/share.js"] = "x";
     serviceShare(ns, pool, () => {});
     assert(Number(ns.getPortHandle(SHARE_PORT).peek()) === 0.25,
@@ -4366,18 +4367,19 @@ export const tests = {
 
   // sing/sing.js holds share off while the player is not doing faction work -
   // the only work the bonus multiplies. The hold must reach the fleet exactly as
-  // "off" does, while the user's own fraction in the marker survives untouched.
-  "a sing hold turns share off without touching the marker": async () => {
+  // "off" does, while the user's own setting survives untouched.
+  "a sing hold turns share off without touching the setting": async () => {
     const { ns, pool, mods } = await makePool({ home: 1024 });
     const { serviceShare } = mods["lib/share"];
-    const { SHARE_PORT, SHARE_MARKER, SHARE_HOLD_MARKER } = mods["config"];
-    ns._files[SHARE_MARKER] = "0.25";
+    const { SHARE_PORT, SHARE_HOLD_MARKER } = mods["config"];
+    const S = "/data/settings.txt", on = '{"share.enabled":1,"share.fraction":0.25}';
+    ns._files[S] = on;
     ns._files["/scripts/share.js"] = "x";
 
     ns._files[SHARE_HOLD_MARKER] = "hold";
     assert(serviceShare(ns, pool, () => {}) === null, "a hold with nothing running should launch nothing");
     assert(Number(ns.getPortHandle(SHARE_PORT).peek()) === 0, "the hold must reach the port as 0");
-    assert(ns._files[SHARE_MARKER] === "0.25", "the user's fraction must survive the hold");
+    assert(ns._files[S] === on, "the user's setting must survive the hold");
 
     ns._files[SHARE_HOLD_MARKER] = "";
     serviceShare(ns, pool, () => {});

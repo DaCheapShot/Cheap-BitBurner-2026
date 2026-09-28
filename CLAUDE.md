@@ -70,10 +70,9 @@ run scripts/deploy.js                   # scp workers home -> every rooted host
 run scripts/continuous/servers.js       # per-target state + the steal the calculator would pick
 run scripts/connectme.js CSEC           # print the connect chain to a host
 run scripts/connectme.js --factions     # routes + backdoor status for faction servers
-run scripts/sharemode.js                # share status: power, pool, what each fraction buys
-run scripts/sharemode.js on             # trade SHARE_FRACTION of the pool for faction rep
-run scripts/sharemode.js off            # every share thread exits within 10s
-run scripts/sharemode.js 0.5            # retune live, no restart
+run scripts/set.js share.enabled on     # trade share.fraction of the pool for faction rep
+run scripts/set.js share.enabled off    # every share thread exits within a rescan + 10s
+run scripts/set.js share.fraction 0.5   # retune live, no restart (power: the Factions tab)
 run scripts/gang/gang.js --create "Slum Snakes"  # found the gang, once, by hand
 run scripts/gang/gang.js                # the gang supervisor (boot starts it too)
 run scripts/contracts/contracts.js      # one contract sweep (boot runs it every tick)
@@ -95,7 +94,7 @@ run scripts/set.js hacknet.cash 0.9     # override one, live - next sweep, no re
 run scripts/set.js hacknet.cash default # back to config.js's value
 run scripts/set.js gang.enabled off     # live switch: boot stops gang.js next tick
 run scripts/set.js boot.tick 30         # cadences: boot.tick, sing.tick, hacknet.every, gang.*Every
-run scripts/set.js sing.autoInstall off # sing: autoInstall, grindKarma, idleStudy, minAugBatch, graft, graftCash
+run scripts/set.js sing.autoInstall off # sing: autoInstall, idleStudy, minAugBatch, graft, graftCash
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -319,7 +318,6 @@ editor's RAM panel when one moves.
 | `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
 | `deploy.js` | scp workers home → every rooted host | 2.50 |
 | `share.js` | one `ns.share()` loop | 4.00 **per thread** |
-| `sharemode.js` | the share toggle, on the manager's own `ServerPool` | 2.25 |
 | `continuous/lib/server.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
 | `continuous/manager.js` | entry: continuous core + `lib/math.js`, both backends | 11.55 || `gang/config.js` | gang tunables, paths, STAT_KEYS | 0 |
 | `gang/math.js` | the game's gain formulas + every gang decision | 0 |
@@ -414,17 +412,18 @@ curve is the whole reason share takes a capped fraction rather than "whatever is
 
 **Three pieces**, and the split is not arbitrary:
 
-- `sharemode.js` writes a **fraction** to `/data/share.txt` *and* publishes it on `SHARE_PORT`.
-  A fraction rather than an on/off flag so the amount is retunable from the terminal — putting it
-  in `config.js` would mean waiting on the filesync extension, the least reliable link here.
+- Two live settings, `share.enabled` (default off) and `share.fraction` (default
+  `SHARE_FRACTION`, capped at `SHARE_MAX_FRACTION`), set with `set.js` - `settings.js`
+  `shareFraction` turns them into one number. `sharemode.js`, its old toggle and status screen,
+  is gone: the Factions tab shows the share power.
 - `share.js` loops `while (Number(gate.peek()) > 0) await ns.share()`. `ns.share` resolves after
   10 s, so sharing continuously means looping — and that loop is also the **off switch**. Workers
-  peek the gate between calls and retire themselves, so `off` clears the network in under 10 s
-  with no `ns.kill` anywhere, and works even when no manager is running.
+  peek the gate between calls and retire themselves, so `off` clears the network within 10 s of
+  the manager's next rescan, with no `ns.kill` anywhere.
 
   **The setting reaches workers on a PORT, never a file.** `ns.read` resolves against the server
   the calling script runs on (`NetscriptFunctions.ts`: `const server = ctx.workerScript.getServer()`),
-  so a worker reading `/data/share.txt` — which exists on home alone — gets `""`, treats it as
+  so a worker reading the share file - which existed on home alone - got `""`, treats it as
   off, and exits milliseconds after `exec` handed it a perfectly valid pid. The manager counted
   66 hosts sharing while 65 had already quit. Ports are shared across every host; files are not.
   `peek`, not `read`: `read` removes the message, so the first worker to wake would consume the
@@ -434,8 +433,8 @@ curve is the whole reason share takes a capped fraction rather than "whatever is
 
   Two claims that look alike and are not: `exec` returned non-zero, and the worker is still
   running. Only the second one matters, and only `shareCensus` measures it.
-- The manager's `serviceShare` (`continuous/lib/share.js`) tops the thread count up once per
-  rescan, **before the RAM budget is computed** — so the RAM share took is simply gone from what
+- The manager's `serviceShare` (`continuous/lib/share.js`) reads the settings, publishes the
+  fraction on `SHARE_PORT`, and tops the thread count up once per rescan, **before the RAM budget is computed** — so the RAM share took is simply gone from what
   the calculator sees. The top-up is idempotent.
 
 `shareCensus` reads `ns.ps` per host and is what makes a manager restart safe: share workers
@@ -475,10 +474,10 @@ a live save with `bad 0` and 10–11 ms of jitter against a 100 ms spacer.
 `scripts/`, and nothing else:
 
 - `continuous/config.js` re-exports the contracts from `scripts/config.js` — the share protocol,
-  the worker paths, `HOME_RESERVE_GB`, `PORT_CAPACITY`. Values a second party (`sharemode.js`,
-  `share.js`, `boot.js`, the hacknet) reads. **Tuning stays local** to `continuous/config.js`.
+  the worker paths, `HOME_RESERVE_GB`, `PORT_CAPACITY`. Values a second party (`share.js`,
+  `boot.js`, the hacknet) reads. **Tuning stays local** to `continuous/config.js`.
 - **The batch workers** `scripts/{hack,grow,weaken}.js`, taking the report port as an argument.
-- `scripts/rpc.js` may be imported from here, and `sharemode.js` imports `lib/server.js`.
+- `scripts/rpc.js` and `scripts/settings.js` may be imported from here.
 
 It keeps its own deploy (a bought server never fires `deploy.js`'s trigger) and its own report
 port (3, not 1 — a killed shotgun leaves reports in flight for a whole window, and on a shared
@@ -571,8 +570,7 @@ one target holds a short wave, the next takes the crumbs, the first releases, th
 Repairs are serviced before never-streamed targets — a stopped stream is a target already
 admitted that earns nothing until it is back on baseline.
 
-**Share works here too**, through `lib/share.js` — the same marker, the same port 2, the same
-`sharemode.js`. Every rule in it is one the retired shotgun learned expensively: proportional
+**Share works here too**, through `lib/share.js` — the `share.*` settings and port 2. Every rule in it is one the retired shotgun learned expensively: proportional
 placement, both passes planned before anything execs,
 `noFile` and `refused` kept apart, and nothing routed through `pool.allocate` (a reservation is
 released at cycle end and a share worker is not, so the same bytes would be subtracted twice).
@@ -935,11 +933,12 @@ The sleeve pass adds a fourth process (2.60 + a 6.60 body) for about a second a 
 it and the contract sweep one after the other, so the two never overlap; the same one-WARN failure
 covers the rare tick where it lands on a gang equip and a sing CRIME.
 
-**The gang grind is opt-in, and LIVE.** `GRIND_GANG_KARMA` defaults off: -54000 karma is ~18000
-successful homicides, ~15 hours even at 100% success, that earn no rep anywhere. The gym goes with
-it - Homicide's success and the crime factions' combat bars are all the combat stats serve here.
-The flag is the live `sing.grindKarma` setting (default `GRIND_GANG_KARMA`), read inside the READ
-body, not by `plan.js`, so `set.js sing.grindKarma on` takes effect next tick, while anything the resident process imports (the cadences,
+**The gang grind follows `gang.enabled`, and is LIVE.** -54000 karma is ~18000 successful
+homicides, ~15 hours even at 100% success, ahead of all rep work, while SF2 is owned and no gang
+exists. The gym goes with it - Homicide's success and the crime factions' combat bars are all the
+combat stats serve here. There is no sing knob of its own: karma buys nothing but a gang, so one
+could only disagree with the gang switch (the sleeves follow the same one). It is read inside the
+READ body, not by `plan.js`, so `set.js gang.enabled off` takes effect next tick, while anything the resident process imports (the cadences,
 `WORK_ORDER`) is frozen until sing restarts. The tick is 20 s and every cadence is counted in
 ticks, sized so upgrade and join run each minute and programs and promotions every two - change
 the tick and re-derive them.
@@ -1055,8 +1054,8 @@ cannot be split, runs once per graft, and only where home is long past 32 GB.
 `src/PersonObjects/formulas/reputation.ts` and nowhere else - company work never reads it - so
 share during the gym, crime or company work is batcher RAM spent on nothing. `sing.js` writes
 `SHARE_HOLD_MARKER` on each change: `"hold"`, or `""` while faction work runs. The manager reads
-share through `effectiveShareFraction(marker, hold)` in `scripts/config.js`, and the user's
-fraction in `/data/share.txt` survives it. A missing or
+share through `effectiveShareFraction(fraction, hold)` in `scripts/config.js`, and the user's
+`share.*` settings survive it. A missing or
 empty hold file is no hold, so without sing share behaves exactly as before - and the two ways
 sing can stop while holding both release it: a parked `sing.js` clears it, and so does
 `boot.js --no-sing`.
@@ -1064,7 +1063,7 @@ sing can stop while holding both release it: a parked `sing.js` clears it, and s
 **Sleeves release the hold too.** A sleeve's faction rep is `calculateFactionRep` - the same three
 formulas, share bonus included - so a player at crime while a sleeve works a faction still wants
 share. `sleeve.js` writes `SLEEVE_FACTION_MARKER` (`"faction"` or `""`), and share is held only when
-sing holds it AND no sleeve works a faction: `effectiveShareFraction(marker, hold, sleeves)`. A
+sing holds it AND no sleeve works a faction: `effectiveShareFraction(fraction, hold, sleeves)`. A
 sleeve never turns share ON - only the user's fraction does.
 
 Every invite outside the chosen city group is accepted: only the city factions have enemies in
@@ -1130,7 +1129,7 @@ contract sweep and waits it out (an install destroys every unsolved contract), t
 fraction 1, then CORES, take the cash the install would reset. SWEEP is split from INSTALL - together 7.70 - and
 its body imports `CONTRACTS_SERVICE` from `contracts/config.js`, the one cross-subtree import in
 sing/, 0 GB and billed to the transient. `sing.autoInstall` (default `AUTO_INSTALL`) is read inside SWEEP,
-so it is LIVE like `sing.grindKarma`: off, the queue waits for a hand install. `sing.minAugBatch`
+so it is LIVE like the karma grind: off, the queue waits for a hand install. `sing.minAugBatch`
 (default `MIN_AUG_BATCH`) is read once per aug pass and passed to `planAugBuys` as `minBatch`. A sweep over rpc's 10 s times out, and
 the install waits for the next pass rather than kill the sweep mid-attempt.
 
@@ -1304,7 +1303,7 @@ and sing's aug batch wants all of it.
 **A refused sweep names the NEAREST rung and its payback against the bar**, because the budget
 figures alone read as "cannot afford" and the refusal is never about affordability. In BitNode 4
 `HacknetNodeMoney` is 0.05, so a fresh node earns $0.075/s and the $500 level rung pays back in
-1h51m against the 1h bar — the sweep is right to refuse it beside $1.12q of cash, and the old log
+1h51m against what was then a 1h bar — the sweep is right to refuse it beside $1.12q of cash, and the old log
 said only "nothing left inside the payback threshold", which reads as the opposite. Production of
 exactly 0 (BitNode 8 sets that multiplier to 0) ranks nothing at all and gets its own reason
 rather than blaming a threshold nothing was measured against.

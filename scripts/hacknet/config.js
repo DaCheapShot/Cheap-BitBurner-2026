@@ -29,7 +29,7 @@ export const HACKNET_EVERY = 2;
  * the batcher grows, so paybacks blow out on their own and the sweep stops
  * buying without anyone deciding it should.
  */
-export const PAYBACK_SECONDS = 3600;
+export const PAYBACK_SECONDS = 14400;
 
 /**
  * Share of cash one sweep may spend, priced once at the start of the sweep.
@@ -38,7 +38,7 @@ export const PAYBACK_SECONDS = 3600;
  * wants all of it at once. The server fleet is the batcher's growth path;
  * the hacknet is not.
  */
-export const HACKNET_CASH_FRACTION = 0.05;
+export const HACKNET_CASH_FRACTION = 0.25;
 
 /**
  * What a hash is worth in cash, and it is not a modelling choice.

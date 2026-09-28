@@ -9,34 +9,29 @@
 
 // ------------------------------------------------------------------ share ---
 
-/**
- * Written by scripts/sharemode.js, read by the manager and by every share
- * worker. Holds the FRACTION of the pool to devote to ns.share, not a bare
- * on/off flag, so the amount can be retuned from the terminal without editing
- * this file and waiting on filesync.
- *
- * The workers poll it between share calls, which is what makes "off" work with
- * no kill: see scripts/share.js.
+/*
+ * The share SETTING is two live knobs, `share.enabled` and `share.fraction`
+ * (scripts/settings.js, set with scripts/set.js), read by the manager each
+ * rescan. The workers poll the port below between share calls, which is what
+ * makes "off" work with no kill: see scripts/share.js.
  */
-export const SHARE_MARKER = "/data/share.txt";
 
 /**
  * Port the share fraction is BROADCAST on, for the workers to read.
  *
- * The marker above cannot do this job, and assuming it could cost a live run.
+ * The settings file cannot do this job, and assuming it could cost a live run.
  * ns.read resolves against the server the calling script runs on - from
  * NetscriptFunctions.ts, `const server = ctx.workerScript.getServer()` and then
- * `server.getContentFile(path)?.content ?? ""`. /data/share.txt exists on home
+ * `server.getContentFile(path)?.content ?? ""`. The share file then lived on home
  * alone, so a share worker anywhere else read "", parsed it as OFF, and exited
  * within milliseconds of starting. exec had returned a real pid, so the manager
  * counted 66 hosts sharing while 65 of them had already quit.
  *
  * Ports are shared across every host and cost 0 GB to read or write, which makes
  * them the only channel a worker on a purchased server can actually hear. The
- * file stays the PERSISTENT setting - it survives a restart and is read by the
- * manager and sharemode.js, both of which run on home - and the port is how that
- * setting reaches the fleet. Both writers publish it, so turning share off takes
- * effect within 10s instead of waiting for the manager's next rescan.
+ * settings file stays the PERSISTENT setting - it survives a restart and is read
+ * by the manager on home - and the port is how the manager hands it to the fleet
+ * each rescan, so `share.enabled off` clears the network within a rescan + 10s.
  *
  * Deliberately not a report port: those are drained with read(), which REMOVES
  * the message. A setting has to be peeked, and peek leaves it in place.
@@ -50,7 +45,7 @@ export const SHARE_WORKER = "/scripts/share.js";
 export const SHARE_RAM_FALLBACK = 4.00;
 
 /**
- * Fraction of the pool `sharemode.js on` asks for.
+ * Default of the live `share.fraction` knob: the pool share `share.enabled on` takes.
  *
  * ns.share's bonus is 1 + ln(shareThreads)/25 (src/NetworkShare/Share.ts), so
  * every DOUBLING of share RAM is worth a flat ln(2)/25 = 2.77 percentage points,
@@ -71,7 +66,7 @@ export const SHARE_RAM_FALLBACK = 4.00;
 export const SHARE_FRACTION = 0.25;
 
 /**
- * Hard clamp on the share fraction, whatever the marker says.
+ * Hard clamp on the share fraction: the `share.fraction` knob's max.
  *
  * Not decoration. Share workers are launched before the pool is built and are
  * never released, so at 100% the prep gate finds zero placeable threads, waits
@@ -84,19 +79,9 @@ export const SHARE_FRACTION = 0.25;
 export const SHARE_MAX_FRACTION = 0.90;
 
 /**
- * Parse SHARE_MARKER's contents into a fraction in [0, SHARE_MAX_FRACTION].
- *
- * Anything unparseable reads as OFF rather than as a default. A share worker
- * decides whether to keep running from this value, and a NaN would compare
- * false against every bound - so garbage in the marker must mean "stop", never
- * "carry on with some number I invented".
- *
- * Pure arithmetic, no ns calls - config.js must stay 0 GB.
- */
-/**
  * sing/sing.js writes "hold" here whenever the player is not doing FACTION work,
- * and "" when they are. A hold turns share off without touching SHARE_MARKER,
- * so the fraction the user chose with sharemode.js survives and comes back the
+ * and "" when they are. A hold turns share off without touching the settings,
+ * so the fraction the user chose with set.js survives and comes back the
  * moment faction work resumes.
  *
  * Faction work ONLY, and that is the game's rule, not a preference: the share
@@ -137,12 +122,11 @@ export const REP_WANT_MARKER = "/data/rep-want.txt";
 export const SLEEVE_FACTION_MARKER = "/data/share-sleeves.txt";
 
 /**
- * The share fraction actually in force: SHARE_MARKER's, unless sing holds it.
- * The manager and sharemode.js both read share through this, so they cannot
- * disagree about a hold. Pure, like everything in this file.
+ * The share fraction actually in force: the setting's (settings.js
+ * shareFraction), unless sing holds it. Pure, like everything in this file.
  */
-export function effectiveShareFraction(markerText, holdText, sleevesText = "") {
-  return shareHeld(holdText, sleevesText) ? 0 : shareFractionFrom(markerText);
+export function effectiveShareFraction(fraction, holdText, sleevesText = "") {
+  return shareHeld(holdText, sleevesText) ? 0 : fraction;
 }
 
 /**
@@ -153,15 +137,6 @@ export function shareHeld(holdText, sleevesText = "") {
   return String(holdText ?? "").trim() === "hold" && String(sleevesText ?? "").trim() !== "faction";
 }
 
-export function shareFractionFrom(text) {
-  const word = String(text ?? "").trim().split("\n")[0].trim().toLowerCase();
-  if (word === "" || word === "off" || word === "false") return 0;
-  if (word === "on" || word === "true") return SHARE_FRACTION;
-  const n = Number(word);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.min(n, SHARE_MAX_FRACTION);
-}
-
 /**
  * The reputation multiplier `threads` share threads are worth.
  *
@@ -169,8 +144,8 @@ export function shareFractionFrom(text) {
  * an UNDERESTIMATE of what the game will actually give: the game scales threads
  * by an intelligence bonus and by getCoreBonus (1 + (cores-1)/16, and only home
  * has more than one core) before taking the log. Neither is knowable from here
- * without paying for getPlayer and getServer, so anything reporting the real
- * figure reads ns.getSharePower() instead and this stays the floor.
+ * without paying for getPlayer and getServer, so this stays the floor - the
+ * Factions tab shows the real figure.
  */
 export function shareBonusFor(threads) {
   return threads >= 1 ? 1 + Math.log(threads) / 25 : 1;
@@ -351,7 +326,7 @@ export const CLOUD_BUDGET_FRACTION = 0.10;
  * stale list has hashes bought for a server nobody is hitting, and hash
  * upgrades do not refund.
  *
- * Missing or empty means "spend nothing", never a default - the share.txt rule.
+ * Missing or empty means "spend nothing", never a default.
  * A wrong target is silent and compounding, so the failure has to be the inert
  * one.
  */

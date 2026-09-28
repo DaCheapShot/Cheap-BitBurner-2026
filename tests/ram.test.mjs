@@ -263,14 +263,6 @@ export const tests = {
     }
   },
 
-  // A hand-run toggle. It builds the continuous manager's own ServerPool, which
-  // buys the guarantee that the pool it reports is the pool the manager divides.
-  // 4.20 while it borrowed the shotgun's prepper.js for the same job.
-  "sharemode.js costs 2.25 GB": () => {
-    const ram = ramOf("sharemode");
-    assert(Math.abs(ram - 2.25) < 0.011, `expected 2.25 GB, got ${ram.toFixed(2)}`);
-  },
-
   // Bitburner resolves imports on the server a script STARTS on, and
   // RamCalculations.ts returns ImportError when one is missing - so exec returns
   // a bare 0, indistinguishable from the script itself being absent.
@@ -600,7 +592,7 @@ export const tests = {
 
     const seen = new Set();
     for (const entry of ["boot", "cloud", "deploy",
-                         "root", "sharemode", "connectme",
+                         "root", "connectme",
                          "continuous/manager", "continuous/servers",
                          "gang/gang", "contracts/contracts", "sing/sing", "sleeve/sleeve"]) {
       for (const mod of closure(entry)) seen.add(mod);
@@ -636,7 +628,7 @@ export const tests = {
       travel: 4, getTask: 4, getSleeve: 4 };
     const entries = new Set();
     for (const e of ["boot", "cloud", "deploy",
-                     "root", "sharemode", "connectme",
+                     "root", "connectme",
                      "continuous/manager", "continuous/servers",
                      "gang/gang", "contracts/contracts", "sing/sing",
                      "hacknet/hacknet", "hacknet/hashes", "sleeve/sleeve"]) {

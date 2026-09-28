@@ -269,7 +269,7 @@ export function chooseCityGroup(joined, augsOf, owned, priority = {}) {
  * @param o.group      chooseCityGroup's pick
  * @param o.targets    {faction: rep}, tier 2 - 0 means nothing left there;
  *                     absent means unread, which counts as wanted
- * @param o.grindKarma GRIND_GANG_KARMA, as READ returned it
+ * @param o.grindKarma gang.enabled, as READ returned it
  */
 export function chooseTravel(player, { group, targets = {}, grindKarma = false }) {
   const want = (f) => !player.factions.includes(f) && targets[f] !== 0;
@@ -389,7 +389,7 @@ export function chooseAction(player, state) {
     return { kind: "gym", gym: TRAIN_GYM, stat: low[0][1] };
   }
 
-  // 2. Karma for a gang, only when asked for (GRIND_GANG_KARMA, ~15 hours) and
+  // 2. Karma for a gang, only while gang.enabled is on (~15 hours) and
   //    only with SF2 - without it there is no gang in BN4 to found.
   if (state.grindKarma && state.hasSF2 && !state.inGang && player.karma > GANG_KARMA_TARGET) {
     return { kind: "crime", crime: CRIME_TYPE };
