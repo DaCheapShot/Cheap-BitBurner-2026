@@ -5,6 +5,7 @@ import {
   MIN_AUG_BATCH, NFG, AUG_PRICE_MULT, NFG_LEVEL_MULT, AUG_SKIP_FACTIONS,
   DONATE_MONEY_PER_REP, RED_PILL, MONEY_CRIMES,
   STUDY_COURSE, UNIVERSITIES, STUDY_MIN_MONEY,
+  PRIORITY_MULTS, ENTROPY, CONGRUITY,
 } from "./config.js";
 
 /**
@@ -372,6 +373,10 @@ export function repWant(player, state) {
  * @returns       { kind: "gym"|"crime"|"faction"|"company"|"idle", ... }
  */
 export function chooseAction(player, state) {
+  // 0. Congruity Implant, the moment entropy is there to clear and cash covers
+  //    it - the user's rule: every hour under entropy is every multiplier down.
+  if (state.congruity) return { kind: "graft", aug: CONGRUITY, price: state.congruity.price };
+
   // 1. Gym, lowest stat first - only for the gang grind, which is the only
   //    thing here the combat stats serve (Homicide's success, and the combat
   //    bars on the crime factions' invites). And only where the gym is:
@@ -400,6 +405,10 @@ export function chooseAction(player, state) {
     : [[null, state.targets]];
   let donatable = null;
   for (const [tier, targets] of tiers) {
+    // A graft goes after tier-1 work and before tier 2 - the user's rule. It
+    // only picks augs no joined faction's rep reaches, so it never replaces a
+    // purchase; it replaces the grind.
+    if (tier === 2 && state.graft) return { kind: "graft", ...state.graft };
     const w = walk(player, state, targets);
     const tag = tier ? { tier } : {};
     if (w.action) return { ...w.action, ...tag };
@@ -490,5 +499,54 @@ export function sameAsCurrent(work, action) {
       work.factionWorkType === action.type;
   }
   if (action.kind === "company") return work.type === "COMPANY" && work.companyName === action.company;
+  if (action.kind === "graft") return work.type === "GRAFTING" && work.augmentation === action.aug;
   return false;
+}
+
+/**
+ * What one graft does to the tier-1 multipliers: the aug's own product over
+ * PRIORITY_MULTS, times the ENTROPY it costs on each of them. Above 1 is net
+ * positive - the product must beat 0.98^-8 = 1.175. Per-graft, not cumulative:
+ * earlier entropy is already paid and hits every later aug the same.
+ *
+ * @param mults {mult: value} - getAugmentationStats, any subset
+ */
+export function graftGain(mults) {
+  return PRIORITY_MULTS.reduce((g, k) => g * (mults[k] ?? 1) * ENTROPY, 1);
+}
+
+/**
+ * Every aug worth grafting, best gain first: rated, net positive, not owned or
+ * queued, prerequisites owned, and NOT buyable instead - no joined faction
+ * selling it has the rep (or takes a donation), since buying costs no entropy.
+ * Price is left to chooseGraft: it is a separate read, made only for these.
+ *
+ * @param o.mults     {aug: PRIORITY_MULTS subset}   from AUG_STATS
+ * @param o.owned     owned.all - installed and queued
+ * @param o.prereqs   {aug: string[]}
+ * @param o.augsOf    {faction: aug[]}
+ * @param o.info      {aug: {rep}}                   AUG_INFO
+ * @param o.rep       {faction: rep}
+ * @param o.factions  joined factions
+ * @param o.donatable (faction) => bool
+ */
+export function graftCandidates({ mults, owned, prereqs, augsOf, info, rep, factions, donatable = () => false }) {
+  const buyable = (a) => factions.some((f) => (augsOf[f] ?? []).includes(a) &&
+    (donatable(f) || (rep[f] ?? 0) >= (info[a]?.rep ?? Infinity)));
+  return Object.entries(mults)
+    .map(([aug, m]) => ({ aug, gain: graftGain(m) }))
+    .filter(({ aug, gain }) => gain > 1 && aug !== CONGRUITY && !owned.includes(aug) &&
+      (prereqs[aug] ?? []).every((p) => owned.includes(p)) && !buyable(aug))
+    .sort((a, b) => b.gain - a.gain);
+}
+
+/**
+ * The best candidate whose price is known and at most `frac` of cash, as
+ * { aug, gain, price }; else null, with `over` the best one priced out - the
+ * log names it, so "nothing grafted" says why.
+ */
+export function chooseGraft(candidates, price, cash, frac) {
+  const priced = candidates.filter((c) => price[c.aug] > 0);
+  const pick = priced.find((c) => price[c.aug] <= cash * frac);
+  return pick ? { ...pick, price: price[pick.aug] } : { over: priced[0] && { ...priced[0], price: price[priced[0].aug] } };
 }

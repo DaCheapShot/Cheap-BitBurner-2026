@@ -80,6 +80,9 @@ const COST = {
   b1tflum3: 16, destroyW0r1dD43m0n: 32, getCurrentWork: 0.5, getUnlockedAchievements: 5,
   // Top-level, not ns.singularity, but only the singularity bodies reach for it.
   hasTorRouter: 0.05,
+  // ns.grafting - flat, NOT SF4Cost-scaled. waitForOngoingGrafting is 0.
+  getAugmentationGraftPrice: 3.75, getAugmentationGraftTime: 3.75, getGraftableAugmentations: 5,
+  graftAugmentation: 7.5, waitForOngoingGrafting: 0,
   // probe is this fork's ns.dnet.probe.
   probe: 0.2, disableLog: 0,
   // ns.hacknet, every entry priced off RamCostConstants.Hacknet = 0.5 - the
@@ -401,7 +404,7 @@ export const tests = {
   // Every body is pinned, not just the max. Without this nothing notices a body
   // re-fattening until a fresh home refuses to run it - a runtime ns.run -> 0,
   // logged once as a WARN, and the subsystem quietly doing nothing.
-  "every sing body is priced, and none exceeds CRIME's 6.60": () => {
+  "every sing body is priced, and none but GRAFT exceeds CRIME's 6.60": () => {
     const want = {
       UPGRADE: 6.25, TOR: 3.65,
       // upgradeHomeCores 3.00 + its cost 1.50 + getServerMoneyAvailable 0.10;
@@ -429,14 +432,20 @@ export const tests = {
       // The backdoor read: scan + getServer + ps + three 0.05 reads. The install
       // itself is backdoor.js, a real file - it is fire-and-forget, see below.
       BACKDOORS: 4.15,
+      // getAugmentationGraftPrice alone, once per aug per process.
+      GRAFT_PRICE: 5.35,
+      // graftAugmentation alone is 7.50 - the one body allowed over the ceiling:
+      // it cannot be split, runs once per graft, and only in BN10 / SF10.
+      GRAFT: 9.10,
     };
+    const OVER = ["GRAFT"];
     const got = bodiesOf("sing/sing");
     assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),
       `sing.js bodies ${Object.keys(got)} - every body must be pinned here`);
     for (const [name, gb] of Object.entries(want)) {
       assert(Math.abs(got[name] - gb) < 0.011,
         `${name} body: expected ${gb.toFixed(2)} GB, got ${got[name].toFixed(2)}`);
-      assert(got[name] <= 6.60 + 0.001,
+      assert(OVER.includes(name) || got[name] <= 6.60 + 0.001,
         `${name} body is ${got[name].toFixed(2)} GB - split it under CRIME's 6.60`);
     }
   },

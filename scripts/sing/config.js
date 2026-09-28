@@ -400,3 +400,34 @@ export const CITY_INVITE_MONEY = {
 };
 /** Unfocused work earns CONSTANTS.BaseFocusBonus = 0.8 without the Neuroreceptor implant. */
 export const WORK_FOCUS = true;
+
+// ---------------------------------------------------------------- grafting ---
+
+/**
+ * Grafting (BitNode 10 / Source-File 10) installs an aug with no faction and no
+ * rep, for GraftableAugmentation.cost = baseCost x 3 (no 1.9x queue ladder) and
+ * player time - the fork halves GraftableAugmentation.time, ~50 min for a
+ * two-multiplier aug. It applies at once and survives installs. The price:
+ * every graft multiplies EVERY player multiplier by CONSTANTS.EntropyEffect,
+ * stacking (EntropyAccumulation.ts), until the BitNode ends.
+ *
+ * graftAugmentation throws anywhere but New Tokyo. Money is taken at the START,
+ * and any other work call - or an install, whose prestigeAugmentation calls
+ * finishWork(true) - cancels the graft and keeps the money. So sing starts
+ * nothing and installs nothing while GRAFTING runs, hand-started ones included.
+ */
+export const GRAFT_CITY = "New Tokyo";
+export const ENTROPY = 0.98;
+/**
+ * Graft-only (factions: []), $150t. applyAugmentation sets entropy to 0 and
+ * GraftingWork.finish never adds it again - grafted the moment entropy is above
+ * 0 and cash covers it, ahead of all work (the user's rule).
+ */
+export const CONGRUITY = "violet Congruity Implant";
+/** Default of the live `sing.graft` switch. */
+export const GRAFT = true;
+/**
+ * Default of the live `sing.graftCash`: the most of cash one graft may cost.
+ * The aug batch bids for the same wallet; Congruity ignores this.
+ */
+export const GRAFT_CASH = 0.5;

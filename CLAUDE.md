@@ -94,7 +94,7 @@ run scripts/set.js hacknet.cash 0.9     # override one, live - next sweep, no re
 run scripts/set.js hacknet.cash default # back to config.js's value
 run scripts/set.js gang.enabled off     # live switch: boot stops gang.js next tick
 run scripts/set.js boot.tick 30         # cadences: boot.tick, sing.tick, hacknet.every, gang.*Every
-run scripts/set.js sing.autoInstall off # sing: autoInstall, grindKarma, idleStudy, minAugBatch
+run scripts/set.js sing.autoInstall off # sing: autoInstall, grindKarma, idleStudy, minAugBatch, graft, graftCash
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -336,7 +336,7 @@ editor's RAM panel when one moves.
 | `sing/config.js` | singularity tunables, `SING_SERVICE`, `WORK_ORDER`, `CITY_GROUPS` | 0 |
 | `sing/plan.js` | `chooseAction` + `sameAsCurrent` — every decision, pure | 0 |
 | `sing/sing.js` | entry: resident supervisor; every singularity call is an rpc body | 2.60 |
-| ↳ twenty-nine bodies | transients: read, upgrade, cores, tor, progs, invites, join, travel, apply, gym, crime, study, faction, company, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors | 2.35–6.60 |
+| ↳ thirty-one bodies | transients: read, upgrade, cores, tor, progs, invites, join, travel, apply, gym, crime, study, faction, company, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors, graft price; graft (9.10, the one over the ceiling) | 2.35–9.10 |
 | `sing/backdoor.js` | one fire-and-forget backdoor; many run at once | 5.60 each |
 | `hacknet/config.js` | hacknet tunables, the two service paths, the hash price | 0 |
 | `hacknet/math.js` | cost ladders, gain ratios, both plans - pure | 0 |
@@ -890,7 +890,7 @@ split. Splitting *below* 6.60 lowers nothing and costs a round trip, which is wh
 and READ stay whole - READ sits exactly ON the ceiling since `getCompanyRep` joined it, so the
 next read it needs is a second body, not a bigger one. `tests/ram.test.mjs` prices every body
 through `bodiesOf()` - the only place a body is priced before the game does it - and pins all
-twenty-nine.
+thirty-one - all but GRAFT at or under 6.60.
 
 The split also retired two calls outright: `gymWorkout`, `commitCrime` and `workForFaction` all
 take `focus` as an argument, so `setFocus` is never needed, and starting work finishes the
@@ -1020,6 +1020,30 @@ home. Copies start while home keeps `BACKDOOR_KEEP_GB` (6.60, sing's largest bod
 32 GB home usually means none until the first upgrade. This is the one place sing holds RAM outside
 the max-over-bodies rule, bounded by that keep. A failed copy leaves its server unbackdoored and the
 next pass retries; once nothing is left the pass stops for the life of the process.
+
+**Grafting (BN10 / SF10) buys an aug with money and player time instead of rep - and every
+graft costs 2% of EVERY multiplier.** From the fork's source: price `baseCost * 3`
+(`GraftableAugmentation.cost` - no rep, no 1.9x queue ladder), time halved in this fork (~50 min
+for a two-multiplier aug), applied at once and kept through installs. On finish `entropy += 1` and
+every player mult is x`0.98^entropy` (`EntropyAccumulation.ts`) until the BitNode ends.
+`violet Congruity Implant` is graft-only ($150t); `applyAugmentation` zeroes entropy and no graft
+adds it again. READ carries `canGraft` (`currentNode === 10 || ownedSF.has(10)`, the game's
+`canAccessBitNodeFeature(10)`), and nothing graft-related runs without it.
+
+The user's policy, all in `plan.js`: **Congruity first**, the moment entropy is above 0 and cash
+covers it, ahead of all work. Otherwise a graft takes the slot **after tier-1 rep work and before
+tier 2**, and only for an aug that is net positive - `graftGain`, its product over
+`PRIORITY_MULTS` times 0.98 on each of those eight, must beat 1 (the aug's product beats 1.175) -
+and that **no joined faction can sell now** by rep or donation (buying costs no entropy), at most
+`sing.graftCash` (0.5) of cash. `sing.graft` switches it off. `graftAugmentation` throws outside
+New Tokyo, so sing flies there one tick and grafts the next.
+
+**A running graft is never interrupted - it forfeits its money.** Any work call cancels it, and so
+does an install (`prestigeAugmentation` -> `finishWork(true)`). So while READ says `GRAFTING` sing
+starts no work and `install()` waits, whoever started the graft - before this, a graft started by
+hand was cancelled on sing's next tick. Travel is safe: `travelToCity` leaves `currentWork` alone.
+The GRAFT body is **9.10 GB** (`graftAugmentation` 7.50), the one body over the 6.60 ceiling: it
+cannot be split, runs once per graft, and only where home is long past 32 GB.
 
 **Share follows faction work.** The share bonus is in the three faction formulas in
 `src/PersonObjects/formulas/reputation.ts` and nowhere else - company work never reads it - so

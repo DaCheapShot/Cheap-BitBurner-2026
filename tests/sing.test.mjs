@@ -711,6 +711,120 @@ export const tests = {
     const co = { kind: "company", company: "Bachman & Associates", field: "Software" };
     assert(sameAsCurrent({ type: "COMPANY", companyName: "Bachman & Associates" }, co), "company");
     assert(!sameAsCurrent({ type: "COMPANY", companyName: "MegaCorp" }, co), "other company");
+    const g = { kind: "graft", aug: "Neural Accelerator" };
+    assert(sameAsCurrent({ type: "GRAFTING", augmentation: "Neural Accelerator" }, g), "graft");
+    assert(!sameAsCurrent({ type: "GRAFTING", augmentation: "BitWire" }, g), "other graft");
+  },
+
+  // ----------------------------------------------------------- grafting ----
+
+  // One graft costs ENTROPY on each of the 8 tier-1 multipliers, so the aug's
+  // own product over them must beat 0.98^-8 = 1.175.
+  "graftGain: net of entropy on the tier-1 multipliers, 1.175 is the bar": async () => {
+    const { graftGain } = (await loadScripts())["sing/plan"];
+    const near = (a, b) => Math.abs(a - b) < 1e-9;
+    assert(near(graftGain({}), 0.98 ** 8), `no mults: ${graftGain({})}`);
+    assert(graftGain({ hacking: 1.18 }) > 1 && graftGain({ hacking: 1.17 }) < 1, "the bar sits at 0.98^-8");
+    assert(graftGain({ hacking_speed: 1.03 }) < 1, "Synaptic Enhancement is not worth a graft");
+    assert(near(graftGain({ hacking: 1.3, hacking_money: 1.25, hacking_grow: 1.75 }), 1.3 * 1.25 * 1.75 * 0.98 ** 8),
+      "CSP Gen V");
+    assert(near(graftGain({ strength: 5, hacking: 1.1 }), 1.1 * 0.98 ** 8), "non-tier-1 mults do not count");
+  },
+
+  "graftCandidates: net positive, unowned, prereqs owned, and no joined faction's rep reaches it": async () => {
+    const { graftCandidates } = (await loadScripts())["sing/plan"];
+    const base = {
+      mults: {
+        Big: { hacking: 2 }, Mid: { hacking: 1.5 }, Weak: { hacking: 1.05 }, Owned: { hacking: 2 },
+        NeedsPre: { hacking: 3 }, Buyable: { hacking: 4 }, Donatable: { hacking: 4 },
+        "violet Congruity Implant": {},
+      },
+      owned: ["Owned"], prereqs: { NeedsPre: ["Missing"] },
+      augsOf: { CyberSec: ["Buyable", "Big"], NiteSec: ["Donatable"], BitRunners: ["Mid"] },
+      info: { Buyable: { rep: 100 }, Big: { rep: 1e6 }, Donatable: { rep: 1e9 }, Mid: { rep: 1 } },
+      rep: { CyberSec: 500, NiteSec: 0 }, factions: ["CyberSec", "NiteSec"],
+      donatable: (f) => f === "NiteSec",
+    };
+    const got = graftCandidates(base).map((c) => c.aug);
+    // Mid is sold only by BitRunners, which is not joined - rep 1 is still out of reach.
+    assert(JSON.stringify(got) === JSON.stringify(["Big", "Mid"]), `got ${got}`);
+    const withPre = graftCandidates({ ...base, owned: ["Owned", "Missing"] }).map((c) => c.aug);
+    assert(withPre[0] === "NeedsPre", `a prerequisite owned opens it: ${withPre}`);
+  },
+
+  "chooseGraft: the best candidate within the cash fraction, else names the best priced out": async () => {
+    const { chooseGraft } = (await loadScripts())["sing/plan"];
+    const cands = [{ aug: "Big", gain: 3 }, { aug: "Mid", gain: 2 }, { aug: "Bad", gain: 1.5 }];
+    const price = { Big: 100, Mid: 40, Bad: -1 };
+    assert(chooseGraft(cands, price, 1000, 0.5).aug === "Big", "Big fits");
+    const g = chooseGraft(cands, price, 100, 0.5);
+    assert(g.aug === "Mid" && g.price === 40, `Big over budget, Mid fits: ${JSON.stringify(g)}`);
+    const none = chooseGraft(cands, price, 10, 0.5);
+    assert(!none.aug && none.over.aug === "Big" && none.over.price === 100, JSON.stringify(none));
+    assert(!chooseGraft(cands, {}, 1e12, 1).aug, "unpriced is never picked");
+  },
+
+  "chooseAction: Congruity before everything, a graft after tier 1 and before tier 2": async () => {
+    const { chooseAction } = (await loadScripts())["sing/plan"];
+    const p = player({ factions: ["CyberSec"] });
+    const st = (o) => state({
+      workTypes: { CyberSec: ["hacking"] }, rep: { CyberSec: 0 },
+      targets: { CyberSec: 1e6 }, priorityTargets: { CyberSec: 1e6 }, ...o,
+    });
+    const graft = { aug: "Mid", gain: 2, price: 1 };
+    assert(chooseAction(p, st({ congruity: { price: 1 } })).aug === "violet Congruity Implant", "Congruity first");
+    assert(chooseAction(p, st({ graft })).kind === "faction", "tier-1 work beats a graft");
+    const t2 = chooseAction(p, st({ graft, priorityTargets: { CyberSec: 0 } }));
+    assert(t2.kind === "graft" && t2.aug === "Mid", `graft beats tier-2 work: ${JSON.stringify(t2)}`);
+  },
+
+  "a graft is flown to, started once, and never interrupted": async () => {
+    const mods = await loadScripts();
+    let cur = null;
+    const grafts = [];
+    const r = await driveSing(mods, {
+      ticks: 4, ownedSF: new Map([[10, 1]]),
+      // Under Sector-12's $15m invite, so no travel stop competes for the player.
+      p: player({ money: 10e6 }),
+      augs: { BitRunners: [{ name: "Neural Accelerator", rep: 1e5, price: 1,
+        stats: { hacking: 1.1, hacking_exp: 1.15, hacking_money: 1.2 } }] },
+      api: { getCurrentWork: () => cur },
+      extra: {
+        grafting: {
+          getAugmentationGraftPrice: (a) => (a === "Neural Accelerator" ? 1e6 : 150e12),
+          graftAugmentation: (a, focus) => {
+            grafts.push(a);
+            cur = { type: "GRAFTING", augmentation: a };
+            return true;
+          },
+        },
+      },
+    });
+    assert(r.calls.filter((c) => c === "travelToCity:New Tokyo").length === 1, `flew once: ${r.calls}`);
+    assert(JSON.stringify(grafts) === JSON.stringify(["Neural Accelerator"]), `grafted once: ${grafts}`);
+    assert(r.ns._log.some((l) => l.includes("grafting Neural Accelerator (running)")), r.ns._log.join("\n"));
+  },
+
+  // The bug this closed: a graft started by hand was cancelled by the next
+  // tick's work call, and the game keeps the money.
+  "a graft running is never interrupted, whoever started it": async () => {
+    const mods = await loadScripts();
+    const r = await driveSing(mods, {
+      ticks: 3, p: player({ factions: ["CyberSec"] }), augs: SELLS,
+      work: { type: "GRAFTING", augmentation: "BitWire" },
+    });
+    for (const s of ["workForFaction", "commitCrime", "universityCourse", "workForCompany", "gymWorkout"]) {
+      assert(r.count(s) === 0, `${s} would cancel the graft`);
+    }
+    assert(r.ns._log.filter((l) => l.includes("grafting BitWire (running)")).length === 3, r.ns._log.join("\n"));
+  },
+
+  "no Source-File 10: no graft call at all": async () => {
+    const mods = await loadScripts();
+    const r = await driveSing(mods, { ticks: 4, p: player({ money: 10e6 }), extra: { grafting: new Proxy({}, {
+      get: () => () => { throw new Error("You do not currently have access to the Grafting API"); },
+    }) } });
+    assert(!r.ns._log.some((l) => l.includes("graft")), r.ns._log.filter((l) => l.includes("graft")).join("\n"));
   },
 
   // ---------------------------------------------------------- invariants ----
@@ -945,7 +1059,7 @@ export const tests = {
     const body = bodies().AUG_STATS;
     const ns = makeNs({ extra: { singularity: { getAugmentationStats: () => ({}) } } });
     const r = await mods["rpc"].rpc(ns, body, "The Red Pill");
-    assert(r["The Red Pill"] === true, `Red Pill must rate tier 1 by name, got ${JSON.stringify(r)}`);
+    assert(r["The Red Pill"].tier === true, `Red Pill must rate tier 1 by name, got ${JSON.stringify(r)}`);
   },
 
   "the work line names the tier": async () => {
@@ -1052,6 +1166,20 @@ export const tests = {
     assert(r.calls.slice(0, i).filter((c) => c.startsWith("upgradeHomeRam:")).length >= 1, "home RAM before the install");
     assert(r.ns._log.some((l) => l.includes("[T] sing: installing 11 augs")), "announced on the terminal");
     assert(!r.ns._log.some((l) => l.includes("WARN")), `a body failed: ${r.ns._log.filter((l) => l.includes("WARN"))}`);
+  },
+
+  // prestigeAugmentation calls finishWork(true): an install mid-graft cancels
+  // it and the game keeps the money. The batch is still bought.
+  "no install while a graft runs": async () => {
+    const mods = await loadScripts();
+    const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
+    const r = await driveSing(mods, {
+      ticks: 1, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
+      work: { type: "GRAFTING", augmentation: "BitWire" },
+    });
+    assert(r.count("purchaseAugmentation") === 11, `batch still bought: ${r.count("purchaseAugmentation")}`);
+    assert(r.count("installAugmentations") === 0, "installed over a running graft");
+    assert(r.ns._log.some((l) => l.includes("install: waiting on the graft of BitWire")), r.ns._log.join("\n"));
   },
 
   // The user's rule: the Red Pill ends the node's aug cycles, so it is bought
