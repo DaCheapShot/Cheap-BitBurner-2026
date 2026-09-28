@@ -434,6 +434,8 @@ export const tests = {
       BACKDOORS: 4.15,
       // getAugmentationGraftPrice alone, once per aug per process.
       GRAFT_PRICE: 5.35,
+      // getGraftableAugmentations alone - the graft pool, once per process.
+      GRAFTABLE: 6.60,
       // graftAugmentation alone is 7.50 - the one body allowed over the ceiling:
       // it cannot be split, runs once per graft, and only in BN10 / SF10.
       GRAFT: 9.10,
@@ -447,6 +449,20 @@ export const tests = {
         `${name} body: expected ${gb.toFixed(2)} GB, got ${got[name].toFixed(2)}`);
       assert(OVER.includes(name) || got[name] <= 6.60 + 0.001,
         `${name} body is ${got[name].toFixed(2)} GB - split it under CRIME's 6.60`);
+    }
+  },
+
+  // The graft report: a hand-run one-shot, so its bodies are held to 11.60 (STATS),
+  // not sing's 6.60 - nothing else of sing's runs beside it for long.
+  "grafts.js holds no graft or singularity call, and its bodies are pinned": () => {
+    const ram = ramOf("sing/grafts");
+    assert(Math.abs(ram - 2.60) < 0.011, `expected 2.60 GB (1.60 + run 1.00), got ${ram.toFixed(2)}`);
+    const want = { LIST: 10.35, STATS: 11.60, OWNED: 7.10, SHOPS: 6.60, TIME: 5.35 };
+    const got = bodiesOf("sing/grafts");
+    assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),
+      `grafts.js bodies ${Object.keys(got)} - every body must be pinned here`);
+    for (const [name, gb] of Object.entries(want)) {
+      assert(Math.abs(got[name] - gb) < 0.011, `${name} body: expected ${gb.toFixed(2)} GB, got ${got[name].toFixed(2)}`);
     }
   },
 

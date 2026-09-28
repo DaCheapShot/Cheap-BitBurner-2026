@@ -731,7 +731,7 @@ export const tests = {
     assert(near(graftGain({ strength: 5, hacking: 1.1 }), 1.1 * 0.98 ** 8), "non-tier-1 mults do not count");
   },
 
-  "graftCandidates: net positive, unowned, prereqs owned, and no joined faction's rep reaches it": async () => {
+  "graftCandidates: net positive, unowned, prereqs owned, and sold by no joined faction": async () => {
     const { graftCandidates } = (await loadScripts())["sing/plan"];
     const base = {
       mults: {
@@ -740,13 +740,12 @@ export const tests = {
         "violet Congruity Implant": {},
       },
       owned: ["Owned"], prereqs: { NeedsPre: ["Missing"] },
-      augsOf: { CyberSec: ["Buyable", "Big"], NiteSec: ["Donatable"], BitRunners: ["Mid"] },
-      info: { Buyable: { rep: 100 }, Big: { rep: 1e6 }, Donatable: { rep: 1e9 }, Mid: { rep: 1 } },
-      rep: { CyberSec: 500, NiteSec: 0 }, factions: ["CyberSec", "NiteSec"],
-      donatable: (f) => f === "NiteSec",
+      // Joined factions' augs come from rep work, whatever the rep: Buyable at
+      // 0 rep is still CyberSec's. Big and Mid are sold only where not joined.
+      augsOf: { CyberSec: ["Buyable"], NiteSec: ["Donatable"], Illuminati: ["Big"], BitRunners: ["Mid"] },
+      factions: ["CyberSec", "NiteSec"],
     };
     const got = graftCandidates(base).map((c) => c.aug);
-    // Mid is sold only by BitRunners, which is not joined - rep 1 is still out of reach.
     assert(JSON.stringify(got) === JSON.stringify(["Big", "Mid"]), `got ${got}`);
     const withPre = graftCandidates({ ...base, owned: ["Owned", "Missing"] }).map((c) => c.aug);
     assert(withPre[0] === "NeedsPre", `a prerequisite owned opens it: ${withPre}`);
@@ -764,7 +763,7 @@ export const tests = {
     assert(!chooseGraft(cands, {}, 1e12, 1).aug, "unpriced is never picked");
   },
 
-  "chooseAction: Congruity before everything, a graft after tier 1 and before tier 2": async () => {
+  "chooseAction: Congruity before everything, a graft before any rep work": async () => {
     const { chooseAction } = (await loadScripts())["sing/plan"];
     const p = player({ factions: ["CyberSec"] });
     const st = (o) => state({
@@ -773,9 +772,9 @@ export const tests = {
     });
     const graft = { aug: "Mid", gain: 2, price: 1 };
     assert(chooseAction(p, st({ congruity: { price: 1 } })).aug === "violet Congruity Implant", "Congruity first");
-    assert(chooseAction(p, st({ graft })).kind === "faction", "tier-1 work beats a graft");
-    const t2 = chooseAction(p, st({ graft, priorityTargets: { CyberSec: 0 } }));
-    assert(t2.kind === "graft" && t2.aug === "Mid", `graft beats tier-2 work: ${JSON.stringify(t2)}`);
+    const g = chooseAction(p, st({ graft }));
+    assert(g.kind === "graft" && g.aug === "Mid", `a graft beats tier-1 work: ${JSON.stringify(g)}`);
+    assert(chooseAction(p, st()).kind === "faction", "no graft affordable: rep work");
   },
 
   "a graft is flown to, started once, and never interrupted": async () => {
@@ -791,6 +790,7 @@ export const tests = {
       api: { getCurrentWork: () => cur },
       extra: {
         grafting: {
+          getGraftableAugmentations: () => ["Neural Accelerator", "violet Congruity Implant"],
           getAugmentationGraftPrice: (a) => (a === "Neural Accelerator" ? 1e6 : 150e12),
           graftAugmentation: (a, focus) => {
             grafts.push(a);
@@ -805,6 +805,32 @@ export const tests = {
     assert(r.ns._log.some((l) => l.includes("grafting Neural Accelerator (running)")), r.ns._log.join("\n"));
   },
 
+  // The two reasons grafting never ran: its pool was only what WORK_ORDER's
+  // factions sell, and it waited behind tier-1 work, which never runs out.
+  "an aug only Illuminati sells is grafted ahead of tier-1 faction work": async () => {
+    const mods = await loadScripts();
+    let cur = null;
+    const grafts = [];
+    const r = await driveSing(mods, {
+      ticks: 3, ownedSF: new Map([[10, 1]]),
+      p: player({ money: 10e6, city: "New Tokyo", factions: ["CyberSec"] }),
+      augs: { CyberSec: [{ name: "BitWire", rep: 1e12, price: 1, stats: { hacking: 1.05 } }] },
+      api: {
+        getCurrentWork: () => cur,
+        getAugmentationStats: (a) => (a === "QLink" ? { hacking: 1.75, hacking_money: 4 } : { hacking: 1.05 }),
+      },
+      extra: {
+        grafting: {
+          getGraftableAugmentations: () => ["QLink", "BitWire"],
+          getAugmentationGraftPrice: () => 1e6,
+          graftAugmentation: (a) => { grafts.push(a); cur = { type: "GRAFTING", augmentation: a }; return true; },
+        },
+      },
+    });
+    assert(JSON.stringify(grafts) === JSON.stringify(["QLink"]), `grafted ${grafts}; log:\n${r.ns._log.join("\n")}`);
+    assert(r.count("workForFaction") === 0, "CyberSec's tier-1 work waits for the graft");
+  },
+
   // The bug this closed: a graft started by hand was cancelled by the next
   // tick's work call, and the game keeps the money.
   "a graft running is never interrupted, whoever started it": async () => {
@@ -817,6 +843,39 @@ export const tests = {
       assert(r.count(s) === 0, `${s} would cancel the graft`);
     }
     assert(r.ns._log.filter((l) => l.includes("grafting BitWire (running)")).length === 3, r.ns._log.join("\n"));
+  },
+
+  "grafts.js lists Congruity first, then sing's order, and says what it cut": async () => {
+    const mods = await loadScripts();
+    const stats = {
+      Big: { hacking: 2 }, Mid: { hacking: 1.5 }, Weak: { hacking: 1.05 }, Buyable: { hacking: 4 },
+      NeedsPre: { hacking: 3 }, "violet Congruity Implant": {},
+    };
+    const ns = makeNs({
+      extra: {
+        getPlayer: () => ({ money: 1e9, entropy: 2, factions: ["CyberSec"] }),
+        getFavorToDonate: () => 150,
+        grafting: {
+          getGraftableAugmentations: () => Object.keys(stats),
+          getAugmentationGraftPrice: (a) => ({ Big: 6e8, Mid: 1e8, "violet Congruity Implant": 150e12 })[a] ?? 1,
+          getAugmentationGraftTime: () => 3e6,
+        },
+        singularity: {
+          getAugmentationStats: (a) => stats[a],
+          getAugmentationPrereq: (a) => (a === "NeedsPre" ? ["Missing"] : []),
+          getOwnedAugmentations: () => [],
+          getAugmentationsFromFaction: () => ["Buyable"],
+        },
+      },
+    });
+    await mods["sing/grafts"].main(ns);
+    const out = ns._log.join("\n");
+    const at = (s) => out.indexOf(s);
+    assert(at("1. violet Congruity Implant") > 0 && at("2. Big") > at("1. violet") && at("3. Mid") > at("2. Big"), out);
+    assert(!out.includes("Weak") && !out.includes("Buyable ") && !out.includes(". NeedsPre"), out);
+    // Big is 60% of cash - over sing.graftCash's 50%; Mid fits.
+    assert(/Big.*over budget/.test(out) && /Mid.*affordable/.test(out), out);
+    assert(out.includes("4 above the 1.175 bar - of those, 1 wait on a prerequisite and 1 are sold by a joined faction"), out);
   },
 
   "no Source-File 10: no graft call at all": async () => {

@@ -42,6 +42,8 @@ const NESTED = [
   "sing/sing.js",
   // The fire-and-forget backdoor, a real file rather than a body: ns only in main().
   "sing/backdoor.js",
+  // The graft report, hand-run: every call in an rpc body, like sing.js.
+  "sing/grafts.js",
   // The hacknet subsystem. math.js is pure and holds every decision - the same
   // split as gang/math.js and contracts/solvers.js. The two entries hold ns
   // calls only inside main(), so Node can load and PARSE them.

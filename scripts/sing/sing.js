@@ -330,6 +330,14 @@ for (const a of args) {
 return out;
 `;
 
+/**
+ * Every graftable aug, 5.00 alone. The graft pool is this, not what WORK_ORDER's
+ * factions sell: Illuminati, The Covenant and the gang factions sell some of
+ * the strongest hacking augs and are never joined early, so grafting is the
+ * only way to them. Read once per process - owned ones are filtered after.
+ */
+const GRAFTABLE = `return ns.grafting.getGraftableAugmentations();`;
+
 /** In plan order - most expensive first - stopping at the first refusal. */
 const BUY = `
 const bought = [];
@@ -626,6 +634,7 @@ export async function main(ns) {
   // must never cancel.
   const augMults = {};
   const graftPrice = {};
+  let graftable = null;
   let graft = null;
   let congruity = null;
   let grafting = null;
@@ -713,14 +722,12 @@ export async function main(ns) {
 
   /**
    * Pick this pass's grafts: Congruity when entropy is up and cash covers it,
-   * and the best net-positive tier-1 aug no joined faction's rep reaches.
-   * chooseAction places them - Congruity first, the other before tier 2.
+   * and the best net-positive tier-1 aug no joined faction sells. chooseAction
+   * puts both ahead of all rep work.
    */
-  const graftPass = async (r, owned, info) => {
-    const st = { favor, favorNeed, workTypes: r.workTypes };
+  const graftPass = async (r, owned) => {
     const cands = graftCandidates({
-      mults: augMults, owned: owned.all, prereqs, augsOf, info, rep: r.rep, factions: r.player.factions,
-      donatable: (f) => canDonate(f, st),
+      mults: augMults, owned: owned.all, prereqs, augsOf, factions: r.player.factions,
     });
     const ask = [...cands.map((c) => c.aug), CONGRUITY].filter((a) => !(a in graftPrice) && !owned.all.includes(a));
     if (ask.length) Object.assign(graftPrice, (await call("graft price", GRAFT_PRICE, ...ask)) ?? {});
@@ -734,11 +741,11 @@ export async function main(ns) {
     const g = chooseGraft(cands, graftPrice, cash, frac);
     if (g.aug) graft = g;
     if (congruity) log(`graft: ${CONGRUITY} next (${money$(ns, cp)}) - clears entropy ${r.player.entropy}`);
-    else if (graft) log(`graft: ${g.aug} next (${money$(ns, g.price)}, x${ns.format.number(g.gain, 3)}) once tier-1 work is done`);
+    else if (graft) log(`graft: ${g.aug} next (${money$(ns, g.price)}, x${ns.format.number(g.gain, 3)})`);
     else if (g.over) {
       log(`graft: best is ${g.over.aug} at ${money$(ns, g.over.price)} - over ${ns.format.percent(frac, 0)} of ` +
         `${money$(ns, cash)} (sing.graftCash)`);
-    } else log("graft: nothing - every net-positive tier-1 aug is owned, buyable with rep, or waits on a prerequisite");
+    } else log("graft: nothing - every net-positive tier-1 aug is owned, sold by a joined faction, or waits on a prerequisite");
   };
 
   /**
@@ -758,9 +765,13 @@ export async function main(ns) {
     const unread = [...new Set([...r.player.factions, ...named])].filter((f) => !(f in augsOf));
     if (unread.length) Object.assign(augsOf, (await call("faction augs", FAC_AUGS, ...unread)) ?? {});
     const sold = [...new Set(Object.values(augsOf).flat())];
-    const noPrereqs = sold.filter((a) => a !== NFG && !(a in prereqs));
+    // Grafting rates the whole graftable list too - see GRAFTABLE.
+    const grafts = r.canGraft && setting(ns.read(SETTINGS_FILE), "sing.graft") === 1;
+    if (grafts && !graftable) graftable = await call("graftable", GRAFTABLE);
+    const pool = [...new Set([...sold, ...(grafts ? graftable ?? [] : [])])];
+    const noPrereqs = pool.filter((a) => a !== NFG && !(a in prereqs));
     if (noPrereqs.length) Object.assign(prereqs, (await call("prereqs", PREREQ, ...noPrereqs)) ?? {});
-    const unrated = sold.filter((a) => a !== NFG && !(a in priority));
+    const unrated = pool.filter((a) => a !== NFG && !(a in priority));
     if (unrated.length) {
       for (const [a, v] of Object.entries((await call("aug stats", AUG_STATS, ...unrated)) ?? {})) {
         priority[a] = v.tier;
@@ -809,7 +820,7 @@ export async function main(ns) {
     favorGain = short.length ? (await call("favor gain", FAVOR_GAIN, ...short)) ?? {} : {};
     const cash = r.player.money;
     graft = congruity = null;
-    if (r.canGraft && setting(ns.read(SETTINGS_FILE), "sing.graft") === 1) await graftPass(r, owned, info);
+    if (grafts) await graftPass(r, owned);
     const donate = await donateTerms(r);
     // Nothing left worth working, and an install would open some faction's rep
     // to money: install now rather than grind rep a donation will buy. Not while

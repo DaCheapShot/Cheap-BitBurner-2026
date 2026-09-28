@@ -404,11 +404,14 @@ export function chooseAction(player, state) {
     ? [[1, state.priorityTargets], [2, state.targets]]
     : [[null, state.targets]];
   let donatable = null;
+  // 3a. A graft, before any rep work - the user's rule. Tier-1 work practically
+  //     never runs out (ten 400k company grinds), so a graft queued behind it
+  //     never ran. It only picks augs no joined faction sells, so it never
+  //     replaces a purchase, and it applies NOW rather than at the next install.
+  //     Cash is the throttle: sing.graftCash, re-priced every aug pass.
+  if (state.graft) return { kind: "graft", ...state.graft };
+
   for (const [tier, targets] of tiers) {
-    // A graft goes after tier-1 work and before tier 2 - the user's rule. It
-    // only picks augs no joined faction's rep reaches, so it never replaces a
-    // purchase; it replaces the grind.
-    if (tier === 2 && state.graft) return { kind: "graft", ...state.graft };
     const w = walk(player, state, targets);
     const tag = tier ? { tier } : {};
     if (w.action) return { ...w.action, ...tag };
@@ -517,26 +520,24 @@ export function graftGain(mults) {
 
 /**
  * Every aug worth grafting, best gain first: rated, net positive, not owned or
- * queued, prerequisites owned, and NOT buyable instead - no joined faction
- * selling it has the rep (or takes a donation), since buying costs no entropy.
- * Price is left to chooseGraft: it is a separate read, made only for these.
+ * queued, prerequisites owned, and sold by NO joined faction - the user's rule.
+ * A joined faction's augs come from rep work and the batch, which cost no
+ * entropy; grafting is for the rest (Illuminati, The Covenant, gang factions,
+ * the other city groups, anything not joined yet). Price is left to
+ * chooseGraft: it is a separate read, made only for these.
  *
  * @param o.mults     {aug: PRIORITY_MULTS subset}   from AUG_STATS
  * @param o.owned     owned.all - installed and queued
  * @param o.prereqs   {aug: string[]}
  * @param o.augsOf    {faction: aug[]}
- * @param o.info      {aug: {rep}}                   AUG_INFO
- * @param o.rep       {faction: rep}
  * @param o.factions  joined factions
- * @param o.donatable (faction) => bool
  */
-export function graftCandidates({ mults, owned, prereqs, augsOf, info, rep, factions, donatable = () => false }) {
-  const buyable = (a) => factions.some((f) => (augsOf[f] ?? []).includes(a) &&
-    (donatable(f) || (rep[f] ?? 0) >= (info[a]?.rep ?? Infinity)));
+export function graftCandidates({ mults, owned, prereqs, augsOf, factions }) {
+  const joinedSells = (a) => factions.some((f) => (augsOf[f] ?? []).includes(a));
   return Object.entries(mults)
     .map(([aug, m]) => ({ aug, gain: graftGain(m) }))
     .filter(({ aug, gain }) => gain > 1 && aug !== CONGRUITY && !owned.includes(aug) &&
-      (prereqs[aug] ?? []).every((p) => owned.includes(p)) && !buyable(aug))
+      (prereqs[aug] ?? []).every((p) => owned.includes(p)) && !joinedSells(aug))
     .sort((a, b) => b.gain - a.gain);
 }
 

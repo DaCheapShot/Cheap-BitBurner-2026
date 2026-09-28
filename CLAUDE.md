@@ -78,6 +78,7 @@ run scripts/gang/gang.js --create "Slum Snakes"  # found the gang, once, by hand
 run scripts/gang/gang.js                # the gang supervisor (boot starts it too)
 run scripts/contracts/contracts.js      # one contract sweep (boot runs it every tick)
 run scripts/sing/sing.js                # the singularity supervisor (boot starts it too)
+run scripts/sing/grafts.js              # top 20 grafts in the order sing takes them (BN10/SF10)
 run scripts/contracts/contracts.js --dummy   # mint one contract of every type and solve it
 run scripts/contracts/contracts.js --forget  # clear the skip list, after fixing a solver
 run scripts/hacknet/hacknet.js --dry-run     # plan a hacknet buy and print it, buy nothing
@@ -336,8 +337,9 @@ editor's RAM panel when one moves.
 | `sing/config.js` | singularity tunables, `SING_SERVICE`, `WORK_ORDER`, `CITY_GROUPS` | 0 |
 | `sing/plan.js` | `chooseAction` + `sameAsCurrent` — every decision, pure | 0 |
 | `sing/sing.js` | entry: resident supervisor; every singularity call is an rpc body | 2.60 |
-| ↳ thirty-one bodies | transients: read, upgrade, cores, tor, progs, invites, join, travel, apply, gym, crime, study, faction, company, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors, graft price; graft (9.10, the one over the ceiling) | 2.35–9.10 |
+| ↳ thirty-two bodies | transients: read, upgrade, cores, tor, progs, invites, join, travel, apply, gym, crime, study, faction, company, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors, graft price, graftable; graft (9.10, the one over the ceiling) | 2.35–9.10 |
 | `sing/backdoor.js` | one fire-and-forget backdoor; many run at once | 5.60 each |
+| `sing/grafts.js` | hand-run: top grafts in sing's order; five rpc bodies, peak 11.60 | 2.60 |
 | `hacknet/config.js` | hacknet tunables, the two service paths, the hash price | 0 |
 | `hacknet/math.js` | cost ladders, gain ratios, both plans - pure | 0 |
 | `hacknet/hacknet.js` | entry: ONE money sweep then exits; boot runs it every other tick | 5.45 |
@@ -890,7 +892,7 @@ split. Splitting *below* 6.60 lowers nothing and costs a round trip, which is wh
 and READ stay whole - READ sits exactly ON the ceiling since `getCompanyRep` joined it, so the
 next read it needs is a second body, not a bigger one. `tests/ram.test.mjs` prices every body
 through `bodiesOf()` - the only place a body is priced before the game does it - and pins all
-thirty-one - all but GRAFT at or under 6.60.
+thirty-two - all but GRAFT at or under 6.60.
 
 The split also retired two calls outright: `gymWorkout`, `commitCrime` and `workForFaction` all
 take `focus` as an argument, so `setFocus` is never needed, and starting work finishes the
@@ -1031,11 +1033,15 @@ adds it again. READ carries `canGraft` (`currentNode === 10 || ownedSF.has(10)`,
 `canAccessBitNodeFeature(10)`), and nothing graft-related runs without it.
 
 The user's policy, all in `plan.js`: **Congruity first**, the moment entropy is above 0 and cash
-covers it, ahead of all work. Otherwise a graft takes the slot **after tier-1 rep work and before
-tier 2**, and only for an aug that is net positive - `graftGain`, its product over
-`PRIORITY_MULTS` times 0.98 on each of those eight, must beat 1 (the aug's product beats 1.175) -
-and that **no joined faction can sell now** by rep or donation (buying costs no entropy), at most
-`sing.graftCash` (0.5) of cash. `sing.graft` switches it off. `graftAugmentation` throws outside
+covers it. Then any other graft, **ahead of all rep work**, for an aug that is net positive -
+`graftGain`, its product over `PRIORITY_MULTS` times 0.98 on each of those eight, must beat 1
+(the aug's product beats 1.175) - and that **no joined faction sells** (their augs come from rep
+work and the batch, at no entropy). Cash is the throttle: at most `sing.graftCash` (0.5) of it.
+`sing.graft` switches it off. It first waited behind tier-1 work, which never runs out - ten 400k
+company grinds - so it would never have run. The pool is `getGraftableAugmentations` (GRAFTABLE,
+once per process), not what WORK_ORDER's factions sell: Illuminati, The Covenant and the gang
+factions carry some of the strongest hacking augs and grafting is the only early way to them.
+`run scripts/sing/grafts.js` prints the same list in the same order. `graftAugmentation` throws outside
 New Tokyo, so sing flies there one tick and grafts the next.
 
 **A running graft is never interrupted - it forfeits its money.** Any work call cancels it, and so
