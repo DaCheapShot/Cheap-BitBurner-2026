@@ -3,11 +3,12 @@ import {
   CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
-  STUDY_MARKER, REP_WANT_MARKER,
+  STUDY_MARKER, REP_WANT_MARKER, GRAFT_CITY, CONGRUITY,
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTargets, planAugBuys,
   canDonate, bankedFavor, installForFavor, donationPerRep, bestCrime, chooseCityGroup, studyAction, repWant,
+  graftCandidates, chooseGraft,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
@@ -198,6 +199,9 @@ return {
   player: p,
   work: ns.singularity.getCurrentWork(),
   hasSF2: reset.currentNode === 2 || reset.ownedSF.has(2),
+  // Player.canAccessGrafting: canAccessBitNodeFeature(10). Every ns.grafting
+  // call throws without it, so nothing graft-related runs unless this is true.
+  canGraft: reset.currentNode === 10 || reset.ownedSF.has(10),
   inGang: ns.gang.inGang(),
   grindKarma: setting(ns.read(SETTINGS_FILE), "sing.grindKarma") === 1,
   idleStudy: setting(ns.read(SETTINGS_FILE), "sing.idleStudy") === 1,
@@ -212,6 +216,14 @@ const CRIME = `return ns.singularity.commitCrime(args[0], args[1]);`;
 const FACTION = `return ns.singularity.workForFaction(args[0], args[1], args[2]);`;
 const COMPANY = `return ns.singularity.workForCompany(args[0], args[1]);`;
 const STUDY = `return ns.singularity.universityCourse(args[0], args[1], args[2]);`;
+/**
+ * graftAugmentation alone is 7.50, so this body is 9.10 - the ONE body over the
+ * 6.60 ceiling. Splitting cannot help, and it runs once per graft (~hourly),
+ * only where grafting exists (BN10 / SF10), long after home has outgrown 32 GB.
+ * Worst awaited overlap with gang and contracts goes 33.30 -> 35.80, whose
+ * failure is the usual one WARN and a retry next tick.
+ */
+const GRAFT = `return ns.grafting.graftAugmentation(args[0], args[1]);`;
 
 /**
  * The idle fallback's two reads, 5.00 GB each so split. What a crime pays and
@@ -286,7 +298,8 @@ return out;
 
 /**
  * Is each aug tier 1? A multiplier in PRIORITY_MULTS above 1, or named in
- * PRIORITY_AUGS. getAugmentationStats is 5.00 alone, so this is its own 6.60
+ * PRIORITY_AUGS. Returns { tier, mults } - the tier-1 multipliers too, which
+ * plan.js graftGain scores a graft on. getAugmentationStats is 5.00 alone, so this is its own 6.60
  * body; an aug's stats are fixed for the node, so each is rated once per
  * process - which also freezes the two lists until sing restarts.
  */
@@ -295,10 +308,35 @@ import { PRIORITY_MULTS, PRIORITY_AUGS } from "/scripts/sing/config.js";
 const out = {};
 for (const a of args) {
   const m = ns.singularity.getAugmentationStats(a);
-  out[a] = PRIORITY_AUGS.includes(a) || PRIORITY_MULTS.some((k) => m[k] > 1);
+  // The tier-1 multipliers ride along: graftGain scores a graft on them.
+  const mults = {};
+  for (const k of PRIORITY_MULTS) if (m[k] !== undefined && m[k] !== 1) mults[k] = m[k];
+  out[a] = { tier: PRIORITY_AUGS.includes(a) || PRIORITY_MULTS.some((k) => m[k] > 1), mults };
 }
 return out;
 `;
+
+/**
+ * Graft prices, 3.75 GB for the one call. Fixed for the node (baseCost x 3), so
+ * each aug is asked once per process. It THROWS for an aug that cannot be
+ * grafted (special, or already owned) - caught per aug as -1, so one bad name
+ * does not lose the rest, and -1 is never asked again.
+ */
+const GRAFT_PRICE = `
+const out = {};
+for (const a of args) {
+  try { out[a] = ns.grafting.getAugmentationGraftPrice(a); } catch { out[a] = -1; }
+}
+return out;
+`;
+
+/**
+ * Every graftable aug, 5.00 alone. The graft pool is this, not what WORK_ORDER's
+ * factions sell: Illuminati, The Covenant and the gang factions sell some of
+ * the strongest hacking augs and are never joined early, so grafting is the
+ * only way to them. Read once per process - owned ones are filtered after.
+ */
+const GRAFTABLE = `return ns.grafting.getGraftableAugmentations();`;
 
 /** In plan order - most expensive first - stopping at the first refusal. */
 const BUY = `
@@ -516,6 +554,10 @@ function describe(ns, a, r) {
   if (a.kind === "company") {
     return `company ${a.company} (${a.field}${tier}), company rep ${n2(ns, r.companyRep?.[a.company] ?? 0)}`;
   }
+  if (a.kind === "graft") {
+    return `graft ${a.aug} for ${money$(ns, a.price)}` +
+      (a.gain ? `, tier-1 multipliers x${ns.format.number(a.gain, 3)} net of entropy` : ` - clears entropy ${r.player.entropy}`);
+  }
   return "idle - no joined faction with work left under its rep target";
 }
 
@@ -525,6 +567,7 @@ function actionCall(a) {
   if (a.kind === "crime") return [CRIME, a.crime, WORK_FOCUS];
   if (a.kind === "company") return [COMPANY, a.company, WORK_FOCUS];
   if (a.kind === "study") return [STUDY, a.university, a.course, WORK_FOCUS];
+  if (a.kind === "graft") return [GRAFT, a.aug, WORK_FOCUS];
   return [FACTION, a.faction, a.type, WORK_FOCUS];
 }
 
@@ -585,6 +628,16 @@ export async function main(ns) {
   // the node, so rated once and kept like prereqs.
   let priorityTargets = null;
   const priority = {};
+  // Each rated aug's tier-1 multipliers (AUG_STATS), and each graft price
+  // asked - both fixed for the node. graft / congruity are this aug pass's
+  // picks for chooseAction; grafting is READ's running graft, which install
+  // must never cancel.
+  const augMults = {};
+  const graftPrice = {};
+  let graftable = null;
+  let graft = null;
+  let congruity = null;
+  let grafting = null;
   // This install's city faction group - re-chosen on every aug pass while
   // unsettled, then locked for the process (citySettled below). A joined city
   // faction always wins regardless: chooseCityGroup checks that before ever
@@ -629,6 +682,12 @@ export async function main(ns) {
    * first, with everything: the install resets money and keeps home RAM.
    */
   const install = async (queued) => {
+    // prestigeAugmentation calls finishWork(true): the graft is cancelled and
+    // its money kept. Every install path comes through here.
+    if (grafting) {
+      log(`install: waiting on the graft of ${grafting} - an install would cancel it and keep the money`);
+      return;
+    }
     const swept = await call("sweep", SWEEP);
     if (swept === null) return;
     if (swept < 0) {
@@ -662,6 +721,34 @@ export async function main(ns) {
   };
 
   /**
+   * Pick this pass's grafts: Congruity when entropy is up and cash covers it,
+   * and the best net-positive tier-1 aug no joined faction sells. chooseAction
+   * puts both ahead of all rep work.
+   */
+  const graftPass = async (r, owned) => {
+    const cands = graftCandidates({
+      mults: augMults, owned: owned.all, prereqs, augsOf, factions: r.player.factions,
+    });
+    const ask = [...cands.map((c) => c.aug), CONGRUITY].filter((a) => !(a in graftPrice) && !owned.all.includes(a));
+    if (ask.length) Object.assign(graftPrice, (await call("graft price", GRAFT_PRICE, ...ask)) ?? {});
+    const cash = r.player.money;
+    const cp = graftPrice[CONGRUITY];
+    if (r.player.entropy > 0 && !owned.all.includes(CONGRUITY) && cp > 0) {
+      if (cp <= cash) congruity = { price: cp };
+      else log(`graft: entropy ${r.player.entropy} - ${CONGRUITY} costs ${money$(ns, cp)}, cash ${money$(ns, cash)}`);
+    }
+    const frac = setting(ns.read(SETTINGS_FILE), "sing.graftCash");
+    const g = chooseGraft(cands, graftPrice, cash, frac);
+    if (g.aug) graft = g;
+    if (congruity) log(`graft: ${CONGRUITY} next (${money$(ns, cp)}) - clears entropy ${r.player.entropy}`);
+    else if (graft) log(`graft: ${g.aug} next (${money$(ns, g.price)}, x${ns.format.number(g.gain, 3)})`);
+    else if (g.over) {
+      log(`graft: best is ${g.over.aug} at ${money$(ns, g.over.price)} - over ${ns.format.percent(frac, 0)} of ` +
+        `${money$(ns, cash)} (sing.graftCash)`);
+    } else log("graft: nothing - every net-positive tier-1 aug is owned, sold by a joined faction, or waits on a prerequisite");
+  };
+
+  /**
    * Refresh the rep targets, buy a batch if one is due, and install once
    * MIN_AUG_BATCH are queued. Every read is its own body - see the aug bodies
    * above for why.
@@ -678,10 +765,19 @@ export async function main(ns) {
     const unread = [...new Set([...r.player.factions, ...named])].filter((f) => !(f in augsOf));
     if (unread.length) Object.assign(augsOf, (await call("faction augs", FAC_AUGS, ...unread)) ?? {});
     const sold = [...new Set(Object.values(augsOf).flat())];
-    const noPrereqs = sold.filter((a) => a !== NFG && !(a in prereqs));
+    // Grafting rates the whole graftable list too - see GRAFTABLE.
+    const grafts = r.canGraft && setting(ns.read(SETTINGS_FILE), "sing.graft") === 1;
+    if (grafts && !graftable) graftable = await call("graftable", GRAFTABLE);
+    const pool = [...new Set([...sold, ...(grafts ? graftable ?? [] : [])])];
+    const noPrereqs = pool.filter((a) => a !== NFG && !(a in prereqs));
     if (noPrereqs.length) Object.assign(prereqs, (await call("prereqs", PREREQ, ...noPrereqs)) ?? {});
-    const unrated = sold.filter((a) => a !== NFG && !(a in priority));
-    if (unrated.length) Object.assign(priority, (await call("aug stats", AUG_STATS, ...unrated)) ?? {});
+    const unrated = pool.filter((a) => a !== NFG && !(a in priority));
+    if (unrated.length) {
+      for (const [a, v] of Object.entries((await call("aug stats", AUG_STATS, ...unrated)) ?? {})) {
+        priority[a] = v.tier;
+        augMults[a] = v.mults;
+      }
+    }
     const unowned = sold.filter((a) => a === NFG || !owned.all.includes(a));
     const info = unowned.length ? await call("aug info", AUG_INFO, ...unowned) : {};
     if (!info) return;
@@ -723,6 +819,8 @@ export async function main(ns) {
     const short = r.player.factions.filter((f) => f in favor && favor[f] < favorNeed);
     favorGain = short.length ? (await call("favor gain", FAVOR_GAIN, ...short)) ?? {} : {};
     const cash = r.player.money;
+    graft = congruity = null;
+    if (grafts) await graftPass(r, owned);
     const donate = await donateTerms(r);
     // Nothing left worth working, and an install would open some faction's rep
     // to money: install now rather than grind rep a donation will buy. Not while
@@ -857,6 +955,8 @@ export async function main(ns) {
     // READ first: the aug pass plans against its money and rep, and gets the
     // cash before the home upgrade's 25% can take it.
     const r = await call("read", READ);
+    // Only a successful READ moves it: a failed one must not read as "no graft".
+    if (r) grafting = r.work?.type === "GRAFTING" ? r.work.augmentation : null;
     if (r && tick % AUGS_EVERY === 0) await augsPass(r);
 
     if (tick % UPGRADE_EVERY === 0) {
@@ -906,8 +1006,15 @@ export async function main(ns) {
     const city = r && chooseTravel(r.player, { group: cities(), targets, grindKarma: r.grindKarma });
     const flew = city ? await call("travel", TRAVEL, city) : false;
     if (city) log(`travel: ${flew ? "flew" : "could not fly"} to ${city}`);
-    if (r && !flew) {
-      const st = { ...r, targets, priorityTargets, favor, favorNeed, favorGain };
+    if (r && grafting) {
+      // A graft is never interrupted, whoever started it: any work call cancels
+      // it and the game keeps the money. Flying does not (travelToCity leaves
+      // currentWork alone), so the travel above may still run.
+      log(`work: grafting ${grafting} (running)`);
+      holdShare(false);
+      markStudy(false);
+    } else if (r && !flew) {
+      const st = { ...r, targets, priorityTargets, favor, favorNeed, favorGain, graft, congruity };
       let action = chooseAction(r.player, st);
       // Nothing to work - the first stretch after an install, before any
       // invite. Money beats idling: it is what TOR, the programs, the Tian Di
@@ -929,13 +1036,29 @@ export async function main(ns) {
         if (job) hired = true;
         log(`apply: ${job ? `now ${job} at ${action.company}` : action.employed ? "no promotion yet" : `not hired at ${action.company}`}`);
       }
+      // graftAugmentation throws anywhere but GRAFT_CITY: fly this tick, graft
+      // the next. The current work carries on meanwhile.
+      // ponytail: a pending city invite elsewhere can pull the player back
+      // (chooseTravel) - invites land in a tick or two; guard if a log shows it.
+      const away = action.kind === "graft" && r.player.city !== GRAFT_CITY;
+      if (away) {
+        const ok = await call("travel", TRAVEL, GRAFT_CITY);
+        log(`travel: ${ok ? "flew" : "could not fly"} to ${GRAFT_CITY} to ${what}`);
+      }
       let started = null;
-      if (sameAsCurrent(r.work, action)) {
+      if (away) {
+        // Logged above.
+      } else if (sameAsCurrent(r.work, action)) {
         log(`work: ${what}${action.kind === "idle" ? "" : " (running)"}`);
       } else if (hired) {
         const [body, ...args] = actionCall(action);
         started = Boolean(await call(action.kind, body, ...args));
         log(`work: ${started ? "started" : "could not start"} ${what}`);
+        if (started && action.kind === "graft") {
+          ns.tprint(`sing: ${what}`);
+          // Re-derived next aug pass; until then READ's GRAFTING guards the slot.
+          graft = congruity = null;
+        }
       }
       holdShare(started ? action.kind === "faction" : r.work?.type === "FACTION");
       markStudy(action.kind === "study" && (started || sameAsCurrent(r.work, action)));
