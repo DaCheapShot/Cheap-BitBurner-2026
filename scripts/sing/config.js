@@ -79,7 +79,7 @@ export const PROGS_WANTED = [
 
 /**
  * Train a combat stat at the gym while any is below this - ONLY while
- * GRIND_GANG_KARMA is on. Homicide's success and the combat bars on the crime
+ * grinding gang karma (gang.enabled on). Homicide's success and the combat bars on the crime
  * factions' invites are all these stats serve here; hacking and company work
  * never read them. A failed crime still grants exp, so a low floor is slow
  * crime, not a dead end.
@@ -93,17 +93,12 @@ export const TRAIN_GYM = "Powerhouse Gym";
 export const TRAIN_GYM_CITY = "Sector-12";
 
 /**
- * Grind Homicide toward a gang's karma requirement - and train at the gym for
- * it, which is the gym's only purpose here? OFF by default: -54000 is
- * about 18000 successful homicides, ~15 hours at 3 s each even at 100% success,
- * and every one of those hours is not spent on Tian Di Hui, Bachman or any
- * other rep. Turn it on when a gang is actually wanted - it still needs SF2.
- *
- * The DEFAULT of the live `sing.grindKarma` setting (scripts/set.js), which the
- * READ body reads each run, so a change takes effect on the next tick with no
- * restart. Crime work the flag started is replaced by the next job down, not stopped.
+ * Homicide toward a gang's karma requirement, with the gym to make it land,
+ * runs while the live `gang.enabled` switch is on (and SF2, no gang yet):
+ * -54000 is about 18000 successful homicides, ~15 hours at 3 s each even at
+ * 100% success, ahead of every rep job. `set.js gang.enabled off` skips it on
+ * the next tick; crime it started is replaced by the next job down.
  */
-export const GRIND_GANG_KARMA = false;
 export const CRIME_TYPE = "Homicide";
 /** GangConstants.GangKarmaRequirement. */
 export const GANG_KARMA_TARGET = -54000;

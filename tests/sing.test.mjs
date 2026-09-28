@@ -134,7 +134,9 @@ async function driveSing(mods, {
     ...api,
   };
   const ns = makeNs({
-    files: { ...files },
+    // gang.enabled defaults ON, and with SF2 that is ~15 hours of karma ahead
+    // of everything else - off here unless a test is about the grind.
+    files: { "/data/settings.txt": '{"gang.enabled":0}', ...files },
     servers: { home: { moneyAvailable: 1e9 }, ...servers },
     extra: {
       singularity,
@@ -200,13 +202,12 @@ export const tests = {
     assert(a.kind === "crime", `expected crime, got ${JSON.stringify(a)}`);
   },
 
-  // ~15 hours of Homicide is rep not earned anywhere else, so it happens only
-  // when asked for - and without SF2 there is no gang in BN4 to found at all.
-  "crime only when asked for, with SF2, no gang, and karma above the target": async () => {
+  // ~15 hours of Homicide, only while the gang switch is on - and without SF2
+  // there is no gang in BN4 to found at all.
+  "crime only while gang.enabled, with SF2, no gang, and karma above the target": async () => {
     const mods = await loadScripts();
     const { chooseAction } = mods["sing/plan"];
-    const { GANG_KARMA_TARGET, GRIND_GANG_KARMA } = mods["sing/config"];
-    assert(GRIND_GANG_KARMA === false, "the gang grind must default OFF");
+    const { GANG_KARMA_TARGET } = mods["sing/config"];
     const on = { hasSF2: true, grindKarma: true };
     const ok = (p, s) => chooseAction(p, s).kind === "crime";
     assert(ok(player(), state(on)), "asked for, SF2, no gang, karma 0 should grind karma");
@@ -971,7 +972,7 @@ export const tests = {
       });
       const r = await mods["rpc"].rpc(ns, body);
       assert(r.hasSF2 === want, `ownedSF ${JSON.stringify([...owned])} -> hasSF2 ${r.hasSF2}`);
-      assert(r.grindKarma === mods["sing/config"].GRIND_GANG_KARMA, "the live gang flag must ride along");
+      assert(r.grindKarma === true, "gang.enabled (default on) must ride along as grindKarma");
     }
   },
 
@@ -1370,23 +1371,22 @@ export const tests = {
   "the manager reads share through the hold": () => {
     for (const f of ["continuous/lib/share"]) {
       const src = readScript(f).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-      assert(/effectiveShareFraction\(ns\.read\(SHARE_MARKER\),\s*holdText,\s*sleevesText\)/.test(src),
+      assert(/effectiveShareFraction\(shareFraction\(ns\.read\(SETTINGS_FILE\)\),\s*holdText,\s*sleevesText\)/.test(src),
         `${f}.js must read share through effectiveShareFraction, sleeves included`);
       assert(/sleevesText\s*=\s*ns\.read\(SLEEVE_FACTION_MARKER\)/.test(src),
         `${f}.js must read the sleeves' marker`);
-      assert(!/shareFractionFrom\(ns\.read\(SHARE_MARKER\)\)/.test(src), `${f}.js reads the marker around the hold`);
     }
   },
 
   "effectiveShareFraction: the hold wins, nothing else is a hold": async () => {
     const { effectiveShareFraction } = (await loadScripts())["config"];
-    assert(effectiveShareFraction("0.25", "hold") === 0, "held");
-    assert(effectiveShareFraction("0.25", "") === 0.25, "an empty hold file is no hold");
-    assert(effectiveShareFraction("0.25", undefined) === 0.25, "a missing hold file is no hold");
-    assert(effectiveShareFraction("off", "") === 0, "the marker still decides when not held");
-    assert(effectiveShareFraction("0.25", "hold", "faction") === 0.25, "a sleeve on faction work releases the hold");
-    assert(effectiveShareFraction("0.25", "hold", "") === 0, "no sleeve on faction work: still held");
-    assert(effectiveShareFraction("off", "", "faction") === 0, "sleeves release a hold, they never turn share on");
+    assert(effectiveShareFraction(0.25, "hold") === 0, "held");
+    assert(effectiveShareFraction(0.25, "") === 0.25, "an empty hold file is no hold");
+    assert(effectiveShareFraction(0.25, undefined) === 0.25, "a missing hold file is no hold");
+    assert(effectiveShareFraction(0, "") === 0, "the setting still decides when not held");
+    assert(effectiveShareFraction(0.25, "hold", "faction") === 0.25, "a sleeve on faction work releases the hold");
+    assert(effectiveShareFraction(0.25, "hold", "") === 0, "no sleeve on faction work: still held");
+    assert(effectiveShareFraction(0, "", "faction") === 0, "sleeves release a hold, they never turn share on");
   },
 
   // ------------------------------------------------------------ backdoor ----
@@ -1506,10 +1506,10 @@ export const tests = {
 
   // Both behaviour flags are read INSIDE a body, so a set.js change lands on
   // the body's next run with no sing restart.
-  "READ and SWEEP obey the live sing.grindKarma / sing.autoInstall settings": async () => {
+  "READ and SWEEP obey the live gang.enabled / sing.autoInstall settings": async () => {
     const mods = await loadScripts();
     const { READ, SWEEP } = bodies();
-    const files = { "/data/settings.txt": '{"sing.grindKarma":1,"sing.autoInstall":0}' };
+    const files = { "/data/settings.txt": '{"gang.enabled":0,"sing.autoInstall":0}' };
     const ns = makeNs({
       files,
       extra: {
@@ -1520,7 +1520,7 @@ export const tests = {
       },
     });
     const r = await mods["rpc"].rpc(ns, READ);
-    assert(r.grindKarma === true, `grindKarma should follow the setting, got ${r.grindKarma}`);
+    assert(r.grindKarma === false, `grindKarma should follow gang.enabled, got ${r.grindKarma}`);
     assert(await mods["rpc"].rpc(ns, SWEEP) === -1, "autoInstall off must stop the sweep before any install");
   },
 };

@@ -4,9 +4,9 @@ import { makeNs } from "./mockNs.mjs";
 /**
  * Share mode.
  *
- * Two things here are worth more than the rest. The marker parser decides
- * whether every share thread on the network keeps running, so it must never
- * answer NaN or a number it invented - garbage has to read as "stop". And the
+ * Two things here are worth more than the rest. The setting decides whether
+ * every share thread on the network keeps running, so it must never answer NaN
+ * or a number it invented - garbage has to read as "stop". And the
  * census is what stops a restarted manager launching a second full set of share
  * workers on top of the ones still running, which would double the RAM share
  * holds in order to buy 2.77 points of a logarithm.
@@ -23,38 +23,38 @@ function poolNs(hosts = { home: 1024, p0: 4096, p1: 2048 }) {
 }
 
 export const tests = {
-  // -------------------------------------------------------------- marker ----
+  // ------------------------------------------------------------- setting ----
 
-  "the marker reads on, off, and a bare fraction": async () => {
-    const { config } = await loadScripts();
-    assert(config.shareFractionFrom("on") === config.SHARE_FRACTION, "on -> the default");
-    assert(config.shareFractionFrom("off") === 0, "off -> 0");
-    assert(config.shareFractionFrom("0.4") === 0.4, "a fraction passes through");
-    // sharemode.js writes the fraction then a timestamp, so only line 1 counts.
-    assert(config.shareFractionFrom("0.4\n1730000000000") === 0.4, "trailing timestamp ignored");
-    assert(config.shareFractionFrom("  ON  ") === config.SHARE_FRACTION, "trimmed and case-folded");
+  "share is off by default and share.enabled on takes share.fraction": async () => {
+    const { config, settings } = await loadScripts();
+    assert(settings.shareFraction("") === 0, "no settings file: off");
+    assert(settings.shareFraction('{"share.enabled":1}') === config.SHARE_FRACTION, "on -> the default fraction");
+    assert(settings.shareFraction('{"share.enabled":1,"share.fraction":0.4}') === 0.4, "a fraction passes through");
+    assert(settings.shareFraction('{"share.fraction":0.4}') === 0, "a fraction alone does not turn it on");
   },
 
-  // A worker asks this function whether to keep sharing. Anything that is not a
-  // usable fraction has to stop it, because a NaN compares false against every
+  // A worker hears this number on the port. A NaN compares false against every
   // bound and would leave the RAM held with no way to reclaim it but a kill.
-  "anything unreadable in the marker means OFF, never a made-up number": async () => {
-    const { config } = await loadScripts();
-    for (const junk of ["", "   ", "yes please", "NaN", "-0.5", "abc", "\n\n"]) {
-      const f = config.shareFractionFrom(junk);
-      assert(f === 0, `"${junk}" should read as off, got ${f}`);
+  "anything unreadable means OFF or the default, never a made-up number": async () => {
+    const { config, settings } = await loadScripts();
+    for (const junk of ["", "junk", '{"share.enabled":"yes"}', '{"share.enabled":2}']) {
+      assert(settings.shareFraction(junk) === 0, `${junk} should read as off`);
     }
-    assert(config.shareFractionFrom(undefined) === 0, "a missing file reads as off");
-    assert(config.shareFractionFrom(null) === 0, "null reads as off");
+    assert(settings.shareFraction('{"share.enabled":1,"share.fraction":"NaN"}') === config.SHARE_FRACTION,
+      "a broken fraction falls back to the default");
   },
 
   // 100% starves the prep gate, which then waits out POOL_WAIT_CYCLES and stops
   // the manager - and boot restarts it into the same wall a tick later.
-  "the fraction is clamped so prep always has somewhere to stand": async () => {
-    const { config } = await loadScripts();
+  "the fraction is capped so prep always has somewhere to stand": async () => {
+    const { config, settings } = await loadScripts();
     assert(config.SHARE_MAX_FRACTION < 1, "the cap must leave the pool some room");
-    assert(config.shareFractionFrom("1") === config.SHARE_MAX_FRACTION, "1 clamps");
-    assert(config.shareFractionFrom("99") === config.SHARE_MAX_FRACTION, "a typo clamps");
+    assert(settings.KNOBS["share.fraction"].max === config.SHARE_MAX_FRACTION, "the knob's max is the cap");
+    assert(settings.shareFraction('{"share.enabled":1,"share.fraction":0.99}') === config.SHARE_FRACTION,
+      "over the cap is refused, not honoured");
+    let threw = false;
+    try { settings.setSetting("", "share.fraction", "1"); } catch { threw = true; }
+    assert(threw, "set.js must refuse a fraction over the cap");
   },
 
   // Pinned to src/NetworkShare/Share.ts. If the fork changes the formula, the
@@ -91,7 +91,7 @@ export const tests = {
 
     let calls = 0;
     ns.share = async () => {
-      // Turn the gate off from underneath it, the way sharemode.js would.
+      // Turn the gate off from underneath it, the way the manager does.
       if (++calls >= 3) { ns.getPortHandle(config.SHARE_PORT).clear(); }
     };
 

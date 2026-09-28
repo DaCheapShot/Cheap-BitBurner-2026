@@ -6,7 +6,6 @@ export const tests = {
     assert(mods.config, "config.js did not load");
     assert(typeof mods.config.SHARE_PORT === "number", "config.SHARE_PORT missing");
     assert(typeof mods.boot.main === "function", "boot.main missing");
-    assert(typeof mods.sharemode.main === "function", "sharemode.main missing");
   },
 
   "port mock discards the oldest entry when full": async () => {
