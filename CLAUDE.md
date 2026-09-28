@@ -85,7 +85,7 @@ run scripts/hacknet/hashes.js --dry-run      # plan a hash spend and print it, s
 run scripts/sleeve/sleeve.js            # one sleeve assignment pass (boot runs it every tick)
 cat /data/sleeves.txt                   # what each sleeve is doing now, and why
 cat /data/sleeves.log.txt               # what happened: task changes, purchases, warnings (last 500)
-run scripts/last.js /data/sleeves.log.txt  # its last 10 lines (any text file; 2nd arg = count)
+run scripts/last.js /data/sleeves.log.txt  # its last 10 lines in a tail window (any file; 2nd arg = count)
 run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
 run scripts/set.js sleeve.covenantCash 0.5  # BN10: fraction of cash a Covenant sleeve/memory buy may cost
 run scripts/ramreport.js                # game's RAM for every .js -> /data/ram-report.txt
