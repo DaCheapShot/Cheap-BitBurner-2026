@@ -370,8 +370,15 @@ export function assign({ sleeves, tasks = [], player, want, karma, canGang, inGa
  *
  *   - the sleeve with the LEAST total exp goes first - its wipe costs least;
  *   - each sleeve buys everything the budget still covers in one batch, and
- *     only when that batch reaches `minBatch` or is all that is left for it -
- *     otherwise it waits, and the budget passes to the next sleeve;
+ *     only when that batch reaches `minBatch` - otherwise it waits, and the
+ *     budget passes to the next sleeve. There is NO "all that is left" escape:
+ *     the shop is what faction rep has unlocked so far, so it trickles in one
+ *     aug at a time, and "everything left" was true on every unlock. A live
+ *     sleeve took 13 wipes in 23 hours, 11 of them for one or two augs;
+ *   - a KARMA sleeve never buys. Its stats are its karma rate: one wipe took
+ *     Homicide from 40% to 3% and ~2 hours of gym to win back, and the next
+ *     unlock landed before it did, so the sleeve trained for a day and never
+ *     did crime. It buys once the gang exists and it moves to another rung;
  *   - tier 1 first: augs raising a multiplier the sleeve's current rung uses
  *     (JOB_MULTS), then the rest; cheapest first inside a tier, so a wipe buys
  *     as many as it can. An aug with no stats read is tier 2 - with no stats at
@@ -391,7 +398,8 @@ export function assign({ sleeves, tasks = [], player, want, karma, canGang, inGa
  */
 export function planAugs({ sleeves, actions, avail, stats = {}, budget, minBatch }) {
   const spentExp = (i) => Object.values(sleeves[i].exp ?? {}).reduce((a, b) => a + b, 0);
-  const order = Object.keys(avail).map(Number).filter((i) => avail[i]?.length).sort((a, b) => spentExp(a) - spentExp(b));
+  const order = Object.keys(avail).map(Number)
+    .filter((i) => avail[i]?.length && actions[i]?.rung !== "karma").sort((a, b) => spentExp(a) - spentExp(b));
   let left = budget;
   const buys = [];
   const waits = [];
@@ -406,7 +414,7 @@ export function planAugs({ sleeves, actions, avail, stats = {}, budget, minBatch
       names.push(a.name);
       cost += a.cost;
     }
-    if (names.length && (names.length >= minBatch || names.length === ranked.length)) {
+    if (names.length && names.length >= minBatch) {
       buys.push({ i, names, cost });
       left -= cost;
     } else {

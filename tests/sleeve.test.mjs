@@ -333,13 +333,13 @@ export const tests = {
   "planAugs: least-exp sleeve first, tier 1 by rung, cheapest within, one shared budget": async () => {
     const { planAugs } = (await loadScripts())["sleeve/plan"];
     const shop = [{ name: "Rep", cost: 50 }, { name: "Cheap", cost: 10 }, { name: "Combat", cost: 40 }];
-    const stats = { Rep: { faction_rep: 1.1 }, Cheap: {}, Combat: { strength: 1.1 } };
+    const stats = { Rep: { faction_rep: 1.1 }, Cheap: {}, Combat: { dexterity: 1.1 } };
     const sleeves = [{ exp: { strength: 5000 } }, { exp: { strength: 10 } }];
-    const actions = [{ rung: "rep" }, { rung: "karma" }];
+    const actions = [{ rung: "rep" }, { rung: "money" }];
     // Budget for one sleeve's whole shop and no more: the fresh one gets it.
     const p = planAugs({ sleeves, actions, avail: { 0: shop, 1: shop }, stats, budget: 100, minBatch: 1 });
     assert(p.buys.length === 1 && p.buys[0].i === 1, `least exp first: ${JSON.stringify(p.buys)}`);
-    assert(p.buys[0].names[0] === "Combat", `a karma sleeve's tier 1 is combat: ${p.buys[0].names}`);
+    assert(p.buys[0].names[0] === "Combat", `a money sleeve's tier 1 is dexterity: ${p.buys[0].names}`);
     assert(p.buys[0].names.join() === "Combat,Cheap,Rep", `then cheapest: ${p.buys[0].names}`);
     assert(p.waits.length === 1 && p.waits[0].i === 0 && p.waits[0].fit === 0, `the other waits: ${JSON.stringify(p.waits)}`);
     const rep = planAugs({ sleeves: [sleeves[0]], actions: [actions[0]], avail: { 0: shop }, stats, budget: 1e9, minBatch: 1 });
@@ -349,15 +349,24 @@ export const tests = {
   },
 
   // Each buy wipes the sleeve's exp, so a batch too small to be worth a wipe
-  // waits - unless it is everything the sleeve has left to buy.
-  "planAugs: a batch under augMin waits, unless it is all that is left": async () => {
+  // waits - even when it is the whole shop, which rep unlocks one aug at a time.
+  "planAugs: a batch under augMin waits, even when it is the whole shop": async () => {
     const { planAugs } = (await loadScripts())["sleeve/plan"];
     const three = [{ name: "A", cost: 10 }, { name: "B", cost: 10 }, { name: "C", cost: 10 }];
     const base = { sleeves: [{ exp: {} }], actions: [{ rung: "money" }], stats: {}, minBatch: 3 };
     assert(planAugs({ ...base, avail: { 0: three }, budget: 20 }).buys.length === 0, "2 of 3 affordable, min 3: wait");
     assert(planAugs({ ...base, avail: { 0: three }, budget: 30 }).buys[0].names.length === 3, "3 affordable: buy");
-    const tail = planAugs({ ...base, avail: { 0: three.slice(0, 2) }, budget: 20 });
-    assert(tail.buys[0]?.names.length === 2, `the last two go even under the minimum: ${JSON.stringify(tail)}`);
+    const trickle = planAugs({ ...base, avail: { 0: three.slice(0, 1) }, budget: 1e9 });
+    assert(trickle.buys.length === 0, `one fresh unlock is not a batch: ${JSON.stringify(trickle)}`);
+  },
+
+  // A live sleeve trained to 40% Homicide, a wipe sent it to 3%, and the next
+  // unlock came before it got back - a day at the gym, no crime.
+  "planAugs: a karma sleeve never buys, whatever the budget": async () => {
+    const { planAugs } = (await loadScripts())["sleeve/plan"];
+    const shop = [{ name: "A", cost: 1 }, { name: "B", cost: 1 }, { name: "C", cost: 1 }];
+    const p = planAugs({ sleeves: [{ exp: {} }], actions: [{ rung: "karma" }], avail: { 0: shop }, budget: 1e9, minBatch: 1 });
+    assert(p.buys.length === 0, `karma sleeve bought: ${JSON.stringify(p.buys)}`);
   },
 
   "a pass buys a batch for a shock-0 sleeve, caches the stats, and never for a shocked one": async () => {

@@ -65,7 +65,8 @@ export const SHOCK_RECOVER_ABOVE = 100 / 3;
  * THE CATCH: Sleeve.installAugmentation zeroes the sleeve's exp in every stat,
  * on EVERY purchase. So a sleeve buys in batches - everything the budget covers
  * in one pass, one wipe - and only when the batch reaches the live
- * `sleeve.augMin`, or is all that is left for it.
+ * `sleeve.augMin` - never "whatever is left", which the rep trickle made every
+ * unlock. A karma sleeve never buys: see planAugs.
  *
  * `sleeve.augCash` (live) is the fraction of cash one pass may spend across all
  * sleeves, priced once per pass like hacknet's. sing's aug batch, cloud and the
@@ -83,13 +84,11 @@ export const AUG_STATS_FILE = "/data/sleeve-aug-stats.txt";
 /**
  * The multipliers each rung's work uses: an aug raising any of them is tier 1
  * for a sleeve on that rung. Keys of getAugmentationStats (Multipliers).
- *   karma: Homicide's stats and the gym's exp, and the odds themselves
+ * No karma entry: a karma sleeve never buys (planAugs).
  *   rep:   faction work's hacking/combat formula, company rep's charisma
  *   money: the money crimes' odds and pay
  */
 export const JOB_MULTS = {
-  karma: ["strength", "defense", "dexterity", "agility",
-    "strength_exp", "defense_exp", "dexterity_exp", "agility_exp", "crime_success"],
   rep: ["faction_rep", "company_rep", "hacking", "hacking_exp", "charisma", "charisma_exp"],
   money: ["crime_money", "crime_success", "dexterity", "agility"],
 };

@@ -1184,11 +1184,15 @@ base cost (no 1.9x ladder, the player's prices do not move), and a player instal
 alone, so an aug lasts the node. After acting, each pass: shock-0 sleeves only (the game refuses
 otherwise), a budget of `sleeve.augCash` x cash priced once and shared, the sleeve with the
 **least total exp first** (its wipe costs least), and each buys everything the budget still covers
-in ONE batch - only when that reaches `sleeve.augMin` or is all it has left. Tier 1 is augs raising
+in ONE batch - only when that reaches `sleeve.augMin`. There is no "all it has left" escape: the
+shop is what rep has unlocked so far, so it trickles in an aug at a time and "all that is left" was
+true on every unlock - a live sleeve took 13 wipes in 23 hours, 11 of them for one or two augs. Tier 1 is augs raising
 a multiplier the sleeve's rung uses (`JOB_MULTS`), cheapest first inside a tier. Stats come from
 `getAugmentationStats`, cached in `/data/sleeve-aug-stats.txt`; it is singularity, x16 RAM at
-SF4.1, so without SF4 or RAM every aug is tier 2 and the pass says "unrated, cheapest first". Karma
-sleeves never recover shock, so they buy only once work has worn it down.
+SF4.1, so without SF4 or RAM every aug is tier 2 and the pass says "unrated, cheapest first".
+**A karma sleeve never buys.** Its stats are its karma rate: a wipe took Homicide from 40% to 3% and
+~2 hours of gym to win back, the next unlock landed first, and the sleeve trained for a day without
+doing crime. It buys once the gang exists and it moves to another rung.
 
 **The Covenant sells permanent things, so it gets half the cash.** BN10 only, members only
 (`SleeveCovenantPurchases.tsx`). Up to five sleeves at 10^k x $10t, and memory to 100 per sleeve at
