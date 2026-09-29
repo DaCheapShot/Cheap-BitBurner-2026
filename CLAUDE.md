@@ -73,7 +73,7 @@ run scripts/connectme.js --factions     # routes + backdoor status for faction s
 run scripts/set.js share.enabled on     # trade share.fraction of the pool for faction rep
 run scripts/set.js share.enabled off    # every share thread exits within a rescan + 10s
 run scripts/set.js share.fraction 0.5   # retune live, no restart (power: the Factions tab)
-run scripts/gang/gang.js --create "Slum Snakes"  # found the gang, once, by hand
+run scripts/gang/gang.js --create "Slum Snakes"  # found with a chosen faction (boot auto-founds otherwise)
 run scripts/gang/gang.js                # the gang supervisor (boot starts it too)
 run scripts/contracts/contracts.js      # one contract sweep (boot runs it every tick)
 run scripts/sing/sing.js                # the singularity supervisor (boot starts it too)
@@ -729,7 +729,10 @@ body and takes effect on that body's next run** — `Script.ts` cascades
 `invalidateModule()` to every dependent, so writing `config.js` re-compiles `math.js` and every
 generated transient that imports it, and the next `ns.run` picks up the new value with no restart.
 
-`boot.js` gates the service on `ns.gang.inGang()` (0 GB) rather than starting it blind — without a
+`boot.js` gates the service on `ns.gang.inGang()` or karma at the bar (`ns.heart.break()`, both
+0 GB) rather than starting it blind; without a gang, `gang.js` founds one with the first joined
+`GANG_FACTIONS` entry (combat only), so the karma gate relaunches it once a tick only until a gang
+faction is joined — without a
 gang the supervisor exits at once and `ensureService` would relaunch it every tick forever, the
 same trap `CLOUD_DONE_MARKER` closes for cloud. `--no-gang` opts out. A bare `gang` identifier
 costs nothing: `findFunc` matches a key only when its value is a function or a number, so it

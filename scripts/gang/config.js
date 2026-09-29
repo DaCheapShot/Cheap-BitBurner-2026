@@ -18,6 +18,13 @@
 
 export const GANG_SERVICE = "/scripts/gang/gang.js";
 
+/**
+ * Factions gang.js founds with, first JOINED one wins. Combat only: the tick
+ * body refuses a hacking gang (NiteSec, The Black Hand). From
+ * GangConstants.Names; createGang also wants membership and the karma bar.
+ */
+export const GANG_FACTIONS = ["Slum Snakes", "Tetrads", "The Syndicate", "The Dark Army", "Speakers for the Dead"];
+
 // ---------------------------------------------------------------- cadence ---
 
 /**

@@ -26,7 +26,7 @@ const TRANSIENT = [
  */
 async function runBoot({
   args = [], files = {}, running = [], workers = [], ticks = 3, hasFormulas = false,
-  inGang = false, onTprint = () => {}, onTick = (_tick, procs) => procs, onSleep = () => {},
+  inGang = false, karma = 0, onTprint = () => {}, onTick = (_tick, procs) => procs, onSleep = () => {},
   sleeves = true,
 }) {
   const ports = {};
@@ -57,6 +57,7 @@ async function runBoot({
     // gang the supervisor exits at once, and ensureService would relaunch it
     // every tick forever.
     gang: { inGang: () => inGang },
+    heart: { break: () => karma },
     print: (msg) => logs.push(String(msg)), tprint: (msg) => onTprint(String(msg)),
     read: (f) => store[f] ?? "",
     write: (f, d) => { store[f] = d; },
@@ -371,6 +372,14 @@ export const tests = {
     assert(starts === 1,
       `the supervisor should be started once and then found running, got ${starts} starts`);
     assert(r.procs.some((p) => p.filename === "scripts/gang/gang.js"), "it should still be up");
+  },
+
+  // gang.js founds the gang itself, so karma at the bar is enough to start it.
+  "boot starts the gang supervisor once karma reaches the bar": async () => {
+    const short = await runBoot({ karma: -53999, ticks: 2 });
+    assert(!short.launched.includes("scripts/gang/gang.js"), `not before the bar: ${short.launched}`);
+    const r = await runBoot({ karma: -54000, ticks: 2 });
+    assert(r.launched.includes("scripts/gang/gang.js"), `should start it at the bar: ${r.launched}`);
   },
 
   "--no-gang leaves the gang alone": async () => {
