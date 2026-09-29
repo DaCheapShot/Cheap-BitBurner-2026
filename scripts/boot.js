@@ -6,7 +6,7 @@ import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
 // is constants only, no ns call anywhere in it, so this is 0 GB.
 import { GANG_SERVICE } from "./gang/config.js";
 import { CONTRACTS_SERVICE } from "./contracts/config.js";
-import { SING_SERVICE } from "./sing/config.js";
+import { SING_SERVICE, GANG_KARMA_TARGET } from "./sing/config.js";
 import { SLEEVE_SERVICE, STATUS_FILE as SLEEVE_STATUS_FILE } from "./sleeve/config.js";
 import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE } from "./hacknet/config.js";
 import { SETTINGS_FILE, setting, settingsLog, BOOT_TICK_S } from "./settings.js";
@@ -23,8 +23,9 @@ import { rpc } from "./rpc.js";
  *   5. manager      - kept alive as a service: scripts/continuous/manager.js.
  *                     It picks its own math backend in-process, so
  *                     Formulas.exe never changes the file.
- *   6. gang         - kept alive as a service, but ONLY once a gang exists.
- *                     ns.gang.inGang() is 0 GB, so the check costs nothing on
+ *   6. gang         - kept alive as a service, but ONLY once a gang exists
+ *                     or karma reaches the bar (gang.js then founds it).
+ *                     ns.gang.inGang() and ns.heart.break() are 0 GB, so the check costs nothing on
  *                     every BitNode that will never have one. The gang
  *                     supervisor holds no gang API itself; it runs transients.
  *   7. sing         - kept alive as a service, ALWAYS. Singularity has no 0 GB
@@ -518,10 +519,12 @@ export async function main(ns) {
     // because the script exits immediately without a gang, and ensureService
     // would then relaunch it every tick forever - the same trap CLOUD_DONE_MARKER
     // exists to avoid. inGang() is 0 GB, so the gate is free on every BitNode
-    // that never founds one.
+    // that never founds one. Karma at the bar opens it too (heart.break is
+    // 0 GB): gang.js founds the gang itself. Until a gang faction is joined
+    // that is a relaunch a tick, ~1 s of a few GB - bounded, and it ends there.
     if (!live("gang")) {
       stopService(ns, GANG_SERVICE, log);
-    } else if (!noGang && ns.gang.inGang()) {
+    } else if (!noGang && (ns.gang.inGang() || ns.heart.break() <= GANG_KARMA_TARGET)) {
       killDuplicates(ns, GANG_SERVICE, log);
       ensureService(ns, GANG_SERVICE, [], log);
     }

@@ -1,4 +1,4 @@
-import { ASCEND_MULT_THRESHOLD } from "./config.js";
+import { ASCEND_MULT_THRESHOLD, GANG_FACTIONS } from "./config.js";
 import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
 import { rpc } from "scripts/rpc.js";
 
@@ -32,8 +32,10 @@ import { rpc } from "scripts/rpc.js";
  * 5000 while bonus time drains. Cadences count updates, so they track bonus time.
  *
  * Usage:  run scripts/gang/gang.js
- *         run scripts/gang/gang.js --create "Slum Snakes"   (found the gang first)
- *         boot.js starts it as a service once ns.gang.inGang() is true.
+ *         run scripts/gang/gang.js --create "Slum Snakes"   (pick the faction)
+ *         Without a gang it founds one itself, with the first joined
+ *         GANG_FACTIONS entry. boot.js starts it once ns.gang.inGang() is true
+ *         or karma reaches the bar (ns.heart.break(), 0 GB).
  *
  * RAM: 1.60 base + run 1.00 = 2.60 GB
  * (nextUpdate, inGang and getBonusTime are 0 GB; config.js holds no ns call.)
@@ -193,7 +195,17 @@ return {
 };
 `;
 
-const CREATE = `return ns.gang.createGang(args[0]);`;
+/**
+ * Found the gang. args[0] is the faction from --create, or "" to take the first
+ * joined GANG_FACTIONS entry. Returns the faction founded with, or "".
+ */
+const CREATE = `
+import { GANG_FACTIONS } from "/scripts/gang/config.js";
+const joined = ns.getPlayer().factions;
+const faction = args[0] || GANG_FACTIONS.find((f) => joined.includes(f));
+if (!faction) return "";
+return ns.gang.createGang(faction) ? faction : "";
+`;
 
 // ------------------------------------------------------------------ format ---
 
@@ -267,19 +279,22 @@ export async function main(ns) {
 
   const args = ns.args.map(String);
   const cIdx = args.indexOf("--create");
-  if (cIdx >= 0 && !ns.gang.inGang()) {
-    // Irreversible for the BitNode and picks the faction, so it is only ever
-    // asked for by hand. createGang says no when karma or membership is short.
-    const faction = args[cIdx + 1] ?? "";
-    const made = faction && (await call("create", CREATE, faction));
-    ns.tprint(made
-      ? `gang founded with ${faction}.`
-      : `ERROR: could not found a gang with "${faction}". Needs karma <= -54000 and membership in it.`);
-  }
-
   if (!ns.gang.inGang()) {
-    ns.tprint('gang: not in a gang - run scripts/gang/gang.js --create "<faction>" first.');
-    return;
+    // Founding is irreversible for the BitNode. By hand, --create names the
+    // faction; otherwise (boot, once karma reaches the bar) the first joined
+    // GANG_FACTIONS entry. createGang says no when karma or membership is short.
+    const byHand = cIdx >= 0;
+    const made = await call("create", CREATE, byHand ? (args[cIdx + 1] ?? "") : "");
+    if (made) ns.tprint(`gang founded with ${made}.`);
+    else {
+      // Boot relaunches this every tick until it works, so only a hand run
+      // reaches the terminal; boot's run leaves it in the log.
+      const why = "could not found a gang: needs karma <= -54000 and membership in one of " +
+        (byHand ? `"${args[cIdx + 1] ?? ""}"` : GANG_FACTIONS.join(", ")) + ".";
+      if (byHand) ns.tprint(`ERROR: ${why}`);
+      else log(why);
+      return;
+    }
   }
 
   log("gang supervisor up");

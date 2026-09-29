@@ -77,7 +77,7 @@ const GANG = { respect: 1000, wantedLevel: 1000, territory: 0.5 };
  */
 async function driveGang(mods, {
   updates = 30, roster = 4, respectForNextRecruit = 5000, isHacking = false,
-  inGang = true, args = [], throwIn = null, ascension = null,
+  inGang = true, args = [], throwIn = null, ascension = null, factions = [],
 } = {}) {
   const calls = [];
   const members = Array.from({ length: roster }, (_, i) => member(`goon-${i}`, 300));
@@ -118,7 +118,7 @@ async function driveGang(mods, {
     getEquipmentStats: () => ({ str: 1.1 }),
     purchaseEquipment: () => { calls.push("purchaseEquipment"); return true; },
   };
-  const ns = makeNs({ extra: { gang, args } });
+  const ns = makeNs({ extra: { gang, args, getPlayer: () => ({ factions }) } });
   try {
     await mods["gang/gang"].main(ns);
     assert(false, "the loop should only end by the STOP sentinel");
@@ -607,6 +607,27 @@ export const tests = {
     });
     assert(calls.includes("createGang:Slum Snakes"), `createGang should get the faction: ${calls}`);
     assert(ns._log.some((l) => l.includes("  tick: ")), "the supervisor should run once the gang exists");
+  },
+
+  // What boot relies on: started with no args once karma is at the bar, it
+  // picks the first joined combat gang faction itself.
+  "without --create it founds the gang with the first joined gang faction": async () => {
+    const mods = await loadScripts();
+    const { ns, calls } = await driveGang(mods, {
+      updates: 5, inGang: false, factions: ["CyberSec", "NiteSec", "Tetrads", "Slum Snakes"],
+    });
+    assert(calls.includes("createGang:Slum Snakes"), `should found with Slum Snakes: ${calls}`);
+    assert(ns._log.some((l) => l.includes("  tick: ")), "the supervisor should run once the gang exists");
+  },
+
+  "without a joined gang faction it creates nothing and exits": async () => {
+    const mods = await loadScripts();
+    const { main } = mods["gang/gang"];
+    const created = [];
+    const ns = makeNs({ extra: { args: [], getPlayer: () => ({ factions: ["NiteSec"] }),
+      gang: { inGang: () => false, createGang: (f) => { created.push(f); return true; } } } });
+    await main(ns);
+    assert(created.length === 0, `NiteSec is a hacking gang, nothing should be founded: ${created}`);
   },
 
   // "$5.43e+7" is unreadable in a log. ns.format.number is the game's OWN
