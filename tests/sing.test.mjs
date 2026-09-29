@@ -806,6 +806,34 @@ export const tests = {
     assert(r.ns._log.some((l) => l.includes("grafting Neural Accelerator (running)")), r.ns._log.join("\n"));
   },
 
+  // The live loop: a Sector-12 invite stop pulled the player out of New Tokyo
+  // on the tick after the graft flight, and a flight skips work - forever.
+  "a pending city invite does not fly the player away from a graft": async () => {
+    const mods = await loadScripts();
+    let cur = null;
+    const grafts = [];
+    const r = await driveSing(mods, {
+      ticks: 5, ownedSF: new Map([[10, 1]]),
+      // Over Sector-12's $15m invite: the stop that used to win the next tick.
+      p: player({ money: 1e9, city: "Sector-12" }),
+      // Sector-12 selling something is what makes its invite a stop at all.
+      augs: { BitRunners: [{ name: "Neural Accelerator", rep: 1e5, price: 1,
+        stats: { hacking: 1.1, hacking_exp: 1.15, hacking_money: 1.2 } }],
+        "Sector-12": [{ name: "CashRoot Starter Kit", rep: 1e12, price: 1 }] },
+      api: { getCurrentWork: () => cur },
+      extra: {
+        grafting: {
+          getGraftableAugmentations: () => ["Neural Accelerator"],
+          getAugmentationGraftPrice: () => 1e6,
+          graftAugmentation: (a) => { grafts.push(a); cur = { type: "GRAFTING", augmentation: a }; return true; },
+        },
+      },
+    });
+    assert(JSON.stringify(grafts) === JSON.stringify(["Neural Accelerator"]),
+      `grafted once: ${grafts}
+${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
+  },
+
   // The two reasons grafting never ran: its pool was only what WORK_ORDER's
   // factions sell, and it waited behind tier-1 work, which never runs out.
   "an aug only Illuminati sells is grafted ahead of tier-1 faction work": async () => {
