@@ -730,6 +730,7 @@ export async function main(ns) {
   const graftPass = async (r, owned) => {
     const cands = graftCandidates({
       mults: augMults, owned: owned.all, prereqs, augsOf, factions: r.player.factions,
+      minGain: setting(ns.read(SETTINGS_FILE), "sing.graftMin"),
     });
     const ask = [...cands.map((c) => c.aug), CONGRUITY].filter((a) => !(a in graftPrice) && !owned.all.includes(a));
     if (ask.length) Object.assign(graftPrice, (await call("graft price", GRAFT_PRICE, ...ask)) ?? {});
@@ -747,7 +748,7 @@ export async function main(ns) {
     else if (g.over) {
       log(`graft: best is ${g.over.aug} at ${money$(ns, g.over.price)} - over ${ns.format.percent(frac, 0)} of ` +
         `${money$(ns, cash)} (sing.graftCash)`);
-    } else log("graft: nothing - every net-positive tier-1 aug is owned, sold by a joined faction, or waits on a prerequisite");
+    } else log("graft: nothing - every tier-1 aug over sing.graftMin is owned, sold by a joined faction, or waits on a prerequisite");
   };
 
   /**

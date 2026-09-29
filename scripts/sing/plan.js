@@ -5,7 +5,7 @@ import {
   MIN_AUG_BATCH, NFG, AUG_PRICE_MULT, NFG_LEVEL_MULT, AUG_SKIP_FACTIONS,
   DONATE_MONEY_PER_REP, RED_PILL, MONEY_CRIMES,
   STUDY_COURSE, UNIVERSITIES, STUDY_MIN_MONEY,
-  PRIORITY_MULTS, ENTROPY, CONGRUITY,
+  PRIORITY_MULTS, ENTROPY, CONGRUITY, GRAFT_MIN_GAIN,
 } from "./config.js";
 
 /**
@@ -509,7 +509,7 @@ export function sameAsCurrent(work, action) {
 /**
  * What one graft does to the tier-1 multipliers: the aug's own product over
  * PRIORITY_MULTS, times the ENTROPY it costs on each of them. Above 1 is net
- * positive - the product must beat 0.98^-8 = 1.175. Per-graft, not cumulative:
+ * positive (the product beats 0.98^-8 = 1.175); a graft needs sing.graftMin. Per-graft, not cumulative:
  * earlier entropy is already paid and hits every later aug the same.
  *
  * @param mults {mult: value} - getAugmentationStats, any subset
@@ -519,7 +519,7 @@ export function graftGain(mults) {
 }
 
 /**
- * Every aug worth grafting, best gain first: rated, net positive, not owned or
+ * Every aug worth grafting, best gain first: rated, over minGain, not owned or
  * queued, prerequisites owned, and sold by NO joined faction - the user's rule.
  * A joined faction's augs come from rep work and the batch, which cost no
  * entropy; grafting is for the rest (Illuminati, The Covenant, gang factions,
@@ -531,12 +531,13 @@ export function graftGain(mults) {
  * @param o.prereqs   {aug: string[]}
  * @param o.augsOf    {faction: aug[]}
  * @param o.factions  joined factions
+ * @param o.minGain   the live sing.graftMin
  */
-export function graftCandidates({ mults, owned, prereqs, augsOf, factions }) {
+export function graftCandidates({ mults, owned, prereqs, augsOf, factions, minGain = GRAFT_MIN_GAIN }) {
   const joinedSells = (a) => factions.some((f) => (augsOf[f] ?? []).includes(a));
   return Object.entries(mults)
     .map(([aug, m]) => ({ aug, gain: graftGain(m) }))
-    .filter(({ aug, gain }) => gain > 1 && aug !== CONGRUITY && !owned.includes(aug) &&
+    .filter(({ aug, gain }) => gain > minGain && aug !== CONGRUITY && !owned.includes(aug) &&
       (prereqs[aug] ?? []).every((p) => owned.includes(p)) && !joinedSells(aug))
     .sort((a, b) => b.gain - a.gain);
 }

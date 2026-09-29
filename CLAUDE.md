@@ -95,7 +95,7 @@ run scripts/set.js hacknet.cash 0.9     # override one, live - next sweep, no re
 run scripts/set.js hacknet.cash default # back to config.js's value
 run scripts/set.js gang.enabled off     # live switch: boot stops gang.js next tick
 run scripts/set.js boot.tick 30         # cadences: boot.tick, sing.tick, hacknet.every, gang.*Every
-run scripts/set.js sing.autoInstall off # sing: autoInstall, idleStudy, minAugBatch, graft, graftCash
+run scripts/set.js sing.autoInstall off # sing: autoInstall, idleStudy, minAugBatch, graft, graftCash, graftMin
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -1037,8 +1037,8 @@ adds it again. READ carries `canGraft` (`currentNode === 10 || ownedSF.has(10)`,
 
 The user's policy, all in `plan.js`: **Congruity first**, the moment entropy is above 0 and cash
 covers it. Then any other graft, **ahead of all rep work**, for an aug that is net positive -
-`graftGain`, its product over `PRIORITY_MULTS` times 0.98 on each of those eight, must beat 1
-(the aug's product beats 1.175) - and that **no joined faction sells** (their augs come from rep
+`graftGain`, its product over `PRIORITY_MULTS` times 0.98 on each of those eight, must beat
+the live `sing.graftMin` (default 1.5, the aug's product beating 1.765; break-even is 1) - and that **no joined faction sells** (their augs come from rep
 work and the batch, at no entropy). Cash is the throttle: at most `sing.graftCash` (0.5) of it.
 `sing.graft` switches it off. It first waited behind tier-1 work, which never runs out - ten 400k
 company grinds - so it would never have run. The pool is `getGraftableAugmentations` (GRAFTABLE,
