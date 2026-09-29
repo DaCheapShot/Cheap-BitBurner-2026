@@ -414,6 +414,13 @@ export const WORK_FOCUS = true;
 export const GRAFT_CITY = "New Tokyo";
 export const ENTROPY = 0.98;
 /**
+ * Default of the live `sing.graftMin`: the least graftGain (net of the
+ * graft's own entropy) worth a graft - the user's call. 1 was break-even on the tier-1 multipliers, and every graft's
+ * entropy also taxes each LATER graft and every non-tier-1 multiplier, so a
+ * marginal one is a loss. 1.5 net is an aug product of 1.5 / 0.98^8 = 1.765.
+ */
+export const GRAFT_MIN_GAIN = 1.5;
+/**
  * Graft-only (factions: []), $150t. applyAugmentation sets entropy to 0 and
  * GraftingWork.finish never adds it again - grafted the moment entropy is above
  * 0 and cash covers it, ahead of all work (the user's rule).

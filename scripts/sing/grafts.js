@@ -74,7 +74,8 @@ export async function main(ns) {
   const { mults, prereqs } = await rpc(ns, STATS, ...augs);
   const me = await rpc(ns, OWNED);
   const augsOf = await rpc(ns, SHOPS, ...me.factions);
-  const cands = graftCandidates({ mults, owned: me.owned, prereqs, augsOf, factions: me.factions });
+  const minGain = setting(ns.read(SETTINGS_FILE), "sing.graftMin");
+  const cands = graftCandidates({ mults, owned: me.owned, prereqs, augsOf, factions: me.factions, minGain });
   const rows = [];
   if (me.entropy > 0 && CONGRUITY in price) rows.push({ aug: CONGRUITY, gain: 0 });
   rows.push(...cands);
@@ -92,9 +93,9 @@ export async function main(ns) {
       `${money$(p).padStart(10)}  ${ns.format.time(time[r.aug] ?? 0).padEnd(28)} ${fits ? "affordable" : "over budget"}`);
   });
   // What the filter cut, so a short list says why it is short.
-  const good = augs.filter((a) => a !== CONGRUITY && graftGain(mults[a] ?? {}) > 1);
+  const good = augs.filter((a) => a !== CONGRUITY && graftGain(mults[a] ?? {}) > minGain);
   const blocked = good.filter((a) => (prereqs[a] ?? []).some((q) => !me.owned.includes(q))).length;
-  lines.push(`       ${augs.length} graftable, ${good.length} above the 1.175 bar - of those, ${blocked} wait on a ` +
+  lines.push(`       ${augs.length} graftable, ${good.length} over the x${minGain} bar (sing.graftMin) - of those, ${blocked} wait on a ` +
     `prerequisite and ${good.length - blocked - cands.length} are sold by a joined faction - rep work gets those`);
   ns.tprint(lines.join("\n"));
 }

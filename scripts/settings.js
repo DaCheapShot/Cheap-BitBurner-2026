@@ -4,7 +4,7 @@ import { EQUIP_BUDGET_FRACTION, TICK_EVERY, WAR_EVERY, ASCEND_EVERY, EQUIP_EVERY
 import { SLEEVE_AUG_CASH, SLEEVE_AUG_MIN, SLEEVE_COVENANT_CASH } from "./sleeve/config.js";
 import {
   HOME_RAM_BUDGET_FRACTION, HOME_CORES_BUDGET_FRACTION, PROG_BUDGET_FRACTION, SING_TICK_MS,
-  AUTO_INSTALL, MIN_AUG_BATCH, IDLE_STUDY, GRAFT, GRAFT_CASH,
+  AUTO_INSTALL, MIN_AUG_BATCH, IDLE_STUDY, GRAFT, GRAFT_CASH, GRAFT_MIN_GAIN,
 } from "./sing/config.js";
 
 /** boot.js's tick. Here, not in boot.js, so the default has one home a pure module can import. */
@@ -77,6 +77,7 @@ export const KNOBS = {
   "sing.minAugBatch": { def: MIN_AUG_BATCH, min: 1, max: 100, int: true, doc: "augs a batch (plus the queue) must reach to buy" },
   "sing.graft": { def: GRAFT ? 1 : 0, min: 0, max: 1, bool: true, doc: "graft tier-1 augs no joined faction's rep reaches (BN10/SF10)" },
   "sing.graftCash": { def: GRAFT_CASH, min: 0, max: 1, doc: "fraction of cash one graft may cost (Congruity ignores it)" },
+  "sing.graftMin": { def: GRAFT_MIN_GAIN, min: 1, max: 10, doc: "least tier-1 gain, net of entropy, a graft must bring (1 = break-even)" },
 
   // No karma knob: sleeves grind karma only while gang.enabled is on - karma
   // buys nothing but a gang, so a second switch could only disagree with it.
