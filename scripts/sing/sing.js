@@ -1005,7 +1005,14 @@ export async function main(ns) {
     // player then just waits there). Left alone on purpose: reordering travel
     // ahead of the spend passes would skip work more often for the sake of
     // avoiding one wasted fare and a delay.
-    const city = r && chooseTravel(r.player, { group: cities(), targets, grindKarma: r.grindKarma });
+    //
+    // A graft picked this pass holds travel back: it flies to GRAFT_CITY below,
+    // and a city stop elsewhere flew the player straight back out the next tick
+    // - a live loop between Sector-12 and New Tokyo that never grafted. Once the
+    // graft runs, travel is free again (travelToCity leaves currentWork alone).
+    const st = r && { ...r, targets, priorityTargets, favor, favorNeed, favorGain, graft, congruity };
+    const graftNext = r && !grafting && chooseAction(r.player, st).kind === "graft";
+    const city = r && !graftNext && chooseTravel(r.player, { group: cities(), targets, grindKarma: r.grindKarma });
     const flew = city ? await call("travel", TRAVEL, city) : false;
     if (city) log(`travel: ${flew ? "flew" : "could not fly"} to ${city}`);
     if (r && grafting) {
@@ -1016,7 +1023,6 @@ export async function main(ns) {
       holdShare(false);
       markStudy(false);
     } else if (r && !flew) {
-      const st = { ...r, targets, priorityTargets, favor, favorNeed, favorGain, graft, congruity };
       let action = chooseAction(r.player, st);
       // Nothing to work - the first stretch after an install, before any
       // invite. Money beats idling: it is what TOR, the programs, the Tian Di
@@ -1039,9 +1045,8 @@ export async function main(ns) {
         log(`apply: ${job ? `now ${job} at ${action.company}` : action.employed ? "no promotion yet" : `not hired at ${action.company}`}`);
       }
       // graftAugmentation throws anywhere but GRAFT_CITY: fly this tick, graft
-      // the next. The current work carries on meanwhile.
-      // ponytail: a pending city invite elsewhere can pull the player back
-      // (chooseTravel) - invites land in a tick or two; guard if a log shows it.
+      // the next. The current work carries on meanwhile; graftNext above keeps
+      // chooseTravel from flying the player back out in between.
       const away = action.kind === "graft" && r.player.city !== GRAFT_CITY;
       if (away) {
         const ok = await call("travel", TRAVEL, GRAFT_CITY);
