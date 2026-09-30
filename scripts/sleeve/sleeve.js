@@ -358,9 +358,12 @@ async function buyCovenant(ns, cfg, count, read, spent, say) {
       ? `covenant: bought sleeve ${read.sleeves.length} for ${$(plan.sleeve)} - it starts next pass`
       : `covenant: the game refused a ${$(plan.sleeve)} sleeve - ${r?.message ?? "no reply"}`);
   } else if (Number.isFinite(plan.next)) {
-    say.line(`covenant: next sleeve ${$(plan.next)}, buys at ${ns.format.percent(frac, 0)} of cash (${$(cash)})`);
+    // The wait goes to the history too, but only its stable half: cash moves
+    // every pass, and an event is logged whenever its text is new.
+    say.event(`covenant: next sleeve ${$(plan.next)}, buys at ${ns.format.percent(frac, 0)} of cash`);
+    say.line(`covenant: cash ${$(cash)}, needs ${$(plan.next / frac)}`);
   } else {
-    say.line("covenant: all five sleeves bought");
+    say.event("covenant: all five sleeves bought");
   }
   if (plan.memory.length) {
     let got = [];
@@ -373,7 +376,8 @@ async function buyCovenant(ns, cfg, count, read, spent, say) {
         : `memory: the game refused +${m.amount} for sleeve ${m.i}`);
     }
   } else if (Number.isFinite(plan.nextPoint)) {
-    say.line(`memory: next point ${$(plan.nextPoint)}, surplus ${$(plan.surplus)}` +
+    say.event(`memory: next point ${$(plan.nextPoint)}` +
       (Number.isFinite(plan.next) ? " (saving for the next sleeve)" : ""));
+    say.line(`memory: surplus ${$(plan.surplus)}, spends ${ns.format.percent(frac, 0)} of it`);
   }
 }

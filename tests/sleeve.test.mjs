@@ -471,6 +471,10 @@ export const tests = {
     assert(r.store[STATUS_FILE].includes("covenant: bought sleeve 1 for $10.00t"), r.store[STATUS_FILE]);
     // $100t - $10t - the $100t reserve: no surplus, memory waits.
     assert(r.store[STATUS_FILE].includes("saving for the next sleeve"), r.store[STATUS_FILE]);
+    // The wait reaches the history too - its stable half, not the moving cash.
+    const { HISTORY_FILE } = mods["sleeve/config"];
+    assert(/memory: next point \$1\.00t \(saving/.test(r.store[HISTORY_FILE]), r.store[HISTORY_FILE]);
+    assert(!/surplus/.test(r.store[HISTORY_FILE]), `moving figure logged: ${r.store[HISTORY_FILE]}`);
     const rich = [sleeve({ memory: 1 })];
     const r2 = await pass(mods, rich, { node: 10, joined: ["The Covenant"], money: 1e15 });
     assert(rich[0].memory > 1, `no memory bought with surplus: ${r2.store[STATUS_FILE]}`);
