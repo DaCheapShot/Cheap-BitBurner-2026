@@ -113,13 +113,16 @@ function step(ns, budgetFraction, dryRun) {
   if (owned.length < limit) {
     const pick = largestAffordable((r) => ns.cloud.getServerCost(r), budget, ramLimit);
     if (!pick) {
+      // The cash that makes the budget cover it: the wait line is logged once,
+      // so it has to say when it will stop being true.
+      const cost = ns.cloud.getServerCost(MIN_RAM);
       return {
         acted: false,
         done: false,
         msg:
           `wait: ${money(ns, budget)} budget (${ns.format.percent(budgetFraction, 0)} of ` +
-          `${money(ns, cash)}) < ${money(ns, ns.cloud.getServerCost(MIN_RAM))} for the ` +
-          `smallest ${ns.format.ram(MIN_RAM)} server (slot ${owned.length + 1}/${limit})`,
+          `${money(ns, cash)}) < ${money(ns, cost)} for the ` +
+          `smallest ${ns.format.ram(MIN_RAM)} server (slot ${owned.length + 1}/${limit}) - needs ${money(ns, cost / budgetFraction)} cash`,
       };
     }
 
@@ -193,7 +196,7 @@ function step(ns, budgetFraction, dryRun) {
       done: false,
       msg:
         `wait: ${money(ns, budget)} budget < ${money(ns, next)} to take ${smallest.host} ` +
-        `from ${ns.format.ram(smallest.ram)} to ${ns.format.ram(smallest.ram * 2)}`,
+        `from ${ns.format.ram(smallest.ram)} to ${ns.format.ram(smallest.ram * 2)} - needs ${money(ns, next / budgetFraction)} cash`,
     };
   }
 

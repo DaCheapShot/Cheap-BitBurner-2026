@@ -50,6 +50,8 @@ export const tests = {
     await pass({ cash: 20, owned, store });
     const h = store[CLOUD_HISTORY_FILE].trim().split("\n");
     assert(h.length === 1 && h[0].includes("wait:"), `one wait line expected: ${h}`);
+    // 8GB -> 16GB is $8k; at the 10% default that needs $80k cash.
+    assert(h[0].includes("needs $80000 cash"), `the wait says what cash ends it: ${h[0]}`);
     await pass({ cash: 1e6, owned, store });
     assert(store[CLOUD_HISTORY_FILE].includes("UPGRADED"), "an upgrade is logged");
   },
