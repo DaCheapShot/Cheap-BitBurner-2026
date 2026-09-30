@@ -309,6 +309,17 @@ export const CLOUD_DONE_MARKER = "/data/cloud-maxed.txt";
 export const CLOUD_RECHECK_MS = 30 * 60 * 1000;
 
 /**
+ * cloud.js is a one-pass transient, so its log window dies a moment after it
+ * exits. STATUS is the last pass (what it bought, what it waits on), overwritten;
+ * HISTORY is every pass that bought something or changed its story, timestamped,
+ * the last HISTORY_KEEP lines kept. boot.js echoes STATUS into its own log when
+ * it changes.
+ */
+export const CLOUD_STATUS_FILE = "/data/cloud.txt";
+export const CLOUD_HISTORY_FILE = "/data/cloud.log.txt";
+export const CLOUD_HISTORY_KEEP = 500;
+
+/**
  * Hard cap on what one cloud.js purchase or upgrade may cost, as a fraction of
  * money. Here rather than in cloud.js so scripts/settings.js can name it as the
  * default of `cloud.cash` without importing a script that bills ns calls.
