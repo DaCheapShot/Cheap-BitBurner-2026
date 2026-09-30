@@ -1,11 +1,11 @@
-import { ROOT_MARKER, CLOUD_DONE_MARKER } from "./config.js";
-import { SETTINGS_FILE, setting, settingsLog } from "./settings.js";
+import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_STATUS_FILE, CLOUD_HISTORY_FILE, CLOUD_HISTORY_KEEP } from "./config.js";
+import { SETTINGS_FILE, setting } from "./settings.js";
 
 /**
  * Cloud server purchaser / upgrader.
  *
  * Spends at most the `cloud.cash` setting (settings.js) of current money on any single action, so it
- * can be left running without ever emptying your account.
+ * never empties your account.
  *
  * Policy: fill empty server slots before upgrading anything.
  *   - Under the server limit  -> buy a new server at the largest affordable size
@@ -23,26 +23,30 @@ import { SETTINGS_FILE, setting, settingsLog } from "./settings.js";
  * scripts/boot.js notices and runs deploy.js - which keeps ns.scp (0.60 GB) out
  * of this script. Upgrades keep their files, so they need nothing either way.
  *
- * Reports through ns.print only, and never opens its own tail. scripts/boot.js
- * runs this as a background service for the whole session, so a tail window it
- * opened for itself would sit in the way permanently, and every purchase would
- * also land in the terminal. Read it on demand with `tail scripts/cloud.js`.
- * The one exception is the --budget usage error, which has to reach whoever
- * typed the bad argument.
+ * ONE PASS, then exit - a transient, the sleeve.js shape. boot.js runs it once
+ * per tick with runToCompletion, so nothing is held between passes. A pass keeps
+ * acting while money covers another action: stopping at one would take a boot
+ * tick per server on a fresh BitNode's empty fleet.
  *
- * Usage:  run scripts/cloud.js                 one action, then exit
- *         run scripts/cloud.js --dry-run       show the plan, buy nothing
- *         run scripts/cloud.js --loop          keep going as money accumulates
- *         run scripts/cloud.js --loop 30000    ...checking every 30s
- *         run scripts/cloud.js --budget 0.25   spend up to 25% instead of 10%
- *         tail scripts/cloud.js                watch what it has been doing
+ * A transient's ns.print dies with it, so the pass overwrites CLOUD_STATUS_FILE
+ * with what it did and what it waits on, and appends the same lines, timestamped,
+ * to CLOUD_HISTORY_FILE whenever it bought something or the gist changed. The
+ * gist ignores $ figures: a "wait" line re-prices every pass as cash grows, and
+ * would otherwise be a history line a minute. Nothing reaches the terminal but
+ * the --budget usage error, which has to reach whoever typed the bad argument.
+ *
+ * Usage:  run scripts/cloud.js                 one pass, then exit
+ *         run scripts/cloud.js --dry-run       show the plan, buy nothing, write nothing
+ *         run scripts/cloud.js --budget 0.25   spend up to 25% instead of cloud.cash
+ *         cat /data/cloud.txt                  the last pass
+ *         cat /data/cloud.log.txt              what it bought, and what it waited on
  *
  * RAM: 1.60 base
  *      + cloud.getServerNames 1.05 + purchaseServer 2.25 + upgradeServer 0.25
  *      + getServerCost 0.25 + getServerUpgradeCost 0.10
  *      + getServerLimit 0.05 + getRamLimit 0.05
  *      + getServerMaxRam 0.05 + getServerMoneyAvailable 0.10
- *      = 5.75 GB     (sleep, print, args and ns.write are 0)
+ *      = 5.75 GB     (print, args, ns.read/write and ns.format are 0)
  */
 
 // ---------------------------------------------------------------- config ----
@@ -52,19 +56,7 @@ const NAME_PREFIX = "cheapserv-";
 /** Smallest server worth owning. Below 2GB nothing useful runs. */
 const MIN_RAM = 8;
 
-const DEFAULT_LOOP_MS = 60000;
-
-// ---------------------------------------------------------------- format ----
-
-function fmtMoney(m) {
-  if (!Number.isFinite(m)) return "$inf";
-  for (const [div, suf] of [[1e12, "t"], [1e9, "b"], [1e6, "m"], [1e3, "k"]]) {
-    if (Math.abs(m) >= div) return `$${(m / div).toFixed(2)}${suf}`;
-  }
-  return `$${m.toFixed(0)}`;
-}
-
-const fmtRam = (gb) => (gb >= 1024 ? `${(gb / 1024).toFixed(0)}TB` : `${gb}GB`);
+const money = (ns, m) => `$${ns.format.number(m, 2)}`;
 
 // ------------------------------------------------------------------ names ---
 
@@ -103,7 +95,7 @@ function largestAffordable(costFn, budget, ramLimit, minRam = MIN_RAM) {
   return null;
 }
 
-// -------------------------------------------------------------- one pass ----
+// -------------------------------------------------------------- one step ----
 
 /**
  * Decide and perform at most ONE action.
@@ -111,8 +103,8 @@ function largestAffordable(costFn, budget, ramLimit, minRam = MIN_RAM) {
  *          done=true means nothing further is possible (fully maxed out)
  */
 function step(ns, budgetFraction, dryRun) {
-  const money = ns.getServerMoneyAvailable("home");
-  const budget = money * budgetFraction;
+  const cash = ns.getServerMoneyAvailable("home");
+  const budget = cash * budgetFraction;
   const limit = ns.cloud.getServerLimit();
   const ramLimit = ns.cloud.getRamLimit();
   const owned = ns.cloud.getServerNames();
@@ -125,9 +117,9 @@ function step(ns, budgetFraction, dryRun) {
         acted: false,
         done: false,
         msg:
-          `wait: ${fmtMoney(budget)} budget (${(budgetFraction * 100).toFixed(0)}% of ` +
-          `${fmtMoney(money)}) < ${fmtMoney(ns.cloud.getServerCost(MIN_RAM))} for the ` +
-          `smallest ${fmtRam(MIN_RAM)} server`,
+          `wait: ${money(ns, budget)} budget (${ns.format.percent(budgetFraction, 0)} of ` +
+          `${money(ns, cash)}) < ${money(ns, ns.cloud.getServerCost(MIN_RAM))} for the ` +
+          `smallest ${ns.format.ram(MIN_RAM)} server (slot ${owned.length + 1}/${limit})`,
       };
     }
 
@@ -140,7 +132,7 @@ function step(ns, budgetFraction, dryRun) {
       return {
         acted: false,
         done: false,
-        msg: `WOULD BUY ${name} @ ${fmtRam(pick.ram)} for ${fmtMoney(pick.cost)} ` +
+        msg: `WOULD BUY ${name} @ ${ns.format.ram(pick.ram)} for ${money(ns, pick.cost)} ` +
           `(slot ${owned.length + 1}/${limit})`,
       };
     }
@@ -164,7 +156,7 @@ function step(ns, budgetFraction, dryRun) {
       acted: true,
       done: false,
       msg:
-        `BOUGHT ${got} @ ${fmtRam(pick.ram)} for ${fmtMoney(pick.cost)} ` +
+        `BOUGHT ${got} @ ${ns.format.ram(pick.ram)} for ${money(ns, pick.cost)} ` +
         `(slot ${owned.length + 1}/${limit})${renamed}  workers queued for deploy`,
     };
   }
@@ -182,7 +174,7 @@ function step(ns, budgetFraction, dryRun) {
     return {
       acted: false,
       done: true,
-      msg: `all ${owned.length} server(s) at the ${fmtRam(ramLimit)} maximum - nothing left to buy`,
+      msg: `all ${owned.length} server(s) at the ${ns.format.ram(ramLimit)} maximum - nothing left to buy`,
     };
   }
 
@@ -200,8 +192,8 @@ function step(ns, budgetFraction, dryRun) {
       acted: false,
       done: false,
       msg:
-        `wait: ${fmtMoney(budget)} budget < ${fmtMoney(next)} to take ${smallest.host} ` +
-        `from ${fmtRam(smallest.ram)} to ${fmtRam(smallest.ram * 2)}`,
+        `wait: ${money(ns, budget)} budget < ${money(ns, next)} to take ${smallest.host} ` +
+        `from ${ns.format.ram(smallest.ram)} to ${ns.format.ram(smallest.ram * 2)}`,
     };
   }
 
@@ -210,8 +202,8 @@ function step(ns, budgetFraction, dryRun) {
       acted: false,
       done: false,
       msg:
-        `WOULD UPGRADE ${smallest.host} ${fmtRam(smallest.ram)} -> ${fmtRam(pick.ram)} ` +
-        `for ${fmtMoney(pick.cost)}`,
+        `WOULD UPGRADE ${smallest.host} ${ns.format.ram(smallest.ram)} -> ${ns.format.ram(pick.ram)} ` +
+        `for ${money(ns, pick.cost)}`,
     };
   }
 
@@ -220,8 +212,8 @@ function step(ns, budgetFraction, dryRun) {
     acted: ok,
     done: false,
     msg: ok
-      ? `UPGRADED ${smallest.host} ${fmtRam(smallest.ram)} -> ${fmtRam(pick.ram)} ` +
-        `for ${fmtMoney(pick.cost)}`
+      ? `UPGRADED ${smallest.host} ${ns.format.ram(smallest.ram)} -> ${ns.format.ram(pick.ram)} ` +
+        `for ${money(ns, pick.cost)}`
       : `upgradeServer(${smallest.host}, ${pick.ram}) returned false`,
   };
 }
@@ -232,24 +224,19 @@ export async function main(ns) {
 
   const args = ns.args.map(String);
   const dryRun = args.includes("--dry-run");
-  const loop = args.includes("--loop");
-
-  const lIdx = args.indexOf("--loop");
-  const loopMs = lIdx >= 0 && Number(args[lIdx + 1]) > 0 ? Number(args[lIdx + 1]) : DEFAULT_LOOP_MS;
 
   // --budget pins the fraction for this run; otherwise it is the live
-  // `cloud.cash` setting, re-read every step so scripts/set.js needs no restart.
+  // `cloud.cash` setting, read once per pass so scripts/set.js needs no restart.
   const bIdx = args.indexOf("--budget");
-  let pinned = null;
+  let fraction = setting(ns.read(SETTINGS_FILE), "cloud.cash");
   if (bIdx >= 0) {
     const v = Number(args[bIdx + 1]);
     if (!Number.isFinite(v) || v <= 0 || v > 1) {
       ns.tprint(`ERROR: --budget needs a fraction in (0,1], got "${args[bIdx + 1]}"`);
       return;
     }
-    pinned = v;
+    fraction = v;
   }
-  const fraction = () => pinned ?? setting(ns.read(SETTINGS_FILE), "cloud.cash");
 
   // Any run of this script re-evaluates from scratch, so a marker left by an
   // earlier run is worthless from here on. Clear it first and re-stamp only if
@@ -257,45 +244,32 @@ export async function main(ns) {
   // behind after buying or upgrading something.
   if (!dryRun) ns.write(CLOUD_DONE_MARKER, "", "w");
 
-  if (!loop) {
-    const r = step(ns, fraction(), dryRun);
-    if (r.done && !dryRun) ns.write(CLOUD_DONE_MARKER, `${Date.now()}\n${r.msg}`, "w");
-    ns.print(`cloud: ${r.msg}`);
-    return;
-  }
+  // Act until one step does not: each action spends money, so the budget -
+  // a fraction of what is LEFT - shrinks until nothing more fits. A dry run
+  // never acts, so it plans exactly one step.
+  const lines = [];
+  let r;
+  do {
+    r = step(ns, fraction, dryRun);
+    lines.push(r.msg);
+  } while (r.acted);
 
-  ns.print(
-    `cloud loop: up to ${(fraction() * 100).toFixed(0)}% of money per action, ` +
-      `checking every ${(loopMs / 1000).toFixed(0)}s${dryRun ? " [DRY RUN]" : ""}`,
-  );
+  // Survives exit under "Recently killed", and a hand-run with a tail shows it.
+  for (const l of lines) ns.print(`cloud: ${l}`);
+  if (dryRun) return;
 
-  let lastMsg = "";
-  let lastCfgText = null;
-  while (true) {
-    const cfgText = ns.read(SETTINGS_FILE);
-    const news = settingsLog(lastCfgText, cfgText, "cloud.");
-    if (news) ns.print(news + (pinned === null ? "" : " (ignored: --budget pins this run)"));
-    lastCfgText = cfgText;
+  // Stamp the terminal state so boot.js stops re-running a pass that can only
+  // say "maxed" again.
+  if (r.done) ns.write(CLOUD_DONE_MARKER, `${Date.now()}\n${r.msg}`, "w");
 
-    const r = step(ns, fraction(), dryRun);
-
-    // "wait:" lines repeat every tick while money accumulates - only print on
-    // change so the log stays readable over hours.
-    if (r.acted || r.msg !== lastMsg) {
-      ns.print(r.msg);
-      lastMsg = r.msg;
-    }
-
-    if (r.done) {
-      // Nothing left to buy or upgrade. Stamp it so boot.js stops relaunching
-      // this every tick just to watch it exit again.
-      if (!dryRun) ns.write(CLOUD_DONE_MARKER, `${Date.now()}\n${r.msg}`, "w");
-      ns.print(`cloud: ${r.msg}`);
-      return;
-    }
-
-    // After a successful buy/upgrade, try again immediately - money may still
-    // cover another action.
-    await ns.sleep(r.acted ? 200 : loopMs);
+  const status = lines.join("\n");
+  const gist = (s) => s.trim().replace(/\$\S+/g, "$");
+  const before = ns.read(CLOUD_STATUS_FILE);
+  ns.write(CLOUD_STATUS_FILE, status + "\n", "w");
+  if (lines.length > 1 || gist(status) !== gist(before)) {
+    const stamp = new Date().toLocaleString();
+    const kept = ns.read(CLOUD_HISTORY_FILE).split("\n").filter(Boolean);
+    const all = [...kept, ...lines.map((l) => `${stamp}  ${l}`)].slice(-CLOUD_HISTORY_KEEP);
+    ns.write(CLOUD_HISTORY_FILE, all.join("\n") + "\n", "w");
   }
 }

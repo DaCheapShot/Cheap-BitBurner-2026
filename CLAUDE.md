@@ -48,6 +48,9 @@ run scripts/boot.js                     # root -> deploy -> cloud -> continuous 
 run scripts/boot.js --target omega-net  # pin the manager's target instead of auto-picking
 run scripts/boot.js --targets 5         # cap how many targets the manager runs
 run scripts/boot.js --once --no-cloud
+run scripts/cloud.js --dry-run          # plan one cloud step, buy nothing (boot runs a pass every tick)
+cat /data/cloud.txt                     # the last cloud pass: what it bought, what it waits on
+cat /data/cloud.log.txt                 # every purchase and wait change (last 500)
 run scripts/boot.js --no-formulas       # force the *Analyze math path
 run scripts/boot.js --no-contracts      # do not solve coding contracts
 run scripts/boot.js --no-sing           # do not run the singularity supervisor
@@ -316,7 +319,7 @@ editor's RAM panel when one moves.
 | `set.js` | terminal CLI that writes `/data/settings.txt` | 1.60 |
 | `boot.js` | supervisor, kills retired managers | 3.50 |
 | `root.js` | port openers + NUKE | 2.15 |
-| `cloud.js` | buys/upgrades servers, capped at 10% of cash | 5.75 |
+| `cloud.js` | one pass per boot tick: buys/upgrades servers, 10% of cash per action | 5.75 |
 | `deploy.js` | scp workers home → every rooted host | 2.50 |
 | `share.js` | one `ns.share()` loop | 4.00 **per thread** |
 | `continuous/lib/server.js` | `Server` + `ServerPool`: reservations, placement | 0.35 |
@@ -374,7 +377,7 @@ defaults - and `setSetting()` is where bad input is refused. Home-only file is f
 reader runs on home; a worker on another host would need a port (see share).
 
 **Switches** (`cloud.enabled|gang|sing|hacknet|sleeve|contracts`, on/off) are read by `boot.js`
-every tick. Off STOPS a running resident (cloud, gang, sing) and skips a transient; sing off also
+every tick. Off STOPS a running resident (gang, sing) and skips a transient (cloud too); sing off also
 clears `SHARE_HOLD_MARKER` and `REP_WANT_MARKER`, since a killed sing cannot, and sleeve off clears
 `SLEEVE_FACTION_MARKER`. The `--no-X` flags keep their old meaning (don't
 start, never kill) - a switch that left gang.js running would change nothing visible. The manager
@@ -1513,12 +1516,10 @@ the like have no `ns` and must keep it that way; threading one in to format a
 string is the wrong trade. Return the number, let the script that has `ns` print it — that is why
 gang.js's rpc bodies return numbers and gang.js formats them.
 
-**ponytail: two hand-rolled copies survive, one with a known ceiling.** `cloud.js:63` carries
-`[[1e12, "t"], [1e9, "b"], [1e6, "m"], [1e3, "k"]]` and prints an unbounded mantissa past $1e15;
-`continuous/lib/fmt.js` has the full list and is correct but still a copy. They predate this rule
-and are left alone because converting them means threading `ns` through their callers. Replace one
-with `ns.format.number` when you are already editing that file — do not add a third.
-`tests/ram.test.mjs` fails on any new copy.
+**ponytail: one hand-rolled copy survives.** `continuous/lib/fmt.js` has the full suffix list and
+is correct but still a copy. It predates this rule and is left alone because converting it means
+threading `ns` through its callers. Replace it with `ns.format.number` when you are already editing
+that file — do not add another. `tests/ram.test.mjs` fails on any new copy.
 
 Commit messages lead with the reasoning and the measured numbers behind a change, not a file
 list.

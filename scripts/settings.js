@@ -32,7 +32,7 @@ export const SETTINGS_FILE = "/data/settings.txt";
  * prefix contiguous. Order: gang, cloud, share, hacknet, sing, sleeve, contracts, boot.
  *
  * `<script>.enabled` is the live switch, read by boot.js every tick. Off STOPS
- * a running resident (cloud, gang, sing) and skips a transient (hacknet,
+ * a running resident (gang, sing) and skips a transient (cloud, hacknet,
  * sleeve, contracts). The manager has none: stopping it drags in killOrphanWorkers and
  * the retired-manager rules, which --no-manager already owns.
  *

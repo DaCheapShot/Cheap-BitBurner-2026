@@ -584,7 +584,7 @@ export const tests = {
   // of these files is being edited anyway; never grow it.
   "no new script re-types the money suffix list": () => {
     const GRANDFATHERED = new Set([
-      "cloud", "continuous/lib/fmt",
+      "continuous/lib/fmt",
     ]);
     // Either shape that has actually been written here: the divisor/suffix
     // pair list, and the bare powers-of-1000 array.

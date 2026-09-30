@@ -1,4 +1,4 @@
-import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS,
+import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS, CLOUD_STATUS_FILE,
          WORKER_LIST,
          DEPLOY_LIST, DEPLOY_MANIFEST, SHARE_HOLD_MARKER, TARGETS_MARKER,
          REP_WANT_MARKER, SLEEVE_FACTION_MARKER } from "./config.js";
@@ -18,8 +18,8 @@ import { rpc } from "./rpc.js";
  * Each tick, in order:
  *   1. root.js      - open ports and NUKE anything new
  *   2. deploy.js    - push workers, but only if root.js actually rooted something
- *   3. cloud.js     - kept alive as a service (buys and upgrades servers), but
- *                     only until the fleet is maxed; see CLOUD_DONE_MARKER
+ *   3. cloud.js     - one pass per tick, a transient (buys and upgrades servers),
+ *                     skipped once the fleet is maxed; see CLOUD_DONE_MARKER
  *   5. manager      - kept alive as a service: scripts/continuous/manager.js.
  *                     It picks its own math backend in-process, so
  *                     Formulas.exe never changes the file.
@@ -363,6 +363,8 @@ export async function main(ns) {
   let hasSleeves = null;
   // The sleeve status last copied into this log, shock/sync figures stripped.
   let lastSleeveGist = null;
+  // The cloud status last copied into this log, $ figures stripped.
+  let lastCloudGist = null;
   const noManager = args.includes("--no-manager");
   const noFormulas = args.includes("--no-formulas");
   const tIdx = args.indexOf("--target");
@@ -482,11 +484,10 @@ export async function main(ns) {
     if (!live("cloud")) {
       stopService(ns, CLOUD, log);
     } else if (!noCloud) {
-      killDuplicates(ns, CLOUD, log);
-      // cloud.js EXITS once the fleet is fully maxed - it is a service with a
-      // finish line, unlike the manager. Without this check, ensureService sees
-      // it missing every tick and relaunches it forever just to watch it exit.
-      // The marker is re-checked periodically in case the limits move.
+      // cloud.js is a TRANSIENT, one pass per tick - the sleeve shape. A pass
+      // buys what the budget covers and exits, so nothing is pinned between
+      // ticks. Once the fleet is maxed a pass can only say so again, so the
+      // marker skips it, re-checked periodically in case the limits move.
       const maxedAt = Number(ns.read(CLOUD_DONE_MARKER).split("\n")[0]);
       const maxedFor = Number.isFinite(maxedAt) && maxedAt > 0 ? Date.now() - maxedAt : Infinity;
       // A fresh boot re-evaluates everything, so ignore the marker on pass one.
@@ -497,7 +498,19 @@ export async function main(ns) {
         }
       } else {
         cloudMaxedLogged = false;
-        ensureService(ns, CLOUD, ["--loop"], log);
+        // isUp against STACKING on a hand-run pass, as for contracts.
+        if (!isUp(ns, CLOUD)) {
+          await runToCompletion(ns, CLOUD, [], log);
+          // The pass's log dies with it, so boot's log carries its status - only
+          // when it changes, and $ figures ignored: a "wait" line re-prices
+          // every tick as cash grows.
+          const status = ns.read(CLOUD_STATUS_FILE).trim();
+          const gist = status.replace(/\$\S+/g, "$");
+          if (gist !== lastCloudGist) {
+            lastCloudGist = gist;
+            for (const l of status.split("\n")) if (l) log(`cloud: ${l}`);
+          }
+        }
       }
     }
     if (!noManager) {

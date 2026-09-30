@@ -8,7 +8,7 @@ import { loadScripts, assert } from "./harness.mjs";
 // fails a test.
 const TRANSIENT = [
   "scripts/root.js", "scripts/deploy.js", "scripts/contracts/contracts.js",
-  "scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js", "scripts/sleeve/sleeve.js",
+  "scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js", "scripts/sleeve/sleeve.js", "scripts/cloud.js",
 ];
 
 /**
@@ -492,11 +492,11 @@ export const tests = {
     const r = await runBoot({
       inGang: true, ticks: 4,
       onTick: (tick, procs, store) => {
-        if (tick === 2) store["/data/settings.txt"] = JSON.stringify({ "gang.enabled": 0, "cloud.enabled": 0 });
+        if (tick === 2) store["/data/settings.txt"] = JSON.stringify({ "gang.enabled": 0 });
         return procs;
       },
     });
-    for (const f of ["scripts/gang/gang.js", "scripts/cloud.js"]) {
+    for (const f of ["scripts/gang/gang.js"]) {
       assert(r.launched.includes(f), `${f} should have run before the switch`);
       assert(r.killed.includes(f), `${f} should have been stopped, killed: ${r.killed}`);
       assert(!r.procs.some((p) => p.filename === f), `${f} is still running`);
@@ -516,9 +516,9 @@ export const tests = {
 
   "transients switched off are skipped": async () => {
     const r = await runBoot({
-      ticks: 3, files: { "/data/settings.txt": '{"hacknet.enabled":0,"contracts.enabled":0}' },
+      ticks: 3, files: { "/data/settings.txt": '{"hacknet.enabled":0,"contracts.enabled":0,"cloud.enabled":0}' },
     });
-    for (const f of ["scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js", "scripts/contracts/contracts.js"]) {
+    for (const f of ["scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js", "scripts/contracts/contracts.js", "scripts/cloud.js"]) {
       assert(!r.launched.includes(f), `${f} should not run while off, launched: ${r.launched}`);
     }
   },
