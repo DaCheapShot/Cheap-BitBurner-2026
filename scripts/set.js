@@ -7,6 +7,7 @@ import { SETTINGS_FILE, KNOBS, parseSettings, setting, setSetting, showSetting }
  *   run scripts/set.js hacknet.cash 0.9         set one
  *   run scripts/set.js hacknet.cash default     back to config.js's value
  *   run scripts/set.js gang.enabled off         switches take on/off (or 1/0)
+ *   run scripts/set.js reset                    every setting back to default
  *
  * Readers pick it up on their next sweep / loop / rpc body. See settings.js.
  * RAM: ns.read, ns.write and ns.tprint are 0 GB, so this is the 1.60 base.
@@ -31,6 +32,14 @@ export async function main(ns) {
         `  ${range.padEnd(12)}  ${d.doc}${mark}`;
     });
     ns.tprint(`settings (${SETTINGS_FILE}, * = overridden):\n${rows.join("\n")}`);
+    return;
+  }
+  if (key === "reset") {
+    // Writes "{}" rather than ns.rm (1.00 GB) - an empty object is every default.
+    const o = parseSettings(text);
+    ns.write(SETTINGS_FILE, "{}", "w");
+    const was = Object.keys(o);
+    ns.tprint(was.length ? `reset ${was.length} override(s) to default: ${was.join(", ")}` : "nothing overridden");
     return;
   }
   if (value === undefined) {
