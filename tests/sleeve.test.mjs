@@ -159,26 +159,6 @@ export const tests = {
     assert(karmaSyncTarget(54000, 8, 0, 0) === 100, "no odds at all: sync is the only progress");
   },
 
-  // The derivation in sleeve/config.js, checked by simulating it: from shock
-  // 100, recover while shock > theta, then work. Work decays shock at 1e-4 a
-  // cycle, recovery at 3e-4 (Sleeve.process + SleeveRecoveryWork); rep is
-  // (100 - shock) a cycle while working. Over a long horizon the best theta is 100/3.
-  "SHOCK_RECOVER_ABOVE maximises rep over a long grind": async () => {
-    const { SHOCK_RECOVER_ABOVE } = (await loadScripts())["sleeve/config"];
-    const rep = (theta) => {
-      let s = 100, total = 0;
-      const dt = 500;
-      for (let t = 0; t < 4e6; t += dt) {
-        if (s > theta) s = Math.max(0, s - 3e-4 * dt);
-        else { total += (100 - s) * dt; s = Math.max(0, s - 1e-4 * dt); }
-      }
-      return total;
-    };
-    let best = 0;
-    for (let theta = 0; theta <= 100; theta += 0.5) if (rep(theta) > rep(best)) best = theta;
-    assertClose(SHOCK_RECOVER_ABOVE, best, 1, `simulated best threshold ${best}`);
-  },
-
   "bestWorkType picks the formula's winner among the offered types": async () => {
     const { bestWorkType } = (await loadScripts())["sleeve/plan"];
     assert(bestWorkType(skills(10, { hacking: 500 }), HACK) === "hacking", "a hacker hacks");
@@ -204,35 +184,38 @@ export const tests = {
     }
   },
 
-  "rep: one sleeve per entry, least shocked first, then money": async () => {
+  "rep: one sleeve per entry, in order, then money": async () => {
     const { assign } = (await loadScripts())["sleeve/plan"];
     const want = { factions: [{ faction: "CyberSec", types: HACK }, { faction: "NiteSec", types: HACK }],
       companies: ["ECorp"] };
-    const sleeves = [sleeve({ shock: 20 }), sleeve({ shock: 0 }), sleeve({ shock: 10 }), sleeve({ shock: 0 })];
-    const a = assign({ sleeves, player: { karma: 0 }, want, karma: false });
+    const a = assign({ sleeves: [sleeve(), sleeve(), sleeve(), sleeve()], player: { karma: 0 }, want, karma: false });
     const placed = a.filter((x) => x.kind !== "crime").map((x) => x.faction ?? x.company);
     assert(new Set(placed).size === placed.length, `an entry was handed out twice: ${placed}`);
-    assert(a[1].faction === "CyberSec" && a[3].faction === "NiteSec" && a[2].company === "ECorp",
-      `least shocked take the entries in order: ${JSON.stringify(a)}`);
-    assert(a[0].kind === "crime", `the spare earns money: ${a[0].kind}`);
+    assert(a[0].faction === "CyberSec" && a[1].faction === "NiteSec" && a[2].company === "ECorp",
+      `entries in order: ${JSON.stringify(a)}`);
+    assert(a[3].kind === "crime", `the spare earns money: ${a[3].kind}`);
   },
 
-  "shock: only as many sleeves recover as there are entries left open": async () => {
+  // The user's rule: shock scales the exp a sleeve shares, so every sleeve
+  // recovers to 0 first - on every rung, whatever work is open.
+  "shock first: any shocked sleeve recovers, on every rung": async () => {
     const { assign } = (await loadScripts())["sleeve/plan"];
     const want = { factions: [{ faction: "CyberSec", types: HACK }], companies: [] };
-    const a = assign({ sleeves: [sleeve({ shock: 90 }), sleeve({ shock: 60 }), sleeve({ shock: 100 })],
-      player: { karma: 0 }, want, karma: false });
-    assert(a[1].kind === "recover", `least shocked recovers for the one entry: ${a[1].kind}`);
-    assert(a[0].kind === "crime" && a[2].kind === "crime", "the others earn money meanwhile");
-    const b = assign({ sleeves: [sleeve({ shock: 30 })], player: { karma: 0 }, want, karma: false });
-    assert(b[0].kind === "faction", "at or under the threshold it works");
+    const sleeves = [sleeve({ shock: 0.1 }), sleeve({ shock: 0 }), sleeve({ shock: 100, sync: 1 })];
+    for (const over of [{ karma: false }, { karma: true, canGang: true, inGang: false }]) {
+      const a = assign({ sleeves, player: { karma: 0, skills: skills(1) }, want, ...over });
+      assert(a[0].kind === "recover" && a[2].kind === "recover", `shocked sleeves recover: ${JSON.stringify(a)}`);
+      assert(a[1].kind !== "recover", `shock 0 works: ${JSON.stringify(a[1])}`);
+    }
+    const r = assign({ sleeves, player: { karma: 0 }, want, karma: false });
+    assert(r[1].faction === "CyberSec", `the entry goes to the shock-0 sleeve: ${JSON.stringify(r[1])}`);
   },
 
   "a sleeve keeps the entry it is on - no shuffling between ticks": async () => {
     const { assign } = (await loadScripts())["sleeve/plan"];
     const want = { factions: [{ faction: "CyberSec", types: HACK }, { faction: "NiteSec", types: HACK }], companies: [] };
     const tasks = [null, { type: "FACTION", factionName: "NiteSec", factionWorkType: "hacking" }];
-    const a = assign({ sleeves: [sleeve({ shock: 0 }), sleeve({ shock: 30 })], tasks, player: { karma: 0 }, want, karma: false });
+    const a = assign({ sleeves: [sleeve(), sleeve()], tasks, player: { karma: 0 }, want, karma: false });
     assert(a[1].faction === "NiteSec", `the holder keeps NiteSec: ${JSON.stringify(a[1])}`);
     assert(a[0].faction === "CyberSec", `the other takes what is left: ${JSON.stringify(a[0])}`);
   },
@@ -316,6 +299,23 @@ export const tests = {
     assert(new Set(stats).size === stats.length, `a stat trained twice: ${stats}`);
     assert(stats[0] === "str", `Strength first - Homicide weighs it 2: ${stats}`);
     assert(a.some((x) => x.kind === "crime"), "somebody is still earning karma");
+  },
+
+  // The live case: 8 sleeves at shock 0, four in the gym, four on Homicide at
+  // 0.5%. Under KARMA_MIN_CHANCE the spares earn money; at or over it, karma.
+  "a karma sleeve left out of the gym does money under KARMA_MIN_CHANCE": async () => {
+    const mods = await loadScripts();
+    const { assign, crimeChance } = mods["sleeve/plan"];
+    const { KARMA_MIN_CHANCE } = mods["sleeve/config"];
+    const base = { want: noWant, karma: true, canGang: true, inGang: false };
+    const weak = sleeve({ city: "Aevum", skills: skills(3) });
+    assert(crimeChance(weak, "Homicide") < KARMA_MIN_CHANCE, "fixture: Homicide odds are poor");
+    const a = assign({ ...base, sleeves: [weak], player: { karma: 0, skills: skills(1) } });
+    assert(a[0].kind === "crime" && a[0].rung === "karma" && a[0].crime !== "Homicide" && a[0].why.startsWith("money"),
+      `poor odds do money, still on the karma rung: ${JSON.stringify(a[0])}`);
+    const strong = sleeve({ city: "Aevum", skills: skills(400) });
+    const b = assign({ ...base, sleeves: [strong], player: { karma: 0, skills: skills(1) } });
+    assert(b[0].crime === "Homicide", `good odds do karma: ${JSON.stringify(b[0])}`);
   },
 
   "a pass puts a trainer in the gym, and leaves it there next pass": async () => {
@@ -537,8 +537,8 @@ export const tests = {
     }
   },
 
-  // The order bug the ACTS table exists for: sleeve 0 holds CyberSec but is too
-  // shocked to keep it, sleeve 1 is fit. The game refuses CyberSec for sleeve 1
+  // The order bug the ACTS table exists for: sleeve 0 holds CyberSec but is
+  // shocked, so it recovers first; sleeve 1 is fit. The game refuses CyberSec for sleeve 1
   // while sleeve 0 still works it, so sleeve 0 must leave first.
   "a pass moves sleeves off a faction before another is put on it": async () => {
     const mods = await loadScripts();
@@ -550,7 +550,7 @@ export const tests = {
     const want = { factions: [{ faction: "CyberSec", types: HACK }], companies: [] };
     const r = await pass(mods, list, { want, joined: ["CyberSec"] });
     assert(list[1].task?.factionName === "CyberSec", `sleeve 1 took CyberSec: ${JSON.stringify(list[1].task)} / ${r.store[STATUS_FILE]}`);
-    assert(list[0].task?.type === "CRIME", `sleeve 0 went to money: ${JSON.stringify(list[0].task)}`);
+    assert(list[0].task?.type === "RECOVERY", `sleeve 0 went to recovery: ${JSON.stringify(list[0].task)}`);
     assert(r.store[SLEEVE_FACTION_MARKER] === "faction", "a sleeve on faction work releases sing's share hold");
     assert(r.store[STATUS_FILE].includes("[was idle]"), `the change is marked in the status file: ${r.store[STATUS_FILE]}`);
     assert(r.ns._log.some((l) => l.includes("sleeve 1: faction CyberSec")), "and in the script's own log");

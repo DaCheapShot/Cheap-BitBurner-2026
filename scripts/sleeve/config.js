@@ -40,20 +40,12 @@ export { GANG_KARMA_TARGET, MONEY_CRIMES } from "scripts/sing/config.js";
 // ------------------------------------------------------------- game rules ---
 
 /**
- * Recover shock above this, work below it. DERIVED, not tuned.
- *
- * Rep is x (100 - shock)/100 (SleeveFactionWork.getReputationRate). Any work
- * lowers shock at a = 0.0001 per cycle (Sleeve.process); shock recovery adds
- * 0.0002 on top, 3a in all. Working from shock s for ever after forgoes
- * L(s) = s^2 / 2a of rep against a shock-free sleeve. Over dt:
- *   work:    forgoes s dt now,          leaves L(s - a dt)
- *   recover: forgoes all 100 dt now,    leaves L(s - 3a dt)
- * Recovering's extra future saving is L(s - a dt) - L(s - 3a dt) = 2 s dt, its
- * extra cost now is (100 - s) dt: recover while 2s > 100 - s, i.e. s > 100/3.
- * Both rates carry the same intelligence bonus (weight 0.75), so it cancels.
- * tests/sleeve.test.mjs checks this against a simulated grind.
+ * A karma sleeve with no gym stat left does its best karma crime only at these
+ * odds or better; below, it does the best money crime. The user's call, not a
+ * derivation: karma and money do not convert, and Homicide at 0.5% earns
+ * neither. The four gym trainers lift every sleeve's odds past it in time.
  */
-export const SHOCK_RECOVER_ABOVE = 100 / 3;
+export const KARMA_MIN_CHANCE = 0.25;
 
 // ------------------------------------------------------------------- augs ---
 
