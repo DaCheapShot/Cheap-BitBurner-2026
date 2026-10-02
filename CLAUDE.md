@@ -96,6 +96,7 @@ run scripts/expwatch.js 60              # hacking exp/s per 60 s window, in a ta
 run scripts/set.js                      # list live settings (budgets) and their defaults
 run scripts/set.js hacknet.cash 0.9     # override one, live - next sweep, no restart
 run scripts/set.js hacknet.cash default # back to config.js's value
+run scripts/set.js reset                # every setting back to config.js's value
 run scripts/set.js gang.enabled off     # live switch: boot stops gang.js next tick
 run scripts/set.js boot.tick 30         # cadences: boot.tick, sing.tick, hacknet.every, gang.*Every
 run scripts/set.js sing.autoInstall off # sing: autoInstall, idleStudy, minAugBatch, graft, graftCash, graftMin
