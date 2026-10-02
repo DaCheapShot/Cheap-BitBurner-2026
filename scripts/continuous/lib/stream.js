@@ -2,11 +2,10 @@ import { fmtMoney } from "scripts/continuous/lib/fmt";
 import {
   anchorSwingFor,
   baselineDrift,
-  batchRam,
   batchRamSeconds,
   batchVerdict,
   delayFor,
-  heldFromDispatch,
+  heldFromLaunch,
   landingOffsets,
   nextAnchor,
   maxStealForDrift,
@@ -94,6 +93,56 @@ import {
  */
 const LAUNCH_ORDER = ["W1", "W2", "G", "H"];
 
+/**
+ * Would these new ops, added to everything already on the pool's timeline,
+ * ever take the pool below zero free RAM while they run?
+ *
+ * The ledger (`pool.ledger`, shared by every stream on the pool) holds one entry
+ * per op: {start, end, gb, launched}. A queued op will take `gb` at `start` and
+ * give it back at `end`; a launched one is already in pool.freeRam and only
+ * gives back at `end`. Sweeping those steps from `now` gives free RAM at every
+ * future instant, and the new batch fits if the minimum over its own span holds.
+ *
+ * This replaced one scalar, queuedRam, that charged every planned op from
+ * dispatch. That caught the failure it was written for - seventy batches each
+ * affordable and collectively not, with the grows coming due together - but it
+ * reserved hack for 4x and grow for ~1.5x its real run, and a live pool sat two
+ * thirds idle with the gate reporting it full. The timeline catches the same
+ * pile-up exactly, because it is the pile-up.
+ *
+ * Other streams' queued ops are on the ledger too, which the scalar never saw.
+ * Prep and share are not, but they are running RAM, already in freeRam, and
+ * treating them as never ending is the safe direction.
+ *
+ * ponytail: sorts the whole ledger per dispatch, O(n log n) in ops in flight
+ * across streams; keep it sorted incrementally if depth ~1000 x 3 shows up in
+ * a profile.
+ */
+export function timelineFits(pool, fresh, now) {
+  const ledger = pool.ledger ?? (pool.ledger = new Set());
+  const steps = [];
+  for (const e of ledger) {
+    if (e.end <= now) { ledger.delete(e); continue; }
+    if (!e.launched) steps.push([Math.max(e.start, now), -e.gb]);
+    steps.push([e.end, e.gb]);
+  }
+  let from = Infinity;
+  let to = -Infinity;
+  for (const f of fresh) {
+    steps.push([f.start, -f.gb], [f.end, f.gb]);
+    if (f.start < from) from = f.start;
+    if (f.end > to) to = f.end;
+  }
+  // Takes before gives at the same instant: the pessimistic tie.
+  steps.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let free = pool.freeRam;
+  for (const [t, d] of steps) {
+    free += d;
+    if (t >= from && t < to && free < 0) return false;
+  }
+  return true;
+}
+
 export function createStream(ns, math, opts) {
   const {
     host,
@@ -143,22 +192,17 @@ export function createStream(ns, math, opts) {
   const inFlight = new Map();
 
   /**
-   * GB of ops that are PLANNED but not yet placed.
+   * GB of ops that are PLANNED but not yet placed. Reported in the log only.
    *
-   * The piece the first affordability gate was missing, and the reason it did
-   * not work. Checking one batch against pool.freeRam refuses a batch that is
-   * too big on its own - it does nothing about seventy batches that are each
-   * affordable and collectively are not. A queued op reserves nothing, so the
-   * pool looks free right up until the grows come due together: a live run held
-   * `depth 70 sent 70 done 0` and logged `no room for G x69` while free RAM sat
-   * at 0.03 TB.
-   *
-   * Maintained rather than recomputed because the queues hold four items per
-   * batch and this is read at every dispatch. Invariant, with L the RAM already
-   * placed: `L + queuedRam + oneMoreBatch <= pool capacity`, which is the whole
-   * of what stops the pipeline over-committing.
+   * It used to BE the gate - `L + queuedRam + oneMoreBatch <= pool capacity` -
+   * written after a live run held `depth 70 sent 70 done 0` and logged `no room
+   * for G x69` at 0.03 TB free: seventy batches each affordable and collectively
+   * not. The timeline (timelineFits) catches that pile-up at the instant it
+   * happens instead of charging every op from dispatch.
    */
   let queuedRam = 0;
+  // The pool's timeline, shared with every other stream on it. See timelineFits.
+  const ledger = pool.ledger ?? (pool.ledger = new Set());
 
   // One FIFO per op type, each ordered by landing time. Anchors are monotonic
   // and every item in a queue shares an op time, so they are ordered by DUE
@@ -366,7 +410,8 @@ export function createStream(ns, math, opts) {
     const th = planThreads(math, snap, steal, { drift: driftBudget() });
     if (!th) return skip("no hack math");
 
-    // Refuse a batch the pool cannot hold WHOLE, before any of it is placed.
+    // The batch is refused whole, before any of it is placed - by the
+    // timeline gate below, once the anchor it needs is known.
     //
     // Under JIT the four ops are placed at their own launch times, so a pool
     // that is merely tight does not refuse a batch - it accepts W1, then refuses
@@ -377,18 +422,6 @@ export function createStream(ns, math, opts) {
     // recovered: only weakens were left running against a prepped target, with
     // no hack behind them.
     //
-    // batchRam prices grow and weaken at ONE CORE, so it over-states what
-    // core-aware placement will really take - the safe direction for a gate
-    // whose whole job is to refuse early.
-    const need = batchRam(th, ram, th.weaken2);
-    if (need > pool.freeRam - queuedRam) {
-      // Paced at the cadence, unlike every other skip. dueAt only advances on a
-      // successful dispatch, so a stream against a full pool re-planned every
-      // tick - 40 snapshots a second - and reported "150/149 dispatches found no
-      // room" against a ratio that is supposed to count one attempt per slot.
-      dueAt = now + cadence;
-      return skip("no room for batch", now);
-    }
 
     // Never stream a target that has drifted off its baseline: every thread
     // count above assumes max money and minimum security, so streaming one is
@@ -474,7 +507,7 @@ export function createStream(ns, math, opts) {
     // Before pace, which prices the batch over the same landing the anchor below
     // schedules. See anchorSwingFor for why there are two figures.
     const { swing, anchorSwing } = anchorSwingFor(th, snap.minSec);
-    pace(th, times, anchorSwing);
+    pace(th, times, swing, anchorSwing);
 
     // Free: planThreads already measured it, and this is the only place that
     // knows both the value and the window it has to be compared across.
@@ -508,6 +541,33 @@ export function createStream(ns, math, opts) {
     const offs = landingOffsets(spacer);
     const opTime = opTimesByOp(times);
     const bonus = math.coreBonusFor;
+
+    // Refuse a batch the pool cannot hold, before any of it is placed. Each op
+    // is charged from the tick that will launch it (tick()'s due test) to its
+    // landing - see timelineFits.
+    //
+    // Priced at ONE CORE, which over-states what core-aware placement will
+    // really take - the safe direction for a gate whose whole job is to refuse
+    // early.
+    const want = { H: th.hack, W1: th.weaken1, G: th.grow, W2: th.weaken2 };
+    const fresh = LAUNCH_ORDER.map((op) => {
+      const land = at + offs[op];
+      return {
+        op, land,
+        start: Math.max(now, land - opTime[op] * (1 + swing) - lead),
+        end: land,
+        gb: want[op] * ram[OP_WORKER[op]],
+        launched: false,
+      };
+    });
+    if (!timelineFits(pool, fresh, now)) {
+      // Paced at the cadence, unlike every other skip. dueAt only advances on a
+      // successful dispatch, so a stream against a full pool re-planned every
+      // tick - 40 snapshots a second - and reported "150/149 dispatches found no
+      // room" against a ratio that is supposed to count one attempt per slot.
+      dueAt = now + cadence;
+      return skip("no room for batch", now);
+    }
 
     // -- enqueue; nothing is placed or exec'd here ---------------------------
 
@@ -549,16 +609,15 @@ export function createStream(ns, math, opts) {
       pending: BATCH_OPS.length,
       reports: [],
       aborted: false,
+      entries: fresh,
     };
 
-    const want = { H: th.hack, W1: th.weaken1, G: th.grow, W2: th.weaken2 };
-    for (const op of LAUNCH_ORDER) {
-      // Priced at one core, like batchRam and for the same reason: placement
-      // will use fewer raw threads for the boosted ops, so the running total
-      // over-states what is owed. Over-stating is the safe direction for a
-      // number whose job is to refuse.
-      const gb = want[op] * ram[OP_WORKER[op]];
-      queues[op].push({ batch, op, land: at + offs[op], threads: want[op], gb });
+    for (const entry of fresh) {
+      const { op, land, gb } = entry;
+      ledger.add(entry);
+      queues[op].push({ batch, op, land, threads: want[op], gb, entry });
+      // Reported only - the gate reads the ledger. Still the answer to "what
+      // has this stream planned and not yet placed".
       queuedRam += gb;
     }
 
@@ -593,6 +652,9 @@ export function createStream(ns, math, opts) {
   function abort(batch, why) {
     if (batch.aborted) return;
     batch.aborted = true;
+    // Ops that never launched will never take their RAM; launched ones still
+    // hold it until they land, and stay on the timeline.
+    for (const e of batch.entries ?? []) if (!e.launched) ledger.delete(e);
     // Zeroed so retire() stops waiting for ops that will never launch. What has
     // already launched still reports, and is still credited.
     batch.pending = 0;
@@ -650,6 +712,11 @@ export function createStream(ns, math, opts) {
 
     const worker = WORKER_FILES[kind];
     let committed = 0;
+    // On the timeline from here on as RUNNING RAM: already in freeRam, given
+    // back at landing. Grows as execs succeed, so a part-launched op that is
+    // then aborted still counts what it holds.
+    const entry = item.entry;
+    if (entry) { entry.launched = true; entry.gb = 0; }
 
     for (const p of placements) {
       // Recomputed per exec: even one op's placements span real wall time.
@@ -664,6 +731,7 @@ export function createStream(ns, math, opts) {
         return;
       }
       pool.commit([p]);
+      if (entry) entry.gb += p.threads * ram[kind];
       batch.expected++;
       committed++;
     }
@@ -687,7 +755,10 @@ export function createStream(ns, math, opts) {
     // earns their money.
     if (stopped) {
       for (const op of LAUNCH_ORDER) {
-        for (const item of queues[op]) abort(item.batch, "stream stopped");
+        for (const item of queues[op]) {
+          abort(item.batch, "stream stopped");
+          if (item.entry && !item.entry.launched) ledger.delete(item.entry);
+        }
         queues[op].length = 0;
       }
       // Nothing is queued any more, so nothing is owed. Zeroed outright rather
@@ -1069,21 +1140,21 @@ export function createStream(ns, math, opts) {
    * at CADENCE_MS, which is set by jitter against the spacer and has nothing to
    * do with RAM.
    *
-   * heldFromDispatch, not the game's per-op durations and not one weaken window,
-   * because the constraint this cadence has to respect is the dispatch GATE, and
-   * the gate charges every queued op from dispatch to landing. This used to be
-   * heldAllAtOnce on the theory that it over-stated JIT holding by ~20%; against
-   * the gate it UNDER-stated by up to MAX_ANCHOR_SWING, and a pipeline paced to
-   * fill its slice filled ~1.25x of it. It is also what chooseSteal prices with,
-   * so the stream and the calculator that admitted it still agree.
+   * heldFromLaunch, because the constraint this cadence has to respect is the
+   * dispatch GATE, and the timeline gate charges each op from its own launch to
+   * its landing. Priced any other way, pace and gate disagree: heldAllAtOnce
+   * under-stated the old dispatch-charging gate by up to MAX_ANCHOR_SWING and
+   * filled ~1.25x the slice; heldFromDispatch over-states this one and left a
+   * live pool two thirds idle. It is also what chooseSteal prices with, so the
+   * stream and the calculator that admitted it still agree.
    *
    * Anchors are monotonic, so a cadence that narrows takes effect on the next
    * dispatch and one that widens takes effect immediately - nextAnchor keeps
    * every batch already in the air where it was scheduled either way.
    */
-  function pace(th, times, anchorSwing) {
+  function pace(th, times, swing, anchorSwing) {
     if (!(slice > 0)) return;
-    const held = heldFromDispatch(times, anchorSwing, spacer, minLead);
+    const held = heldFromLaunch(times, swing, anchorSwing, spacer, minLead, lead);
     const ramSeconds = batchRamSeconds(th, ram, held, th.weaken2);
     if (!(ramSeconds > 0)) return;
     cadence = Math.max(CADENCE_MS, ramSeconds / slice);

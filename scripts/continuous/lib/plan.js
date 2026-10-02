@@ -7,6 +7,7 @@ import {
   BAD_BATCH_TOLERANCE,
   GROW_DRIFT_TOLERANCE,
   GROW_MARGIN_CAP,
+  LAUNCH_LEAD_MS,
   MONEY_FLOOR_SHARE,
   MAX_ANCHOR_SWING,
   MAX_STEAL_FRACTION,
@@ -532,6 +533,33 @@ export function heldFromDispatch(times, anchorSwing, spacer = SPACER_MS, minLead
 }
 
 /**
+ * How long each op of a batch REALLY holds its RAM under JIT: from its own
+ * launch to its landing, and never longer than from dispatch.
+ *
+ * tick() launches an op once `land - opTime * (1 + swing) - now <= lead`, so
+ * that is its hold - hack about a quarter of a window, grow 0.8. weaken-1 is
+ * due before its batch is even planned (the anchor carries only anchorSwing, the
+ * launch test the full swing), so it goes out at dispatch; the min() says so.
+ *
+ * This is what the timeline gate in stream.js charges, and so what pace and
+ * chooseSteal have to price. heldFromDispatch charged every op from dispatch,
+ * and a live 3.7TB pool ran one target with 2.44TB free and 1.37TB "queued" -
+ * reserved for ops that had not launched - about a third of it doing work.
+ */
+export function heldFromLaunch(
+  times, swing, anchorSwing, spacer = SPACER_MS, minLead = MIN_LEAD_MS, lead = LAUNCH_LEAD_MS,
+) {
+  const d = heldFromDispatch(times, anchorSwing, spacer, minLead);
+  const own = (t) => t * (1 + swing) + lead;
+  return {
+    H: Math.min(d.H, own(times.hack)),
+    W1: Math.min(d.W1, own(times.weaken)),
+    G: Math.min(d.G, own(times.grow)),
+    W2: Math.min(d.W2, own(times.weaken)),
+  };
+}
+
+/**
  * GB-milliseconds one batch occupies, given how long each op holds its RAM.
  *
  * @param {object} threads {hack, weaken1, grow} in EFFECTIVE threads
@@ -660,11 +688,11 @@ export function chooseSteal(math, snap, ram, budgetGb, opts = {}) {
   const priceAt = (hack) => {
     const threads = planThreadsForHack(math, snap, hack, perThread, { growMargin, drift });
     if (!threads) return null;
-    // Per probe, because the anchor swing depends on the batch's own security
-    // cost - and priced the way the dispatch gate charges, not one window, or
-    // the slice this returns is one the stream cannot fill. See heldFromDispatch.
-    const heldTimes = held ??
-      heldFromDispatch(times, anchorSwingFor(threads, snap.minSec).anchorSwing);
+    // Per probe, because the swing depends on the batch's own security cost -
+    // and priced the way the dispatch gate charges, or the slice this returns
+    // is one the stream cannot fill. See heldFromLaunch.
+    const sw = anchorSwingFor(threads, snap.minSec);
+    const heldTimes = held ?? heldFromLaunch(times, sw.swing, sw.anchorSwing);
     // What the pool must hold at ONE INSTANT. Every op of a batch is live just
     // before its anchor - W1 and W2 span the whole window, grow 0.8 of it - so
     // the peak really is the whole batch, and it does not shrink when the

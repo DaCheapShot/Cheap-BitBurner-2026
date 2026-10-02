@@ -526,12 +526,18 @@ landings per step, so a cadence too slow for the batch starves the evidence that
 the cadence at every dispatch from the batch it just planned, where the fraction, the hacking level
 and the drift budget are all already in hand for free.
 
-**Both `pace` and `chooseSteal` price RAM as the dispatch GATE charges it** (`heldFromDispatch`),
-not as the game holds it. The gate refuses against `freeRam - queuedRam`, so a batch is charged
-whole from dispatch until it lands, `W * (1 + anchorSwing) + MIN_LEAD_MS` - and the swing reaches
-its 0.25 cap at high steal. Pricing one weaken window (`heldAllAtOnce`, on the theory that it
-over-stated JIT) under-stated that by up to 25%: a live swap sized phantasy at 44% for 89.8 TB
-of an 85% budget, the pipeline hit no room at depth 112, and the steal fell to 0.5%.
+**The dispatch gate is a TIMELINE, and `pace` and `chooseSteal` price RAM exactly as it charges**
+(`heldFromLaunch`). Every op of every stream sits in `pool.ledger` from the tick that will launch
+it to its landing; `timelineFits` sweeps those steps from `pool.freeRam` and refuses a batch whose
+ops would take free RAM below zero at any instant they run. That is the pile-up the gate exists for
+(`depth 70 sent 70 done 0`, `no room for G x69`) caught where it happens.
+
+It replaced a scalar, `freeRam - queuedRam`, that charged every op whole from DISPATCH - hack for
+~4x its run, grow ~1.5x. A live 3.7 TB early-game pool ran one target with 2.44 TB free and 1.37 TB
+"queued", about a third of it doing work, and the cloud servers (1-core, filled last by grow and
+weaken's `coresDesc`) sat empty. Pace and gate must agree either way: pricing one weaken window
+against the dispatch gate under-stated it by up to 25%, a live swap sized phantasy at 44% for
+89.8 TB of an 85% budget, the pipeline hit no room at depth 112, and the steal fell to 0.5%.
 
 Two things turned that into a collapse, and both are fixed separately because any real squeeze
 reaches them. **No-room evidence is ignored for one pipeline turnover after a step**
