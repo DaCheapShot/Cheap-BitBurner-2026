@@ -2580,7 +2580,7 @@ export const tests = {
              weakenTime: 20000, growTime: 16000, hackTime: 5000 },
       },
     });
-    const { chooseSteal, batchRamSeconds, heldAllAtOnce, heldFromDispatch, anchorSwingFor } =
+    const { chooseSteal, batchRamSeconds, heldFromDispatch, heldFromLaunch, anchorSwingFor } =
       mods["lib/plan"];
 
     const snap = math.snapshot(ns, "t");
@@ -2589,20 +2589,21 @@ export const tests = {
     const got = chooseSteal(math, snap, ram, budget);
     const th = got.threads;
 
-    // The gate refuses against freeRam - queuedRam, so a batch is charged whole
-    // from dispatch to landing, and the anchor sits W * (1 + anchorSwing) out.
-    // A live run priced phantasy at one window for depth 107 = 89.8TB, the gate
-    // held ~1.25x that, and the controller then walked 44% down to 0.5%.
-    const { anchorSwing } = anchorSwingFor(th, snap.minSec);
+    // The timeline gate charges each op from its own launch to its landing
+    // (heldFromLaunch). Priced any other way, the slice is either over-filled
+    // (a live run priced one window when the gate charged 1.25x and walked 44%
+    // down to 0.5%) or two thirds idle (charged from dispatch, a live 3.7TB pool
+    // ran one target with 2.44TB free).
+    const { swing, anchorSwing } = anchorSwingFor(th, snap.minSec);
     assert(anchorSwing > 0.1, `the fixture must carry a real swing, got ${anchorSwing}`);
 
-    const charged = batchRamSeconds(th, ram, heldFromDispatch(times, anchorSwing), th.weaken2) / got.cadence;
+    const charged = batchRamSeconds(th, ram, heldFromLaunch(times, swing, anchorSwing), th.weaken2) / got.cadence;
     assert(charged <= budget * (1 + 1e-6), `the gate is charged ${charged} against a ${budget} slice`);
 
-    // Not vacuous: the one-window model reads this same pace as well under the
-    // slice, which is the gap it used to spend.
-    const oneWindow = batchRamSeconds(th, ram, heldAllAtOnce(times), th.weaken2) / got.cadence;
-    assert(oneWindow < budget * 0.9, `one-window pricing is not the smaller figure: ${oneWindow}`);
+    // Not vacuous: the dispatch-charge model reads this same pace as well over
+    // the slice - the RAM it used to leave idle.
+    const fromDispatch = batchRamSeconds(th, ram, heldFromDispatch(times, anchorSwing), th.weaken2) / got.cadence;
+    assert(fromDispatch > budget * 1.1, `dispatch pricing is not the larger figure: ${fromDispatch}`);
   },
 
   "the cost function is monotonic, which is what makes the search valid": async () => {
@@ -3187,6 +3188,42 @@ export const tests = {
     assert(!calls.some((c) => c.args[5] === "H"), "a stopped stream launched a hack");
   },
 
+  "the timeline gate charges an op only while it will run": async () => {
+    const { mods } = await loadContinuous();
+    const { timelineFits } = mods["lib/stream"];
+    const op = (start, end, gb, launched = false) => ({ start, end, gb, launched });
+    const pool = (freeRam, ...entries) => ({ freeRam, ledger: new Set(entries) });
+
+    // Queued 80 over [10, 20) on a 100 pool: another 80 after it lands fits.
+    // The scalar it replaced read 100 - 80 < 80 and refused - the idle RAM.
+    assert(timelineFits(pool(100, op(10, 20, 80)), [op(25, 30, 80)], 0), "a later op was refused");
+    // Overlapping it does not: this is the grows-come-due-together pile-up.
+    assert(!timelineFits(pool(100, op(10, 20, 80)), [op(15, 30, 80)], 0), "an overlap was admitted");
+    // A running op gives its RAM back at landing, and not before.
+    assert(timelineFits(pool(40, op(0, 12, 50, true)), [op(15, 30, 80)], 0), "a landed op still held RAM");
+    assert(!timelineFits(pool(40, op(0, 12, 50, true)), [op(5, 30, 80)], 0), "a running op was treated as free");
+    // Ended entries are pruned, so the ledger cannot grow without bound.
+    const p = pool(100, op(0, 5, 10, true));
+    timelineFits(p, [op(20, 30, 1)], 10);
+    assert(p.ledger.size === 0, `ended entries kept: ${p.ledger.size}`);
+  },
+
+  "an aborted batch leaves only its running ops on the timeline": async () => {
+    const t = { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+                hackPercentPerThread: 0.003, growBase: 1.0018,
+                weakenTime: 20000, growTime: 16000, hackTime: 5000 };
+    const { s, pool } = await makeStream({ servers: { t } });
+    assert(s.dispatch().dispatched, "the healthy batch was refused");
+    // Only weaken-1 is due this early; the rest are still queued when it stops.
+    s.tick();
+    t.hackDifficulty = 40;
+    for (let i = 0; i < 10 && !s.stopped; i++) s.dispatch(Date.now() + i * 1e6);
+    assert(s.stopped, "the fixture should stop the stream");
+    s.tick(Date.now() + 1e9);
+    const left = [...(pool.ledger ?? [])].filter((e) => !e.launched);
+    assert(left.length === 0, `${left.length} never-launched ops still reserve RAM`);
+  },
+
   "a wound-down stream still launches the batches it already planned": async () => {
     const { s, calls } = await makeStream();
 
@@ -3358,13 +3395,14 @@ export const tests = {
     // the controller ramps toward that in x1.5 steps.
     const occupancy = async (steal) => {
       const { s, ns, math, ram, mods } = await makeStream({ steal, slice });
-      const { batchRamSeconds, heldFromDispatch, anchorSwingFor } = mods["lib/plan"];
+      const { batchRamSeconds, heldFromLaunch, anchorSwingFor } = mods["lib/plan"];
       assert(s.dispatch().dispatched, `steal ${steal} failed to dispatch`);
       const snap = math.snapshot(ns, "t");
       const times = math.opTimes(snap);
       const th = s.stats.lastThreads;
       // The occupancy the dispatch GATE sees, which is what the slice must hold.
-      const held = heldFromDispatch(times, anchorSwingFor(th, snap.minSec).anchorSwing);
+      const { swing, anchorSwing } = anchorSwingFor(th, snap.minSec);
+      const held = heldFromLaunch(times, swing, anchorSwing);
       return {
         cadence: s.cadence,
         gb: batchRamSeconds(th, ram, held, th.weaken2) / s.cadence,
