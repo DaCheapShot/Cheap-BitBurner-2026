@@ -1,5 +1,5 @@
 import {
-  SHOCK_RECOVER_ABOVE, MAX_SKILL_LEVEL, INT_CRIME_WEIGHT, SYNC_PER_SECOND, CRIMES,
+  SHOCK_RECOVER_ABOVE, KARMA_MIN_CHANCE, MAX_SKILL_LEVEL, INT_CRIME_WEIGHT, SYNC_PER_SECOND, CRIMES,
   GANG_KARMA_TARGET, MONEY_CRIMES, GYM, GYM_CITY, GYM_EXP_PER_SECOND, GYM_STATS, JOB_MULTS,
   COVENANT, COVENANT_MAX_SLEEVES, COVENANT_SLEEVE_BASE, MEMORY_BASE_COST, MEMORY_MULT, MEMORY_MAX,
 } from "./config.js";
@@ -268,19 +268,21 @@ export function describeTask(t) {
  * One action per sleeve, with the reason for it. The user's ranking, top rung
  * wins:
  *
+ *   0. SHOCK - any sleeve above SHOCK_RECOVER_ABOVE recovers first, whatever
+ *      else is open (the user's rule). Shock scales the exp a sleeve SHARES
+ *      with every other sleeve and the player (applySleeveGains), so a shocked
+ *      trainer's gym hours reach almost nobody. Under the bar, work wears the
+ *      rest off.
  *   1. KARMA - every sleeve, while a gang is wanted (`gang.enabled` on, no
  *      --no-gang), can be founded (BN2 or SF2) and none exists yet. Sync up to
- *      karmaSyncTarget, then the best karma crime.
+ *      karmaSyncTarget, then the gym or the best karma crime - and below
+ *      KARMA_MIN_CHANCE at that crime, the best MONEY crime instead.
  *   2. FACTION REP, then 3. COMPANY REP - one sleeve per REP_WANT_MARKER entry,
  *      the game's rule (setToFactionWork / setToCompanyWork throw on a second).
- *      A sleeve over SHOCK_RECOVER_ABOVE earns too little rep to be worth
- *      placing and recovers instead - but only as many sleeves as there are
- *      entries left open, least shocked first, so spares do not idle in
- *      recovery for work that does not exist.
- *   4. MONEY - the best money crime. Crime money ignores shock.
+ *   4. MONEY - the best money crime.
  *
- * A sleeve already on a wanted entry, and fit for it, KEEPS it before anything
- * is handed out, so a tick never shuffles sleeves between factions.
+ * A sleeve already on a wanted entry KEEPS it before anything is handed out,
+ * so a tick never shuffles sleeves between factions.
  *
  * @param o.sleeves  [{ shock, sync, skills, mults }]   the READ body
  * @param o.tasks    [task | null]                       the TASKS body
@@ -289,29 +291,40 @@ export function describeTask(t) {
  * @param o.karma    a gang is wanted: `gang.enabled` on and no --no-gang
  * @param o.canGang  BN2 or SF2 - there is a gang to found
  * @param o.inGang   ns.gang.inGang()
- * @returns [{ kind: "recover"|"sync"|"crime"|"faction"|"company", ..., why }]
+ * @returns [{ kind: "recover"|"sync"|"gym"|"crime"|"faction"|"company", ..., why }]
  */
 export function assign({ sleeves, tasks = [], player, want, karma, canGang, inGang }) {
-  const out = new Array(sleeves.length).fill(null);
+  const out = sleeves.map((s) => (s.shock > SHOCK_RECOVER_ABOVE
+    ? { kind: "recover", rung: "shock", why: `shock ${s.shock.toFixed(1)}, recovering to ${SHOCK_RECOVER_ABOVE} before anything else` }
+    : null));
+  const ready = sleeves.map((s, i) => i).filter((i) => !out[i]);
 
   const owed = player.karma - GANG_KARMA_TARGET;
   if (karma && canGang && !inGang && owed > 0) {
     const synced = [];
-    sleeves.forEach((s, i) => {
+    for (const i of ready) {
+      const s = sleeves[i];
       const best = bestCrime(s, "karma");
       const target = karmaSyncTarget(owed, sleeves.length, player.skills?.intelligence, best.rate);
       if (s.sync < target) out[i] = { kind: "sync", rung: "karma", why: `karma: sync ${s.sync.toFixed(1)} of ${target.toFixed(1)} before crime` };
       else synced.push(i);
-    });
+    }
     const gym = gymPlan(sleeves, synced, owed, tasks);
     for (const i of synced) {
       const g = gym.get(i);
       const best = bestCrime(sleeves[i], "karma");
+      const odds = crimeChance(sleeves[i], best.crime);
+      const at = `${best.crime} at ${(odds * 100).toFixed(1)}%`;
+      // No gym stat left for it and karma odds this poor: money instead (the
+      // user's rule). It stays on the karma rung, so it still never buys an aug
+      // - a wipe would take the odds back down with it.
+      const cash = !g && odds < KARMA_MIN_CHANCE ? bestCrime(sleeves[i], "money").crime : null;
       out[i] = g
-        ? { kind: "gym", rung: "karma", gym: GYM, stat: g.type, why: `karma: training ${g.stat} pays more than ${best.crime} ` +
-            `at ${(crimeChance(sleeves[i], best.crime) * 100).toFixed(1)}% (shared with every sleeve)` }
-        : { kind: "crime", rung: "karma", crime: best.crime,
-            why: `karma for a gang, ${best.crime} at ${(crimeChance(sleeves[i], best.crime) * 100).toFixed(1)}%` };
+        ? { kind: "gym", rung: "karma", gym: GYM, stat: g.type, why: `karma: training ${g.stat} pays more than ${at} (shared with every sleeve)` }
+        : cash
+          ? { kind: "crime", rung: "karma", crime: cash,
+              why: `money: ${at} is under ${(KARMA_MIN_CHANCE * 100).toFixed(0)}%, ${cash} at ${(crimeChance(sleeves[i], cash) * 100).toFixed(1)}%` }
+          : { kind: "crime", rung: "karma", crime: best.crime, why: `karma for a gang, ${at}` };
     }
     return out;
   }
@@ -326,36 +339,21 @@ export function assign({ sleeves, tasks = [], player, want, karma, canGang, inGa
   const holds = (t, j) => t && (j.kind === "faction"
     ? t.type === "FACTION" && t.factionName === j.faction
     : t.type === "COMPANY" && t.companyName === j.company);
-  const fit = (s) => s.shock <= SHOCK_RECOVER_ABOVE;
   const place = (s, j) => (j.kind === "faction"
     ? { kind: "faction", rung: "rep", faction: j.faction, type: bestWorkType(s.skills, j.types), why: "faction rep sing wants" }
     : { kind: "company", rung: "rep", company: j.company, why: "company rep for its faction's invite" });
 
-  // 1. Keep.
+  // 1. Keep, then 2. fill.
   const taken = new Set();
-  sleeves.forEach((s, i) => {
+  for (const i of ready) {
     const j = jobs.find((x) => !taken.has(key(x)) && holds(tasks[i], x));
-    if (j && fit(s)) {
-      out[i] = place(s, j);
+    if (j) {
+      out[i] = place(sleeves[i], j);
       taken.add(key(j));
     }
-  });
-
-  // 2. Fill, least shocked first; 3. recover for what is still open.
+  }
   const open = jobs.filter((j) => !taken.has(key(j)));
-  const order = sleeves.map((s, i) => i).filter((i) => !out[i]).sort((a, b) => sleeves[a].shock - sleeves[b].shock);
-  for (const i of order) {
-    if (open.length && fit(sleeves[i])) out[i] = place(sleeves[i], open.shift());
-  }
-  for (const i of order) {
-    if (out[i] || !open.length) continue;
-    const j = open.shift();
-    out[i] = {
-      kind: "recover", rung: "rep",
-      why: `shock ${sleeves[i].shock.toFixed(1)} over ${SHOCK_RECOVER_ABOVE.toFixed(1)}, recovering for ` +
-        `${j.kind === "faction" ? j.faction : j.company}`,
-    };
-  }
+  for (const i of ready) if (!out[i] && open.length) out[i] = place(sleeves[i], open.shift());
 
   // 4. Money.
   sleeves.forEach((s, i) => {

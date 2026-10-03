@@ -347,7 +347,7 @@ editor's RAM panel when one moves.
 | `hacknet/math.js` | cost ladders, gain ratios, both plans - pure | 0 |
 | `hacknet/hacknet.js` | entry: ONE money sweep then exits; boot runs it every other tick | 5.45 |
 | `hacknet/hashes.js` | entry: ONE hash sweep then exits; a no-op outside BitNode 9 | 6.60 |
-| `sleeve/config.js` | sleeve tunables, the crime table, `SHOCK_RECOVER_ABOVE` | 0 |
+| `sleeve/config.js` | sleeve tunables, the crime table, `SHOCK_RECOVER_ABOVE`, `KARMA_MIN_CHANCE` | 0 |
 | `sleeve/plan.js` | `assign` + the crime, sync and work-type math - pure | 0 |
 | `sleeve/sleeve.js` | entry: ONE assignment pass then exits; boot runs it every tick | 2.60 |
 | ↳ fourteen bodies | transients: count, read, tasks, recover, sync, crime, gym, faction, company, avail, buy, stats, buy sleeve, memory | 5.60–6.60 |
@@ -1188,14 +1188,13 @@ already pays `ns.run` - so boot stays at 3.50.
 identifiers anywhere in the closure; `tests/ram.test.mjs` bans them and pins `sleeve/plan.js` and
 `sleeve/config.js` at the base.
 
-**Shock gates rep, and nothing else.** A sleeve starts at shock 100; rep and exp are x
-`(100-shock)/100`, so a fresh sleeve earns **zero** rep, while crime money and karma ignore shock.
-Any work lowers shock at `a` = 0.0001/cycle and recovery at 3a, and recovery **stops itself to
-idle at 0**. `SHOCK_RECOVER_ABOVE` = **100/3** is derived, not tuned: recovering forgoes
-`(100-s) dt` of rep now and saves `2s dt` of future loss over working, so recover while
-`s > 100/3`. The int bonus is in both rates and cancels. A test simulates the grind and finds the
-same number. Only as many sleeves recover as there are rep entries left open, least shocked
-first; the spares earn money.
+**Every sleeve recovers shock to `SHOCK_RECOVER_ABOVE` = 20 before anything else** - the user's
+rule, on every rung. A sleeve starts at shock 100; rep and exp are x `(100-shock)/100`, and the exp
+it SHARES (`applySleeveGains`) is cut twice, at sender and receiver - a shocked gym trainer raises
+almost nobody. Recover while `f(s) > 1/3`, f the fraction of output lost: linear (own rep) gives
+33.3, squared (shared exp) 18.4; 20 sits at the shared-exp end. Work wears off the rest at a third
+of recovery's rate - the last 20 points recovered cost ~3.7 h of nothing against ~1.1 h lost
+working them off. Recovery to 0 was tried first and dropped for that.
 
 **Sync gates karma, and the switch point is computed.** Karma per sleeve crime is
 `crime.karma x sync/100`. Sync starts at 1 (`memory`) and climbs ~0.001/s, **stopping itself to
@@ -1206,6 +1205,10 @@ turns to crime never turns back. Karma needs a gang to be foundable (BN2 or SF2,
 and none yet, and it follows **the gang switch**: `gang.enabled` off, or boot's `--no-gang` (passed
 through to the pass), and no sleeve farms karma - it buys nothing but a gang, so there is no
 separate sleeve knob to disagree with it.
+
+**A karma sleeve with no gym stat left does MONEY under `KARMA_MIN_CHANCE` (25%).** Four sleeves
+at the gym and four on Homicide at 0.5% was the live case; the spares now do the best money crime
+until the trainers lift the odds. They stay on the karma rung, so they still never buy an aug.
 
 **Karma sleeves train first, while it pays.** The first live run had a synced sleeve at 16 combat
 doing Homicide at 8.2% - the right crime (2.5x Shoplift's karma/s at those odds) and ~180 hours to

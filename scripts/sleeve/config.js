@@ -40,20 +40,27 @@ export { GANG_KARMA_TARGET, MONEY_CRIMES } from "scripts/sing/config.js";
 // ------------------------------------------------------------- game rules ---
 
 /**
- * Recover shock above this, work below it. DERIVED, not tuned.
+ * Every sleeve recovers shock above this before any other work; at or under it,
+ * work finishes the job (any work lowers shock at a third of recovery's rate).
  *
- * Rep is x (100 - shock)/100 (SleeveFactionWork.getReputationRate). Any work
- * lowers shock at a = 0.0001 per cycle (Sleeve.process); shock recovery adds
- * 0.0002 on top, 3a in all. Working from shock s for ever after forgoes
- * L(s) = s^2 / 2a of rep against a shock-free sleeve. Over dt:
- *   work:    forgoes s dt now,          leaves L(s - a dt)
- *   recover: forgoes all 100 dt now,    leaves L(s - 3a dt)
- * Recovering's extra future saving is L(s - a dt) - L(s - 3a dt) = 2 s dt, its
- * extra cost now is (100 - s) dt: recover while 2s > 100 - s, i.e. s > 100/3.
- * Both rates carry the same intelligence bonus (weight 0.75), so it cancels.
- * tests/sleeve.test.mjs checks this against a simulated grind.
+ * Shock scales a sleeve's output by (1 - s/100), and the exp it SHARES twice:
+ * once at the sender, once at the receiver (applySleeveGains). With every sleeve
+ * at about the same shock, the shared output scales by (1 - s/100)^2. Recover
+ * while the future loss it avoids beats the output it gives up now:
+ * f(s) > 1/3, where f is the fraction of output lost. Linear f (own rep) gives
+ * s > 33.3; squared f (shared exp) gives s > 18.4. 20 is the user's call, at
+ * the shared-exp end. Recovering the last 20 points takes ~3.7 h of nothing,
+ * against ~1.1 h of output lost by working them off over ~11 h.
  */
-export const SHOCK_RECOVER_ABOVE = 100 / 3;
+export const SHOCK_RECOVER_ABOVE = 20;
+
+/**
+ * A karma sleeve with no gym stat left does its best karma crime only at these
+ * odds or better; below, it does the best money crime. The user's call, not a
+ * derivation: karma and money do not convert, and Homicide at 0.5% earns
+ * neither. The four gym trainers lift every sleeve's odds past it in time.
+ */
+export const KARMA_MIN_CHANCE = 0.25;
 
 // ------------------------------------------------------------------- augs ---
 
