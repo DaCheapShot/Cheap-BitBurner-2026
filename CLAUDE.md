@@ -347,7 +347,7 @@ editor's RAM panel when one moves.
 | `hacknet/math.js` | cost ladders, gain ratios, both plans - pure | 0 |
 | `hacknet/hacknet.js` | entry: ONE money sweep then exits; boot runs it every other tick | 5.45 |
 | `hacknet/hashes.js` | entry: ONE hash sweep then exits; a no-op outside BitNode 9 | 6.60 |
-| `sleeve/config.js` | sleeve tunables, the crime table, `KARMA_MIN_CHANCE` | 0 |
+| `sleeve/config.js` | sleeve tunables, the crime table, `SHOCK_RECOVER_ABOVE`, `KARMA_MIN_CHANCE` | 0 |
 | `sleeve/plan.js` | `assign` + the crime, sync and work-type math - pure | 0 |
 | `sleeve/sleeve.js` | entry: ONE assignment pass then exits; boot runs it every tick | 2.60 |
 | ↳ fourteen bodies | transients: count, read, tasks, recover, sync, crime, gym, faction, company, avail, buy, stats, buy sleeve, memory | 5.60–6.60 |
@@ -1188,11 +1188,13 @@ already pays `ns.run` - so boot stays at 3.50.
 identifiers anywhere in the closure; `tests/ram.test.mjs` bans them and pins `sleeve/plan.js` and
 `sleeve/config.js` at the base.
 
-**Every sleeve recovers shock to 0 before anything else** - the user's rule, on every rung. A
-sleeve starts at shock 100; rep and exp are x `(100-shock)/100`, and so is the exp it SHARES
-(`applySleeveGains`) - a shocked gym trainer raises nobody but itself. Recovery **stops itself to
-idle at 0** and the next pass hands out work. This replaced a derived `SHOCK_RECOVER_ABOVE` =
-100/3 that maximised one sleeve's own rep and left shared exp out of the sum.
+**Every sleeve recovers shock to `SHOCK_RECOVER_ABOVE` = 20 before anything else** - the user's
+rule, on every rung. A sleeve starts at shock 100; rep and exp are x `(100-shock)/100`, and the exp
+it SHARES (`applySleeveGains`) is cut twice, at sender and receiver - a shocked gym trainer raises
+almost nobody. Recover while `f(s) > 1/3`, f the fraction of output lost: linear (own rep) gives
+33.3, squared (shared exp) 18.4; 20 sits at the shared-exp end. Work wears off the rest at a third
+of recovery's rate - the last 20 points recovered cost ~3.7 h of nothing against ~1.1 h lost
+working them off. Recovery to 0 was tried first and dropped for that.
 
 **Sync gates karma, and the switch point is computed.** Karma per sleeve crime is
 `crime.karma x sync/100`. Sync starts at 1 (`memory`) and climbs ~0.001/s, **stopping itself to

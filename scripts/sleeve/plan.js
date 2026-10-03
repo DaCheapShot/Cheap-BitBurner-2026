@@ -1,5 +1,5 @@
 import {
-  KARMA_MIN_CHANCE, MAX_SKILL_LEVEL, INT_CRIME_WEIGHT, SYNC_PER_SECOND, CRIMES,
+  SHOCK_RECOVER_ABOVE, KARMA_MIN_CHANCE, MAX_SKILL_LEVEL, INT_CRIME_WEIGHT, SYNC_PER_SECOND, CRIMES,
   GANG_KARMA_TARGET, MONEY_CRIMES, GYM, GYM_CITY, GYM_EXP_PER_SECOND, GYM_STATS, JOB_MULTS,
   COVENANT, COVENANT_MAX_SLEEVES, COVENANT_SLEEVE_BASE, MEMORY_BASE_COST, MEMORY_MULT, MEMORY_MAX,
 } from "./config.js";
@@ -268,11 +268,11 @@ export function describeTask(t) {
  * One action per sleeve, with the reason for it. The user's ranking, top rung
  * wins:
  *
- *   0. SHOCK - any sleeve above shock 0 recovers first, whatever else is open
- *      (the user's rule). Shock scales the exp a sleeve SHARES with every other
- *      sleeve and the player (applySleeveGains, x (1 - shock/100)), so a shocked
- *      trainer's gym hours reach nobody but itself. Recovery stops itself to
- *      idle at 0, and the next pass hands the sleeve real work.
+ *   0. SHOCK - any sleeve above SHOCK_RECOVER_ABOVE recovers first, whatever
+ *      else is open (the user's rule). Shock scales the exp a sleeve SHARES
+ *      with every other sleeve and the player (applySleeveGains), so a shocked
+ *      trainer's gym hours reach almost nobody. Under the bar, work wears the
+ *      rest off.
  *   1. KARMA - every sleeve, while a gang is wanted (`gang.enabled` on, no
  *      --no-gang), can be founded (BN2 or SF2) and none exists yet. Sync up to
  *      karmaSyncTarget, then the gym or the best karma crime - and below
@@ -294,8 +294,8 @@ export function describeTask(t) {
  * @returns [{ kind: "recover"|"sync"|"gym"|"crime"|"faction"|"company", ..., why }]
  */
 export function assign({ sleeves, tasks = [], player, want, karma, canGang, inGang }) {
-  const out = sleeves.map((s) => (s.shock > 0
-    ? { kind: "recover", rung: "shock", why: `shock ${s.shock.toFixed(1)}, recovering to 0 before anything else` }
+  const out = sleeves.map((s) => (s.shock > SHOCK_RECOVER_ABOVE
+    ? { kind: "recover", rung: "shock", why: `shock ${s.shock.toFixed(1)}, recovering to ${SHOCK_RECOVER_ABOVE} before anything else` }
     : null));
   const ready = sleeves.map((s, i) => i).filter((i) => !out[i]);
 

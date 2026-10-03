@@ -197,18 +197,18 @@ export const tests = {
   },
 
   // The user's rule: shock scales the exp a sleeve shares, so every sleeve
-  // recovers to 0 first - on every rung, whatever work is open.
-  "shock first: any shocked sleeve recovers, on every rung": async () => {
+  // recovers to SHOCK_RECOVER_ABOVE first - on every rung, whatever work is open.
+  "shock first: a sleeve over the bar recovers, on every rung": async () => {
     const { assign } = (await loadScripts())["sleeve/plan"];
     const want = { factions: [{ faction: "CyberSec", types: HACK }], companies: [] };
-    const sleeves = [sleeve({ shock: 0.1 }), sleeve({ shock: 0 }), sleeve({ shock: 100, sync: 1 })];
+    const sleeves = [sleeve({ shock: 20.1 }), sleeve({ shock: 20 }), sleeve({ shock: 100, sync: 1 })];
     for (const over of [{ karma: false }, { karma: true, canGang: true, inGang: false }]) {
       const a = assign({ sleeves, player: { karma: 0, skills: skills(1) }, want, ...over });
       assert(a[0].kind === "recover" && a[2].kind === "recover", `shocked sleeves recover: ${JSON.stringify(a)}`);
-      assert(a[1].kind !== "recover", `shock 0 works: ${JSON.stringify(a[1])}`);
+      assert(a[1].kind !== "recover", `shock at the bar works: ${JSON.stringify(a[1])}`);
     }
     const r = assign({ sleeves, player: { karma: 0 }, want, karma: false });
-    assert(r[1].faction === "CyberSec", `the entry goes to the shock-0 sleeve: ${JSON.stringify(r[1])}`);
+    assert(r[1].faction === "CyberSec", `the entry goes to the sleeve at the bar: ${JSON.stringify(r[1])}`);
   },
 
   "a sleeve keeps the entry it is on - no shuffling between ticks": async () => {
