@@ -390,11 +390,22 @@ const BN_MULTS = `return ns.getBitNodeMultipliers().FactionWorkRepGain;`;
  * which is not worth holding the install for. It waits for the sweep so the
  * install cannot kill it mid-attempt; one past rpc's 10 s times out here and
  * the install waits for the next pass. Split from INSTALL: together 7.70.
+ *
+ * Stock positions are sold first - Prestige resets the market and every
+ * position in it. HELD_FILE is stocks.js's count of open positions (ns.read,
+ * 0 GB), so a save holding none pays nothing. -2 when anything is still held
+ * after sellall.js: the install waits rather than throw the money away.
  */
 const SWEEP = `
 import { SETTINGS_FILE, setting } from "/scripts/settings.js";
 import { CONTRACTS_SERVICE } from "/scripts/contracts/config.js";
+import { STOCKS_SELL_ALL, HELD_FILE } from "/scripts/stocks/config.js";
 if (!setting(ns.read(SETTINGS_FILE), "sing.autoInstall")) return -1;
+if (Number(ns.read(HELD_FILE)) > 0) {
+  const sold = ns.run(STOCKS_SELL_ALL);
+  while (sold && ns.isRunning(sold)) await ns.sleep(50);
+  if (!sold || Number(ns.read(HELD_FILE)) > 0) return -2;
+}
 const pid = ns.run(CONTRACTS_SERVICE);
 while (pid && ns.isRunning(pid)) await ns.sleep(200);
 return pid;
@@ -692,6 +703,10 @@ export async function main(ns) {
     }
     const swept = await call("sweep", SWEEP);
     if (swept === null) return;
+    if (swept === -2) {
+      log(`install: waiting - stock positions are still open and an install would lose them (run scripts/stocks/sellall.js)`);
+      return;
+    }
     if (swept < 0) {
       log(`install: sing.autoInstall is off - ${queued} queued, install by hand`);
       return;

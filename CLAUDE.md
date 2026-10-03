@@ -56,6 +56,7 @@ run scripts/boot.js --no-contracts      # do not solve coding contracts
 run scripts/boot.js --no-sing           # do not run the singularity supervisor
 run scripts/boot.js --no-hacknet        # do not buy hacknet nodes or spend hashes
 run scripts/boot.js --no-sleeve         # do not assign sleeve tasks
+run scripts/boot.js --no-stocks         # do not run the stock trader
 ```
 
 **There is one batcher**, `scripts/continuous/`. A second, the volley-firing "shotgun"
@@ -88,6 +89,11 @@ run scripts/hacknet/hashes.js --dry-run      # plan a hash spend and print it, s
 run scripts/sleeve/sleeve.js            # one sleeve assignment pass (boot runs it every tick)
 cat /data/sleeves.txt                   # what each sleeve is doing now, and why
 cat /data/sleeves.log.txt               # what happened: task changes, purchases, warnings (last 500)
+run scripts/stocks/stocks.js            # the stock trader (boot starts it too; parks without TIX)
+cat /data/stocks.txt                    # net worth, cash, each open position and its forecast
+cat /data/stocks.log.txt                # every trade with P/L, the 4S buy, warnings (last 500)
+run scripts/stocks/sellall.js           # close every position (sing runs it before an install)
+run scripts/set.js stocks.cash 1        # BN8: the whole net worth may sit in stocks (default 0.5)
 run scripts/last.js /data/sleeves.log.txt  # its last 10 lines in a tail window (any file; 2nd arg = count)
 run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
 run scripts/set.js sleeve.covenantCash 0.5  # BN10: fraction of cash a Covenant sleeve/memory buy may cost
@@ -351,6 +357,11 @@ editor's RAM panel when one moves.
 | `sleeve/plan.js` | `assign` + the crime, sync and work-type math - pure | 0 |
 | `sleeve/sleeve.js` | entry: ONE assignment pass then exits; boot runs it every tick | 2.60 |
 | ↳ fourteen bodies | transients: count, read, tasks, recover, sync, crime, gym, faction, company, avail, buy, stats, buy sleeve, memory | 5.60–6.60 |
+| `stocks/config.js` | trader tunables, paths, `HELD_FILE`/`HOLD_FILE` | 0 |
+| `stocks/math.js` | forecast estimate, exits, `planTrades` - pure | 0 |
+| `stocks/stocks.js` | entry: resident trader, one decision per market tick | 2.65 |
+| ↳ five bodies | transients: init, terms, read (every tick), trade, buy 4S API | 4.10–11.60 |
+| `stocks/sellall.js` | closes every position; sing's SWEEP runs it before an install | 10.65 |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
@@ -1138,11 +1149,13 @@ script, sing included, and 500 ms after the reset runs boot with **no arguments 
 (`Singularity.ts` `runAfterReset`) - so boot's defaults are what comes back up, and any flag typed by
 hand is gone. The callback is skipped only when home lacks the RAM, which cannot happen: every
 script was just killed. Boot's first pass ignores the cloud marker and re-roots and redeploys, the
-same path as a hand `run scripts/boot.js` after a hand install. Before it: the SWEEP body runs one
+same path as a hand `run scripts/boot.js` after a hand install. Before it: the SWEEP body sells every
+stock position (`stocks/sellall.js`, only when `HELD_FILE` says something is held - Prestige resets the
+market) and holds the install if any survive, then runs one
 contract sweep and waits it out (an install destroys every unsolved contract), then UPGRADE at
 fraction 1, then CORES, take the cash the install would reset. SWEEP is split from INSTALL - together 7.70 - and
-its body imports `CONTRACTS_SERVICE` from `contracts/config.js`, the one cross-subtree import in
-sing/, 0 GB and billed to the transient. `sing.autoInstall` (default `AUTO_INSTALL`) is read inside SWEEP,
+its body imports `CONTRACTS_SERVICE` from `contracts/config.js` and two paths from `stocks/config.js`,
+the only cross-subtree imports in sing/, 0 GB and billed to the transient. `sing.autoInstall` (default `AUTO_INSTALL`) is read inside SWEEP,
 so it is LIVE like the karma grind: off, the queue waits for a hand install. `sing.minAugBatch`
 (default `MIN_AUG_BATCH`) is read once per aug pass and passed to `planAugBuys` as `minBatch`. A sweep over rpc's 10 s times out, and
 the install waits for the next pass rather than kill the sweep mid-attempt.
@@ -1271,6 +1284,60 @@ the PLAYER; `ns.formulas.work` needs Formulas.exe. `Crime.successRate` and the `
 copied into `sleeve/config.js`, and `getSleeve` returns exactly the skills and mults that formula
 takes. Picks come from sing's `MONEY_CRIMES`, for the reason sing restricts itself: a switch
 forfeits the running unit.
+
+### The stock trader (`scripts/stocks/`)
+
+Built for BitNode 8, where `ScriptHackMoneyGain`, `HacknetNodeMoney`, `CrimeMoney` and
+`CompanyWorkMoney` are all 0: stocks are the only income there. The batcher still runs there for
+hacking EXP, which is still how `w0r1d_d43m0n` is reached. SF8.1 keeps TIX in every later node.
+Self-contained like `gang/`: it imports `scripts/rpc.js` and `scripts/settings.js`; boot,
+settings and sing's SWEEP read 0 GB constants out of `stocks/config.js`.
+
+**The market, from the fork's `src/StockMarket/`.** A tick every 6 s; `nextUpdate()` is 0 GB and
+resolves on it (but throws without TIX). Each stock moves up with probability `(50 ± otlkMag)/100`
+by `1 + U(0,1)·mv/100` - one draw of U shared by every stock that tick. Every 75 ticks
+(`TicksPerCycle`, one clock for the whole market, random offset) each stock flips bull/bear with
+p = 0.45. $100k commission per transaction; longs buy the ask and sell the bid. Trades move no
+price - they only drag the forecast toward 50 (`influenceForecast`), not modelled.
+`getForecast`/`getVolatility` check `has4SDataTixApi` ONLY, so the $1b 4S Market Data is never
+bought - just the API ($25b × `FourSigmaMarketDataApiCost`). Shorts need BN8 or SF8.2.
+
+**Resident, because the pre-4S forecast is an estimate over a run of ticks**: the up-tick share
+over `LONG_WIN` (40). `SHORT_WIN` (10) watches for the cycle flip, which the long window would
+take ~20 ticks to see: it closes a position reading the wrong way and vetoes a buy the long window
+still likes. Pre-4S edges are wider (`PRE_BUY_EDGE` 0.62) because 40 coin flips carry ~0.08 of
+standard error. With 4S the forecast is exact and `BUY_EDGE` is 0.55. Closing is at 0.5.
+
+**`planTrades` is the whole decision and is pure.** Sells first, their proceeds spent the same
+tick; opens ranked by `|2f−1| × mean move`, each as big as max shares and the budget allow, none
+under `MIN_TRADE` ($20m - two commissions are then 1%). The budget is the lesser of cash minus
+the 4S reserve and `stocks.cash` × net worth minus what is held. Never long and short in one
+stock. No rotation: a strong signal waits for a weak position to close on its own.
+
+**4S is bought at `FS_WORTH_MULT` (2) × its price.** Until cash alone covers it nothing opens;
+positions close on their own signals and the cash pools. A refused purchase (4S disabled by
+BitNode options, or no SF5 to price it) is final for the process - retrying it every tick would
+skip every tick's trading.
+
+**Every priced call is an rpc body, the gang/sing shape.** The API is 2.00-2.50 GB a name. The
+resident holds `hasTixApiAccess` (0.05) to park and nothing else: 2.65. READ runs every tick at
+10.75 - it carries `getPrice` alone, because the spread is fixed per stock (`spreadPerc` is
+readonly) and INIT reads ask/price and bid/price once. TRADE (11.60) only on a tick that trades.
+
+**Without TIX it PARKS, sing's reason**: an exit would have `ensureService` relaunch it every
+tick. Buying WSE/TIX outside BN8 is left to the player.
+
+**An install sells first, and that is three pieces.** Prestige resets the market and every
+position. `stocks.js` writes `HELD_FILE` (open positions) every tick; sing's SWEEP reads it
+(`ns.read`, 0 GB) and, when non-zero, runs `sellall.js` (10.65 - a real file, past sing's 6.60
+ceiling, and hand-runnable) and returns -2 if anything survives, so the install waits.
+`sellall.js` writes `HOLD_FILE` FIRST, and TRADE re-checks it before any open: both run to
+completion without an await, so a sell-all landing between the trader's plan and its TRADE can
+never be followed by a buy the install destroys. The hold lasts `HOLD_MS` (5 min).
+
+`tests/stocks.test.mjs` transcribes `processStockPrices` and `Stock.ts` into a seeded market and
+asserts the plan makes money on it pre-4S and more with 4S - the one check that the strategy,
+not just the code, works.
 
 ### The hacknet subsystem (`scripts/hacknet/`)
 
