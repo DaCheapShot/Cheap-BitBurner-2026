@@ -32,8 +32,8 @@ import { SETTINGS_FILE, setting } from "scripts/settings.js";
  * sing's SWEEP runs sellall.js when HELD_FILE says something is held, and
  * HOLD_FILE then keeps this from reopening for HOLD_MS.
  *
- * THE LOG IS A DASHBOARD, cleared and redrawn every tick: net worth at start
- * and now, profit and its rate, closed and open P/L and a row per position -
+ * THE LOG IS A DASHBOARD, cleared and redrawn every tick: stock profit only
+ * (closed + open, commissions in) and its rate, and a row per position -
  * no trade lines (the user's rule). Every trade goes to HISTORY_FILE instead.
  *
  * Usage:  run scripts/stocks/stocks.js     (boot does this; --no-stocks opts out)
@@ -175,10 +175,15 @@ export async function main(ns) {
   let terms = null;
   let fsRefused = false;
   const recs = new Map();
-  // The dashboard's baseline: net worth and positions at the first tick this
+  // The dashboard's baseline: positions held at the first tick this
   // process saw, and what closed positions have made since.
   let start = null;
   const realized = { pnl: 0, closes: 0, wins: 0 };
+  // Commissions paid opening each held position, by symbol. A position is
+  // topped up whenever its budget grows - one live-shaped run opened S7 25
+  // times - and every top-up is another $100k the P/L must carry. A position
+  // already held at start is charged one, which is the least it paid.
+  const fees = new Map();
   for (;;) {
     await ns.stock.nextUpdate();
     init ??= await call("init", INIT);
@@ -194,7 +199,8 @@ export async function main(ns) {
     });
     const invested = stocks.reduce((n, s) => n + positionValue(s), 0);
     const worth = r.cash + invested;
-    start ??= { worth, at: Date.now(), held: stocks.filter((s) => s.long > 0 || s.short > 0).length };
+    for (const s of stocks) if ((s.long > 0 || s.short > 0) && !fees.has(s.sym)) fees.set(s.sym, COMMISSION);
+    start ??= { at: Date.now(), held: stocks.filter((s) => s.long > 0 || s.short > 0).length, invested };
     const cfg = ns.read(SETTINGS_FILE);
 
     // 4S: bought once net worth is FS_WORTH_MULT x its price. Until cash alone
@@ -236,12 +242,13 @@ export async function main(ns) {
           const avg = o.kind + "Avg";
           s[avg] = (s[o.kind] * s[avg] + o.shares * px) / (s[o.kind] + o.shares);
           s[o.kind] += o.shares;
+          fees.set(o.sym, (fees.get(o.sym) ?? 0) + COMMISSION);
           return event(`${what} @ ${$(px)} (${$(o.shares * px)})`);
         }
         const basis = o.kind === "long" ? s.longAvg : s.shortAvg;
-        // Both commissions, the opening one included: this is what the round
-        // trip actually made.
-        const pnl = (o.kind === "long" ? px - basis : basis - px) * o.shares - 2 * COMMISSION;
+        // Every commission, each opening one included: what the round trip made.
+        const pnl = (o.kind === "long" ? px - basis : basis - px) * o.shares - COMMISSION - (fees.get(o.sym) ?? 0);
+        fees.delete(o.sym);
         realized.pnl += pnl;
         realized.closes++;
         if (pnl > 0) realized.wins++;
@@ -255,26 +262,29 @@ export async function main(ns) {
     // sells it before an install.
     const open = stocks.filter((s) => s.long > 0 || s.short > 0);
     const hours = (Date.now() - start.at) / 3.6e6;
-    const profit = worth - start.worth;
+    // STOCK profit only - the user's rule. Net worth moves with the batcher,
+    // gang, hacknet and every purchase, so worth - start was mostly not this
+    // trader's doing (a live run read +$53b in 2 minutes holding nothing).
+    // Closed trades carry every commission; an open one the ones it has paid.
+    const unrealized = open.reduce((n, s) => n + openPnl(s) - (fees.get(s.sym) ?? 0), 0);
+    const profit = realized.pnl + unrealized;
     const mode = r.fs ? "4S forecasts" : `pre-4S estimates (4S API at ${$(FS_WORTH_MULT * terms.fsApi)} worth)`;
     const flags = `${hold ? "  HOLD: sell-all before install" : ""}${reserve ? "  saving cash for 4S" : ""}`;
     const row = (cells) => cells.map((c, i) => String(c).padEnd(COLUMNS[i])).join("").trimEnd();
     const lines = [
       `${mode}${flags}`,
-      `start   ${$(start.worth)} net worth, ${start.held} position(s) - ${ns.format.time(Date.now() - start.at)} ago`,
-      `now     ${$(worth)} net worth = ${$(r.cash)} cash + ${$(invested)} in ${open.length} position(s)`,
-      `profit  ${signed$(profit)} (${ns.format.percent(start.worth ? profit / start.worth : 0, 2)})` +
-        (hours > 0.01 ? `, ${signed$(profit / hours)}/h` : ""),
-      `closed  ${signed$(realized.pnl)} over ${realized.closes} trade(s), ${realized.wins} won`,
-      `open    ${signed$(open.reduce((n, s) => n + openPnl(s), 0))} on what is held now (before commission)`,
-      "",
-      row(["SYM", "SIDE", "SHARES", "ENTRY", "NOW", "P/L", "FCST"]),
+      `since   ${ns.format.time(Date.now() - start.at)} ago, holding ${start.held} position(s) worth ${$(start.invested)} then`,
+      `stocks  ${$(invested)} in ${open.length} position(s), ${$(r.cash)} cash beside it`,
+      `profit  ${signed$(profit)} from stocks` + (hours > 0.01 ? `, ${signed$(profit / hours)}/h` : ""),
+      `        closed ${signed$(realized.pnl)} over ${realized.closes} trade(s), ${realized.wins} won`,
+      `        open   ${signed$(unrealized)} on what is held now`,
+      ...(open.length ? ["", row(["SYM", "SIDE", "SHARES", "ENTRY", "NOW", "P/L", "FCST"])] : []),
       ...open.map((s) => {
         const kind = s.long > 0 ? "long" : "short";
         const entry = kind === "long" ? s.longAvg : s.shortAvg;
         const now = kind === "long" ? s.bid : s.ask;
         const fc = signal(s, r.fs).fc;
-        return row([s.sym, kind, ns.format.number(s[kind], 2), $(entry), $(now), signed$(openPnl(s)),
+        return row([s.sym, kind, ns.format.number(s[kind], 2), $(entry), $(now), signed$(openPnl(s) - (fees.get(s.sym) ?? 0)),
           fc === null ? "?" : ns.format.percent(fc, 0)]);
       }),
       // Only while a body is failing: the one thing the numbers above cannot show.

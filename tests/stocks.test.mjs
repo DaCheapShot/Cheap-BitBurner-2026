@@ -112,6 +112,13 @@ async function simulate({ seed, ticks, fs, canShort = true, cash = 250e6 }) {
   return { end, trades };
 }
 
+/** "+$1.23m" as the mock's ns.format.number writes it, back to a number. */
+function money(text) {
+  const m = /^([+-]?)\$([\d.]+)([kmbtq]?)$/.exec(String(text));
+  if (!m) return NaN;
+  return (m[1] === "-" ? -1 : 1) * Number(m[2]) * 1000 ** " kmbtq".indexOf(m[3] || " ");
+}
+
 /** One stock as planTrades sees it, flat. */
 const stock = (o = {}) => ({
   sym: "AAA", ask: 1010, bid: 990, long: 0, longAvg: 0, short: 0, shortAvg: 0,
@@ -306,8 +313,11 @@ export const tests = {
     const { HELD_FILE, STATUS_FILE, HISTORY_FILE } = mods["stocks/config"];
     const m = market(5);
     const w = { cash: 250e6 };
+    const EXTERNAL = 1e9;
     const by = (sym) => m.stocks.find((s) => s.sym === sym);
     let ticks = 0;
+    // Ticks that delivered income: every nextUpdate but the one that stopped the run.
+    const ticks0 = () => ticks - 1;
     const ns = makeNs({
       servers: { home: { get moneyAvailable() { return w.cash; } } },
       extra: {
@@ -319,6 +329,9 @@ export const tests = {
           getConstants: () => ({ MarketDataTixApi4SCost: 25e9 }),
           nextUpdate: async () => {
             if (++ticks > 30) throw new Error("STOP");
+            // Other income lands every tick - the batcher. The stock profit
+            // line must not count it (a live run read +$53b holding nothing).
+            w.cash += EXTERNAL;
             m.tick();
             await new Promise((r) => setTimeout(r, 1));
           },
@@ -353,9 +366,16 @@ export const tests = {
     // tick's picture - the same lines STATUS_FILE gets - and no trade spam.
     const dash = ns.read(STATUS_FILE).trimEnd().split("\n");
     assert(ns._log.join("\n") === dash.join("\n"), `log is the dashboard:\n${ns._log.join("\n")}`);
-    for (const head of ["start   $250.00m net worth, 0 position(s)", "now     $", "profit  ", "closed  ", "open    "]) {
+    for (const head of ["since   ", "stocks  ", "profit  ", "        closed ", "        open   "]) {
       assert(dash.some((l) => l.startsWith(head)), `dashboard line "${head}":\n${dash.join("\n")}`);
     }
+    // Stock profit = cash the trades moved + what is held now, with the
+    // outside income taken back out. Both commissions are in the cash flows.
+    const flows = w.cash - 250e6 - ticks0() * EXTERNAL;
+    const truth = flows + held.reduce((n, s) => n + s.long * m.bid(s) + s.short * (2 * s.shortAvg - m.ask(s)), 0);
+    const shown = money(/^profit  ([+-]\$\S+) from stocks/.exec(dash.find((l) => l.startsWith("profit")))?.[1]);
+    assert(Math.abs(shown - truth) <= Math.max(1e4, Math.abs(truth) * 0.001),
+      `profit shows ${shown}, stocks made ${truth} (outside income ${ticks0() * EXTERNAL} must not count)`);
     const table = dash.findIndex((l) => l.startsWith("SYM"));
     assert(table > 0 && dash.slice(table + 1).filter((l) => /^S\d+\s+(long|short)/.test(l)).length === held.length,
       `one table row per position:\n${dash.join("\n")}`);
