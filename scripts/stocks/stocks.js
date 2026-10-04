@@ -23,8 +23,10 @@ import { SETTINGS_FILE, setting } from "scripts/settings.js";
  * TERMS once per process, BUY_API once per node. The resident is 2.65.
  *
  * PARKS WITHOUT TIX rather than exiting - nextUpdate throws without it, and
- * an exit would have boot's ensureService relaunch it every tick. Buying WSE
- * and TIX outside BN8 is left to the player: SF8.1 makes it permanent.
+ * an exit would have boot's ensureService relaunch it every tick. While
+ * parked, BUY_TIX buys the TIX API once a minute's check finds cash at
+ * TIX_CASH_MULT x its price (stocks.buyTix). No WSE account: nothing here
+ * needs one. SF8.1 makes TIX permanent.
  *
  * INSTALLS SELL FIRST. Prestige resets the market and every position in it.
  * sing's SWEEP runs sellall.js when HELD_FILE says something is held, and
@@ -103,6 +105,22 @@ return JSON.parse(args[0]).map((o) => {
 /** 4S Market Data TIX API. The $1b 4S Market Data alone is UI-only: getForecast checks the API flag. */
 const BUY_API = `return ns.stock.purchase4SMarketDataTixApi();`;
 
+/**
+ * The TIX API, while parked without it - outside BN8 before SF8.1. It is all
+ * the trader needs: purchaseTixApi checks money only (no WSE account), and so
+ * does the 4S API after it (NetscriptFunctions/StockMarket.ts). Bought once
+ * cash is TIX_CASH_MULT x the price; the setting is read here so it is live.
+ * Returns the price when it bought, 0 when it did not.
+ */
+const BUY_TIX = `
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
+import { TIX_CASH_MULT } from "/scripts/stocks/config.js";
+if (!setting(ns.read(SETTINGS_FILE), "stocks.buyTix")) return 0;
+const cost = ns.stock.getConstants().TixApiCost;
+if (ns.getServerMoneyAvailable("home") < TIX_CASH_MULT * cost) return 0;
+return ns.stock.purchaseTixApi() ? cost : 0;
+`;
+
 // -------------------------------------------------------------------- main ---
 
 /** @param {NS} ns */
@@ -114,12 +132,6 @@ export async function main(ns) {
     const kept = ns.read(HISTORY_FILE).split("\n").filter(Boolean);
     ns.write(HISTORY_FILE, [...kept, `${new Date().toLocaleString()}  ${l}`].slice(-HISTORY_KEEP).join("\n") + "\n", "w");
   };
-
-  if (!ns.stock.hasTixApiAccess()) {
-    ns.print("no TIX API access - parked (buy it, or own SF8.1); re-checking every minute");
-    ns.write(HELD_FILE, "0", "w");
-    while (!ns.stock.hasTixApiAccess()) await ns.sleep(60e3);
-  }
 
   // A warning is logged once, and cleared by that body's next success.
   const warned = new Set();
@@ -134,6 +146,16 @@ export async function main(ns) {
       return null;
     }
   };
+
+  if (!ns.stock.hasTixApiAccess()) {
+    ns.print("no TIX API access - parked; buying it once cash allows (stocks.buyTix), re-checking every minute");
+    ns.write(HELD_FILE, "0", "w");
+    while (!ns.stock.hasTixApiAccess()) {
+      const paid = await call("tix", BUY_TIX);
+      if (paid) event(`bought the TIX API for ${$(paid)}`);
+      else await ns.sleep(60e3);
+    }
+  }
 
   let init = null;
   let terms = null;

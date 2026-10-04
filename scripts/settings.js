@@ -91,6 +91,7 @@ export const KNOBS = {
   // positions open - selling them is sellall.js's job, or the next install's.
   "stocks.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "stocks.js trader (off leaves positions open)" },
   "stocks.cash": { def: STOCKS_CASH, min: 0, max: 1, doc: "fraction of net worth the trader may hold in stocks (BN8: 1)" },
+  "stocks.buyTix": { def: 1, min: 0, max: 1, bool: true, doc: "buy the TIX API (no SF8.1, not BN8) once cash is 4x its price" },
   "stocks.buy4S": { def: 1, min: 0, max: 1, bool: true, doc: "buy the 4S TIX API once net worth is twice its price" },
 
   "contracts.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },

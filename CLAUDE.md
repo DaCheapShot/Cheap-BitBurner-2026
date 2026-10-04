@@ -360,7 +360,7 @@ editor's RAM panel when one moves.
 | `stocks/config.js` | trader tunables, paths, `HELD_FILE`/`HOLD_FILE` | 0 |
 | `stocks/math.js` | forecast estimate, exits, `planTrades` - pure | 0 |
 | `stocks/stocks.js` | entry: resident trader, one decision per market tick | 2.65 |
-| ↳ five bodies | transients: init, terms, read (every tick), trade, buy 4S API | 4.10–11.60 |
+| ↳ six bodies | transients: init, terms, read (every tick), trade, buy 4S API, buy TIX (parked) | 4.10–11.60 |
 | `stocks/sellall.js` | closes every position; sing's SWEEP runs it before an install | 10.65 |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
@@ -1325,7 +1325,9 @@ resident holds `hasTixApiAccess` (0.05) to park and nothing else: 2.65. READ run
 readonly) and INIT reads ask/price and bid/price once. TRADE (11.60) only on a tick that trades.
 
 **Without TIX it PARKS, sing's reason**: an exit would have `ensureService` relaunch it every
-tick. Buying WSE/TIX outside BN8 is left to the player.
+tick. While parked it buys the TIX API itself (`BUY_TIX`, 4.20, checked once a minute) once cash is
+`TIX_CASH_MULT` (4) x its $5b price - `stocks.buyTix` turns that off. No WSE account: `purchaseTixApi`
+and the 4S API purchase both check money only.
 
 **An install sells first, and that is three pieces.** Prestige resets the market and every
 position. `stocks.js` writes `HELD_FILE` (open positions) every tick; sing's SWEEP reads it

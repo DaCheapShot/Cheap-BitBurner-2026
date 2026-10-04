@@ -51,6 +51,13 @@ export const STOCKS_CASH = 0.5;
  */
 export const FS_WORTH_MULT = 2;
 
+/**
+ * Buy the TIX API ($5b) once cash is this many times its price - outside BN8
+ * before SF8.1, where the trader otherwise parks. 4x leaves $15b to trade
+ * with, so the access fee is not most of the stake.
+ */
+export const TIX_CASH_MULT = 4;
+
 /** Open a long above this forecast, a short below 1 - BUY_EDGE. */
 export const BUY_EDGE = 0.55;
 /**
