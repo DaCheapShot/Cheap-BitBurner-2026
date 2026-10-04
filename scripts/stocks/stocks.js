@@ -33,8 +33,8 @@ import { SETTINGS_FILE, setting } from "scripts/settings.js";
  * HOLD_FILE then keeps this from reopening for HOLD_MS.
  *
  * THE LOG IS A DASHBOARD, cleared and redrawn every tick: net worth at start
- * and now, profit and its rate, closed and open P/L, a row per position, and
- * the last few trades. Every trade also goes to HISTORY_FILE, which keeps them.
+ * and now, profit and its rate, closed and open P/L and a row per position -
+ * no trade lines (the user's rule). Every trade goes to HISTORY_FILE instead.
  *
  * Usage:  run scripts/stocks/stocks.js     (boot does this; --no-stocks opts out)
  *         cat /data/stocks.txt             (the dashboard, same lines)
@@ -129,8 +129,6 @@ return ns.stock.purchaseTixApi() ? cost : 0;
 
 /** Dashboard column widths: SYM SIDE SHARES ENTRY NOW P/L FCST. */
 const COLUMNS = [6, 7, 10, 11, 11, 13, 5];
-/** The last few trades and warnings, under the table. HISTORY_FILE keeps them all. */
-const RECENT_SHOWN = 5;
 
 /** A held position's gain at the price it would close at now, commission aside. */
 function openPnl(s) {
@@ -142,13 +140,9 @@ export async function main(ns) {
   ns.disableLog("ALL");
   const $ = (n) => `$${ns.format.number(n, 2)}`;
   const signed$ = (n) => `${n < 0 ? "-" : "+"}${$(Math.abs(n))}`;
-  // Events go to HISTORY_FILE, not the log: the log is a dashboard, cleared
-  // and redrawn every tick. Its last few lines show at the bottom of it.
-  const recent = [];
+  // Events go to HISTORY_FILE only - the user's rule: the log is a dashboard,
+  // cleared and redrawn every tick, and it alone should say what is going on.
   const event = (l) => {
-    const line = `${new Date().toLocaleTimeString()}  ${l}`;
-    recent.push(line);
-    if (recent.length > RECENT_SHOWN) recent.shift();
     const kept = ns.read(HISTORY_FILE).split("\n").filter(Boolean);
     ns.write(HISTORY_FILE, [...kept, `${new Date().toLocaleString()}  ${l}`].slice(-HISTORY_KEEP).join("\n") + "\n", "w");
   };
@@ -283,7 +277,8 @@ export async function main(ns) {
         return row([s.sym, kind, ns.format.number(s[kind], 2), $(entry), $(now), signed$(openPnl(s)),
           fc === null ? "?" : ns.format.percent(fc, 0)]);
       }),
-      ...(recent.length ? ["", ...recent] : []),
+      // Only while a body is failing: the one thing the numbers above cannot show.
+      ...(warned.size ? ["", `WARN: ${[...warned].join(", ")} failing - see ${HISTORY_FILE}`] : []),
     ];
     ns.clearLog();
     for (const l of lines) ns.print(l);

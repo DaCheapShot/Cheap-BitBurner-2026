@@ -359,7 +359,7 @@ export const tests = {
     const table = dash.findIndex((l) => l.startsWith("SYM"));
     assert(table > 0 && dash.slice(table + 1).filter((l) => /^S\d+\s+(long|short)/.test(l)).length === held.length,
       `one table row per position:\n${dash.join("\n")}`);
-    assert(dash.filter((l) => / open (long|short) S\d+/.test(l)).length <= 5, "at most RECENT_SHOWN events under it");
+    assert(!dash.some((l) => /(open|close) (long|short) S\d+/.test(l)), `no trade lines on the dashboard:\n${dash.join("\n")}`);
     assert(/open (long|short) S\d+/.test(ns.read(HISTORY_FILE)), `history: ${ns.read(HISTORY_FILE)}`);
     assert(!ns.read(HISTORY_FILE).includes("WARN"), `a body failed: ${ns.read(HISTORY_FILE)}`);
   },
