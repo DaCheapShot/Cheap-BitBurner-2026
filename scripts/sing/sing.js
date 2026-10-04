@@ -11,6 +11,8 @@ import {
   graftCandidates, chooseGraft,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
+// One 0 GB path: the aug batch counts stock positions as cash.
+import { HELD_FILE } from "scripts/stocks/config.js";
 import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
 
 /**
@@ -409,6 +411,21 @@ if (Number(ns.read(HELD_FILE)) > 0) {
 const pid = ns.run(CONTRACTS_SERVICE);
 while (pid && ns.isRunning(pid)) await ns.sleep(200);
 return pid;
+`;
+
+/**
+ * Turn every stock position into cash before a batch is bought - the user's
+ * rule: a batch means an install, and an install resets the market, so there
+ * is no point keeping any position. Returns the cash it left on hand, or -1
+ * when anything is still held (sellall.js could not start, or the game
+ * refused a sale): the batch is not bought on money that is not there.
+ */
+const LIQUIDATE = `
+import { STOCKS_SELL_ALL, HELD_FILE } from "/scripts/stocks/config.js";
+const pid = ns.run(STOCKS_SELL_ALL);
+while (pid && ns.isRunning(pid)) await ns.sleep(50);
+if (!pid || Number(ns.read(HELD_FILE)) > 0) return -1;
+return ns.getServerMoneyAvailable("home");
 `;
 
 /**
@@ -836,7 +853,10 @@ export async function main(ns) {
     }
     const short = r.player.factions.filter((f) => f in favor && favor[f] < favorNeed);
     favorGain = short.length ? (await call("favor gain", FAVOR_GAIN, ...short)) ?? {} : {};
-    const cash = r.player.money;
+    // Stock positions count as cash: they are sold before the batch is bought
+    // (LIQUIDATE, below). HELD_FILE is their sale value net of commission.
+    const stocks = Number(ns.read(HELD_FILE)) || 0;
+    let cash = r.player.money + stocks;
     graft = congruity = null;
     if (grafts) await graftPass(r, owned);
     const donate = await donateTerms(r);
@@ -852,10 +872,25 @@ export async function main(ns) {
         ` - buying what fits`);
     }
     const force = crossesFavorBar(r, owned) || banked.length > 0;
-    const plan = planAugBuys({
-      augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash, donate, priority, force,
+    const planFor = (c) => planAugBuys({
+      augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash: c, donate, priority, force,
       minBatch,
     });
+    let plan = planFor(cash);
+    // A batch is due: sell every position first - the install it leads to
+    // would reset them anyway - then plan again on the cash actually in hand,
+    // since prices moved since stocks.js's last tick. Not bought at all if a
+    // position survives the sell-all.
+    if (plan.buys.length && stocks > 0) {
+      const left = await call("liquidate", LIQUIDATE);
+      if (left === null || left < 0) {
+        log("WARN: augs: a batch is due but the stock positions could not all be sold - not buying this pass");
+        return;
+      }
+      log(`augs: sold every stock position for the batch - ${money$(ns, left)} cash`);
+      cash = left;
+      plan = planFor(cash);
+    }
     if (!plan.buys.length) {
       log(`augs: ${augsWaitLine(ns, plan, owned.queued, cash, minBatch)}`);
       if (owned.queued >= minBatch || owned.pill || (force && owned.queued)) await install(owned.queued);

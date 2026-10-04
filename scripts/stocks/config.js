@@ -26,10 +26,12 @@ export const HISTORY_FILE = "/data/stocks.log.txt";
 export const HISTORY_KEEP = 500;
 
 /**
- * Number of open positions, written every tick by stocks.js and set to 0 by
- * sellall.js. sing's SWEEP body reads it (ns.read, 0 GB) to know whether an
- * install would throw money away - Prestige resets the market and every
- * position with it.
+ * What selling every open position would pay, net of commission, written
+ * every tick by stocks.js; 0 means nothing is held. sing reads it (ns.read,
+ * 0 GB) twice: the aug batch plans against cash PLUS this, and SWEEP holds an
+ * install while it is above 0 - Prestige resets the market and every position
+ * with it. sellall.js writes the number of positions the game refused to
+ * sell, so after a sell-all it is a count, and "above 0" still means "held".
  */
 export const HELD_FILE = "/data/stocks-held.txt";
 

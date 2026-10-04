@@ -1,7 +1,7 @@
 import {
   STATUS_FILE, HISTORY_FILE, HISTORY_KEEP, HELD_FILE, HOLD_FILE, HOLD_MS, FS_WORTH_MULT,
 } from "./config.js";
-import { track, planTrades, positionValue, signal } from "./math.js";
+import { track, planTrades, positionValue, signal, COMMISSION } from "./math.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting } from "scripts/settings.js";
 
@@ -32,8 +32,12 @@ import { SETTINGS_FILE, setting } from "scripts/settings.js";
  * sing's SWEEP runs sellall.js when HELD_FILE says something is held, and
  * HOLD_FILE then keeps this from reopening for HOLD_MS.
  *
+ * THE LOG IS A DASHBOARD, cleared and redrawn every tick: net worth at start
+ * and now, profit and its rate, closed and open P/L, a row per position, and
+ * the last few trades. Every trade also goes to HISTORY_FILE, which keeps them.
+ *
  * Usage:  run scripts/stocks/stocks.js     (boot does this; --no-stocks opts out)
- *         cat /data/stocks.txt             (positions now)
+ *         cat /data/stocks.txt             (the dashboard, same lines)
  *         cat /data/stocks.log.txt         (every trade)
  *
  * RAM: 1.60 base + run 1.00 + hasTixApiAccess 0.05 = 2.65 GB
@@ -123,12 +127,28 @@ return ns.stock.purchaseTixApi() ? cost : 0;
 
 // -------------------------------------------------------------------- main ---
 
+/** Dashboard column widths: SYM SIDE SHARES ENTRY NOW P/L FCST. */
+const COLUMNS = [6, 7, 10, 11, 11, 13, 5];
+/** The last few trades and warnings, under the table. HISTORY_FILE keeps them all. */
+const RECENT_SHOWN = 5;
+
+/** A held position's gain at the price it would close at now, commission aside. */
+function openPnl(s) {
+  return s.long > 0 ? (s.bid - s.longAvg) * s.long : (s.shortAvg - s.ask) * s.short;
+}
+
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
   const $ = (n) => `$${ns.format.number(n, 2)}`;
+  const signed$ = (n) => `${n < 0 ? "-" : "+"}${$(Math.abs(n))}`;
+  // Events go to HISTORY_FILE, not the log: the log is a dashboard, cleared
+  // and redrawn every tick. Its last few lines show at the bottom of it.
+  const recent = [];
   const event = (l) => {
-    ns.print(l);
+    const line = `${new Date().toLocaleTimeString()}  ${l}`;
+    recent.push(line);
+    if (recent.length > RECENT_SHOWN) recent.shift();
     const kept = ns.read(HISTORY_FILE).split("\n").filter(Boolean);
     ns.write(HISTORY_FILE, [...kept, `${new Date().toLocaleString()}  ${l}`].slice(-HISTORY_KEEP).join("\n") + "\n", "w");
   };
@@ -161,6 +181,10 @@ export async function main(ns) {
   let terms = null;
   let fsRefused = false;
   const recs = new Map();
+  // The dashboard's baseline: net worth and positions at the first tick this
+  // process saw, and what closed positions have made since.
+  let start = null;
+  const realized = { pnl: 0, closes: 0, wins: 0 };
   for (;;) {
     await ns.stock.nextUpdate();
     init ??= await call("init", INIT);
@@ -176,6 +200,7 @@ export async function main(ns) {
     });
     const invested = stocks.reduce((n, s) => n + positionValue(s), 0);
     const worth = r.cash + invested;
+    start ??= { worth, at: Date.now(), held: stocks.filter((s) => s.long > 0 || s.short > 0).length };
     const cfg = ns.read(SETTINGS_FILE);
 
     // 4S: bought once net worth is FS_WORTH_MULT x its price. Until cash alone
@@ -220,25 +245,52 @@ export async function main(ns) {
           return event(`${what} @ ${$(px)} (${$(o.shares * px)})`);
         }
         const basis = o.kind === "long" ? s.longAvg : s.shortAvg;
-        const pnl = (o.kind === "long" ? px - basis : basis - px) * o.shares;
+        // Both commissions, the opening one included: this is what the round
+        // trip actually made.
+        const pnl = (o.kind === "long" ? px - basis : basis - px) * o.shares - 2 * COMMISSION;
+        realized.pnl += pnl;
+        realized.closes++;
+        if (pnl > 0) realized.wins++;
         s[o.kind] = 0;
-        event(`${what} @ ${$(px)}, P/L ${pnl < 0 ? "-" : "+"}${$(Math.abs(pnl))}`);
+        event(`${what} @ ${$(px)}, P/L ${signed$(pnl)}`);
       });
     }
 
-    // The snapshot. HELD_FILE is what sing's SWEEP reads before an install.
+    // The dashboard, redrawn every tick - and the same lines to STATUS_FILE.
+    // HELD_FILE is what sing reads: the batch counts it as cash, and SWEEP
+    // sells it before an install.
     const open = stocks.filter((s) => s.long > 0 || s.short > 0);
+    const hours = (Date.now() - start.at) / 3.6e6;
+    const profit = worth - start.worth;
+    const mode = r.fs ? "4S forecasts" : `pre-4S estimates (4S API at ${$(FS_WORTH_MULT * terms.fsApi)} worth)`;
+    const flags = `${hold ? "  HOLD: sell-all before install" : ""}${reserve ? "  saving cash for 4S" : ""}`;
+    const row = (cells) => cells.map((c, i) => String(c).padEnd(COLUMNS[i])).join("").trimEnd();
     const lines = [
-      `worth ${$(worth)}  cash ${$(r.cash)}  in stocks ${$(invested)}  ` +
-        `${r.fs ? "4S" : `pre-4S (4S API ${$(terms.fsApi)})`}${hold ? "  HOLD (sell-all)" : ""}${reserve ? "  saving for 4S" : ""}`,
+      `${mode}${flags}`,
+      `start   ${$(start.worth)} net worth, ${start.held} position(s) - ${ns.format.time(Date.now() - start.at)} ago`,
+      `now     ${$(worth)} net worth = ${$(r.cash)} cash + ${$(invested)} in ${open.length} position(s)`,
+      `profit  ${signed$(profit)} (${ns.format.percent(start.worth ? profit / start.worth : 0, 2)})` +
+        (hours > 0.01 ? `, ${signed$(profit / hours)}/h` : ""),
+      `closed  ${signed$(realized.pnl)} over ${realized.closes} trade(s), ${realized.wins} won`,
+      `open    ${signed$(open.reduce((n, s) => n + openPnl(s), 0))} on what is held now (before commission)`,
+      "",
+      row(["SYM", "SIDE", "SHARES", "ENTRY", "NOW", "P/L", "FCST"]),
       ...open.map((s) => {
         const kind = s.long > 0 ? "long" : "short";
+        const entry = kind === "long" ? s.longAvg : s.shortAvg;
+        const now = kind === "long" ? s.bid : s.ask;
         const fc = signal(s, r.fs).fc;
-        return `${s.sym} ${kind} ${ns.format.number(s[kind], 2)} sh  value ${$(positionValue(s))}` +
-          `  forecast ${fc === null ? "?" : ns.format.percent(fc, 0)}`;
+        return row([s.sym, kind, ns.format.number(s[kind], 2), $(entry), $(now), signed$(openPnl(s)),
+          fc === null ? "?" : ns.format.percent(fc, 0)]);
       }),
+      ...(recent.length ? ["", ...recent] : []),
     ];
+    ns.clearLog();
+    for (const l of lines) ns.print(l);
     ns.write(STATUS_FILE, lines.join("\n") + "\n", "w");
-    ns.write(HELD_FILE, String(open.length), "w");
+    // At least $1 a position, so a position worth less than its commission
+    // still reads as held.
+    const value = open.reduce((n, s) => n + Math.max(1, positionValue(s) - COMMISSION), 0);
+    ns.write(HELD_FILE, String(value), "w");
   }
 }

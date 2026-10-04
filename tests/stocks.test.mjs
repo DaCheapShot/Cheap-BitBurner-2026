@@ -342,10 +342,24 @@ export const tests = {
     } catch (e) {
       if (e.message !== "STOP") throw e;
     }
-    const held = m.stocks.filter((s) => s.long || s.short).length;
-    assert(held > 0, "with 4S and $250m something opens within 30 ticks");
-    assert(Number(ns.read(HELD_FILE)) === held, `HELD_FILE ${ns.read(HELD_FILE)} vs ${held} held`);
-    assert(ns.read(STATUS_FILE).startsWith("worth $"), `status: ${ns.read(STATUS_FILE)}`);
+    const held = m.stocks.filter((s) => s.long || s.short);
+    assert(held.length > 0, "with 4S and $250m something opens within 30 ticks");
+    // What selling them now would pay, net of commission - the cash sing's
+    // aug batch counts them as.
+    const sale = held.reduce((n, s) => n + s.long * m.bid(s) + s.short * (2 * s.shortAvg - m.ask(s)) - 100e3, 0);
+    const got = Number(ns.read(HELD_FILE));
+    assert(Math.abs(got - sale) < 1, `HELD_FILE ${got} vs sale value ${sale}`);
+    // The log is a dashboard: cleared every tick, so it holds exactly the last
+    // tick's picture - the same lines STATUS_FILE gets - and no trade spam.
+    const dash = ns.read(STATUS_FILE).trimEnd().split("\n");
+    assert(ns._log.join("\n") === dash.join("\n"), `log is the dashboard:\n${ns._log.join("\n")}`);
+    for (const head of ["start   $250.00m net worth, 0 position(s)", "now     $", "profit  ", "closed  ", "open    "]) {
+      assert(dash.some((l) => l.startsWith(head)), `dashboard line "${head}":\n${dash.join("\n")}`);
+    }
+    const table = dash.findIndex((l) => l.startsWith("SYM"));
+    assert(table > 0 && dash.slice(table + 1).filter((l) => /^S\d+\s+(long|short)/.test(l)).length === held.length,
+      `one table row per position:\n${dash.join("\n")}`);
+    assert(dash.filter((l) => / open (long|short) S\d+/.test(l)).length <= 5, "at most RECENT_SHOWN events under it");
     assert(/open (long|short) S\d+/.test(ns.read(HISTORY_FILE)), `history: ${ns.read(HISTORY_FILE)}`);
     assert(!ns.read(HISTORY_FILE).includes("WARN"), `a body failed: ${ns.read(HISTORY_FILE)}`);
   },

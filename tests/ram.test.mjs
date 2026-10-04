@@ -427,6 +427,8 @@ export const tests = {
       // The install: the sweep (run + isRunning) is split off installAugmentations,
       // which is 5.00 alone - together 7.70.
       SWEEP: 2.70, INSTALL: 6.60,
+      // The pre-batch sell-all: run + isRunning + getServerMoneyAvailable.
+      LIQUIDATE: 2.80,
       // The idle money crime: getCrimeStats and getCrimeChance, 5.00 each.
       CRIME_STATS: 6.60, CRIME_CHANCE: 6.60,
       // getAugmentationStats alone, rating each aug for tier 1 once per process.

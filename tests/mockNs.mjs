@@ -138,6 +138,7 @@ export function makeNs(o = {}) {
       time: (ms) => `${Math.round(ms / 1000)}s`,
     },
     print: (s) => ns._log.push(s),
+    clearLog: () => { ns._log.length = 0; },
     tprint: (s) => ns._log.push("[T] " + s),
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),
     // asleep is the ONE function checkEnvFlags exempts from the concurrency

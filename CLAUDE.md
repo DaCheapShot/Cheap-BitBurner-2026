@@ -90,7 +90,7 @@ run scripts/sleeve/sleeve.js            # one sleeve assignment pass (boot runs 
 cat /data/sleeves.txt                   # what each sleeve is doing now, and why
 cat /data/sleeves.log.txt               # what happened: task changes, purchases, warnings (last 500)
 run scripts/stocks/stocks.js            # the stock trader (boot starts it too; parks without TIX)
-cat /data/stocks.txt                    # net worth, cash, each open position and its forecast
+cat /data/stocks.txt                    # the dashboard: start vs now, profit, P/L per position (its tail too)
 cat /data/stocks.log.txt                # every trade with P/L, the 4S buy, warnings (last 500)
 run scripts/stocks/sellall.js           # close every position (sing runs it before an install)
 run scripts/set.js stocks.cash 1        # BN8: the whole net worth may sit in stocks (default 0.5)
@@ -1154,8 +1154,9 @@ stock position (`stocks/sellall.js`, only when `HELD_FILE` says something is hel
 market) and holds the install if any survive, then runs one
 contract sweep and waits it out (an install destroys every unsolved contract), then UPGRADE at
 fraction 1, then CORES, take the cash the install would reset. SWEEP is split from INSTALL - together 7.70 - and
-its body imports `CONTRACTS_SERVICE` from `contracts/config.js` and two paths from `stocks/config.js`,
-the only cross-subtree imports in sing/, 0 GB and billed to the transient. `sing.autoInstall` (default `AUTO_INSTALL`) is read inside SWEEP,
+its body imports `CONTRACTS_SERVICE` from `contracts/config.js` and two paths from `stocks/config.js`
+(sing.js itself imports `HELD_FILE` from there for the aug batch, and LIQUIDATE the same two paths) -
+the only cross-subtree imports in sing/, all 0 GB. `sing.autoInstall` (default `AUTO_INSTALL`) is read inside SWEEP,
 so it is LIVE like the karma grind: off, the queue waits for a hand install. `sing.minAugBatch`
 (default `MIN_AUG_BATCH`) is read once per aug pass and passed to `planAugBuys` as `minBatch`. A sweep over rpc's 10 s times out, and
 the install waits for the next pass rather than kill the sweep mid-attempt.
@@ -1329,8 +1330,16 @@ tick. While parked it buys the TIX API itself (`BUY_TIX`, 4.20, checked once a m
 `TIX_CASH_MULT` (4) x its $5b price - `stocks.buyTix` turns that off. No WSE account: `purchaseTixApi`
 and the 4S API purchase both check money only.
 
+**sing's aug batch counts stocks as cash, and sells them all before buying** - the user's rule: a
+batch leads to an install, which resets the market, so no position is worth keeping. `HELD_FILE`
+carries the positions' sale value net of commission (≥ $1 each, so a tiny one still reads as held);
+the aug pass plans against `player.money` + that, and when a batch is due with anything held the
+LIQUIDATE body (2.80) runs `sellall.js`, returns the cash actually in hand, and the batch is planned
+again on it - prices moved since the trader's last tick. A position surviving the sell-all buys
+nothing that pass. Grafts, home RAM, cloud and hacknet still see cash only.
+
 **An install sells first, and that is three pieces.** Prestige resets the market and every
-position. `stocks.js` writes `HELD_FILE` (open positions) every tick; sing's SWEEP reads it
+position. `stocks.js` writes `HELD_FILE` every tick; sing's SWEEP reads it
 (`ns.read`, 0 GB) and, when non-zero, runs `sellall.js` (10.65 - a real file, past sing's 6.60
 ceiling, and hand-runnable) and returns -2 if anything survives, so the install waits.
 `sellall.js` writes `HOLD_FILE` FIRST, and TRADE re-checks it before any open: both run to
