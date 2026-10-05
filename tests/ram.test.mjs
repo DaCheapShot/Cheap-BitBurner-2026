@@ -803,7 +803,7 @@ export const tests = {
   // TERMS once per process, BUY_API once per node. READ carries getPrice alone -
   // the spread is fixed per stock, so INIT reads ask and bid once.
   "every stock body is priced": () => {
-    const want = { INIT: 11.60, TERMS: 6.60, READ: 10.75, TRADE: 11.60, BUY_API: 4.10, BUY_TIX: 4.20 };
+    const want = { INIT: 13.60, TERMS: 6.60, READ: 10.75, TRADE: 11.60, BUY_API: 4.10, BUY_TIX: 4.20 };
     const got = bodiesOf("stocks/stocks");
     assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),
       `stocks.js bodies ${Object.keys(got)} - every body must be pinned here`);

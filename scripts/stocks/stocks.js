@@ -1,5 +1,5 @@
 import {
-  STATUS_FILE, HISTORY_FILE, HISTORY_KEEP, HELD_FILE, HOLD_FILE, HOLD_MS, FS_WORTH_MULT,
+  STATUS_FILE, HISTORY_FILE, HISTORY_KEEP, HELD_FILE, HOLD_FILE, HOLD_MS, FS_WORTH_MULT, STOCK_PUSH_FILE,
 } from "./config.js";
 import { track, planTrades, positionValue, signal, COMMISSION } from "./math.js";
 import { rpc } from "scripts/rpc.js";
@@ -51,12 +51,17 @@ import { SETTINGS_FILE, setting } from "scripts/settings.js";
 /**
  * Fixed for the node: the symbols, each one's max shares, and its spread as
  * ask/price and bid/price - spreadPerc never changes (Stock.ts, readonly), so
- * READ can carry getPrice alone and save 4.00 GB a tick.
+ * READ can carry getPrice alone and save 4.00 GB a tick. `org` is the company
+ * name, the key STOCK_PUSH_FILE uses: a server's organizationName is how the
+ * game ties a hack or grow to a stock.
  */
 const INIT = `
 return ns.stock.getSymbols().map((sym) => {
   const p = ns.stock.getPrice(sym);
-  return { sym, max: ns.stock.getMaxShares(sym), ask: ns.stock.getAskPrice(sym) / p, bid: ns.stock.getBidPrice(sym) / p };
+  return {
+    sym, org: ns.stock.getOrganization(sym), max: ns.stock.getMaxShares(sym),
+    ask: ns.stock.getAskPrice(sym) / p, bid: ns.stock.getBidPrice(sym) / p,
+  };
 });
 `;
 
@@ -164,6 +169,7 @@ export async function main(ns) {
   if (!ns.stock.hasTixApiAccess()) {
     ns.print("no TIX API access - parked; buying it once cash allows (stocks.buyTix), re-checking every minute");
     ns.write(HELD_FILE, "0", "w");
+    ns.write(STOCK_PUSH_FILE, "{}", "w");
     while (!ns.stock.hasTixApiAccess()) {
       const paid = await call("tix", BUY_TIX);
       if (paid) event(`bought the TIX API for ${$(paid)}`);
@@ -297,5 +303,13 @@ export async function main(ns) {
     // still reads as held.
     const value = open.reduce((n, s) => n + Math.max(1, positionValue(s) - COMMISSION), 0);
     ns.write(HELD_FILE, String(value), "w");
+    // The batcher's half: which way to push each held stock. Nothing during a
+    // sell-all hold - those positions are about to be sold, not ridden.
+    const orgOf = new Map(init.map((i) => [i.sym, i.org]));
+    const push = {};
+    if (!hold) {
+      for (const s of open) push[orgOf.get(s.sym)] = { dir: s.long > 0 ? 1 : -1, value: positionValue(s) };
+    }
+    ns.write(STOCK_PUSH_FILE, JSON.stringify(push), "w");
   }
 }

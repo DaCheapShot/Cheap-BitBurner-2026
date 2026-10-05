@@ -360,7 +360,7 @@ editor's RAM panel when one moves.
 | `stocks/config.js` | trader tunables, paths, `HELD_FILE`/`HOLD_FILE` | 0 |
 | `stocks/math.js` | forecast estimate, exits, `planTrades` - pure | 0 |
 | `stocks/stocks.js` | entry: resident trader, one decision per market tick | 2.65 |
-| ↳ six bodies | transients: init, terms, read (every tick), trade, buy 4S API, buy TIX (parked) | 4.10–11.60 |
+| ↳ six bodies | transients: init, terms, read (every tick), trade, buy 4S API, buy TIX (parked) | 4.10–13.60 |
 | `stocks/sellall.js` | closes every position; sing's SWEEP runs it before an install | 10.65 |
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
@@ -1349,6 +1349,36 @@ never be followed by a buy the install destroys. The hold lasts `HOLD_MS` (5 min
 `tests/stocks.test.mjs` transcribes `processStockPrices` and `Stock.ts` into a seeded market and
 asserts the plan makes money on it pre-4S and more with 4S - the one check that the strategy,
 not just the code, works.
+
+**The batcher pushes what the trader holds** (`stock: true` on hack/grow). From
+`PlayerInfluencing.ts`: a flagged grow moves the company's SECOND-order forecast `otlkMagForecast`
++0.1, a flagged hack −0.1, each with probability money-moved / `moneyMax`; the real forecast then
+drifts toward it every tick. The link is the server's `organizationName`, which is the stock's
+name. Hack influences on `moneyDrained`, before `ScriptHackMoneyGain`, so it works in BN8.
+
+- The trader writes `STOCK_PUSH_FILE` (`scripts/config.js`, a contract) every tick:
+  `{ [org]: { dir, value } }` per held position (INIT reads `getOrganization`, 13.60), `{}` while
+  parked or under a sell-all HOLD.
+- `continuous/lib/push.js` re-reads it every `PUSH_MS` (2 s), org per host through `getServer`
+  (already billed - the manager stays 11.55), and sets each stream's `stockDir`.
+- **Only the op that helps is flagged: grow for a long, hack for a short, weaken never.** A batch
+  grows back what it hacks, so flagging both pushes nowhere.
+- The workers take it as an 8th argument and pass it as an OPTION on the call they already make -
+  **no new ns call in a worker, ever** (the user's rule; they are paid per thread). A test counts
+  the ns calls in `hack.js` / `grow.js`.
+- Prep waves are not flagged (ponytail: prep grows push hard - add when measured).
+
+**BitNode 8 changes two things in the batcher** (`math.blindHacks()`, from `currentNode` read in
+the constants rpc at startup):
+- **Targets.** Hacking pays $0, so the servers of held companies are admitted first, biggest
+  position first, and the count picker scores them on position value (paper income only breaks
+  ties). Nothing held: paper income as anywhere else - the batcher still earns hacking EXP.
+- **Blind hacks.** `ns.hack` returns `moneyDrained × ScriptHackMoneyGain` = 0, hit or miss, so every
+  batch read as a miss: no drift evidence, no drain detection. `stream.credit()` now reads
+  `getServer(host).moneyAvailable` when an H report arrives and stores it as `left` - the loop
+  ticks every 25 ms and the grow lands ≥ 100 ms later, and if the grow is already in nothing is
+  read. `batchVerdict` takes `moneyMax − min(left)` as the take only when every return was 0;
+  a full server is still a miss. Elsewhere the return is exact and wins.
 
 ### The hacknet subsystem (`scripts/hacknet/`)
 

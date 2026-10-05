@@ -5,7 +5,11 @@
  * ns.args, ns.writePort and Date.now() are all free - deliberately nothing else
  * in here, since this cost is multiplied by every thread in every batch.
  *
- * argv: target, delayMs, batchId, port, plannedLandMs, opTag, threads
+ * argv: target, delayMs, batchId, port, plannedLandMs, opTag, threads, stock
+ *
+ * `stock` truthy sets the op's own `stock` option: the game then nudges the
+ * target company's stock forecast (down) - see STOCK_PUSH_FILE. An
+ * option on the call this worker already makes, so it costs nothing per thread.
  *
  * The report's r field is ns.hack's own return value - money actually stolen
  * (Promise<number>, 0 when the hack fails its chance roll). Reporting it is what
@@ -26,9 +30,9 @@
 
 /** @param {NS} ns */
 export async function main(ns) {
-  const [target, delay, batch, port, planned, op, threads] = ns.args;
+  const [target, delay, batch, port, planned, op, threads, stock] = ns.args;
 
-  const result = await ns.hack(target, { additionalMsec: Number(delay) });
+  const result = await ns.hack(target, { additionalMsec: Number(delay), stock: Boolean(stock) });
 
   ns.writePort(port, { b: batch, op, t: threads, p: planned, a: Date.now(), r: result });
 }

@@ -167,6 +167,18 @@ export function createStream(ns, math, opts) {
     log = () => {},
   } = opts;
 
+  // Hack reports read 0 hit or miss here (BitNode 8) - see credit().
+  const blind = math.blindHacks?.() ?? false;
+
+  // Which way the stock trader wants this server's company to move: 1 up, -1
+  // down, 0 leave it. Set by the manager from STOCK_PUSH_FILE. Only the op that
+  // helps carries the `stock` option - grow for up, hack for down - because
+  // PlayerInfluencing.ts moves the second-order forecast +0.1 for a grow and
+  // -0.1 for a hack, each with probability money-moved / moneyMax: flag both
+  // and a batch, which grows back what it hacks, pushes nowhere.
+  let stockDir = 0;
+  const pushes = (op) => (op === "H" && stockDir < 0) || (op === "G" && stockDir > 0);
+
   // Not a constant. chooseSteal widens it per target when the target's pipeline
   // does not fit its RAM budget at the configured rate - fewer, bigger batches
   // beat a floor of one-hack-thread batches that still do not fit. CADENCE_MS is
@@ -600,6 +612,8 @@ export function createStream(ns, math, opts) {
       anchor: at,
       deadline: at + offs.W2 + grace,
       take: th.take,
+      // What a BN8 hack's take is measured against - see credit().
+      maxMoney: snap.maxMoney,
       // Security this batch adds before its weakens cancel it. Read by the
       // baseline check of every later dispatch while this one is in the air.
       sec: th.hackSec + th.growSec,
@@ -721,7 +735,7 @@ export function createStream(ns, math, opts) {
     for (const p of placements) {
       // Recomputed per exec: even one op's placements span real wall time.
       const delay = delayFor(land, opTime, Date.now());
-      const pid = ns.exec(worker, p.host, p.threads, host, delay, batch.id, port, land, op, p.threads);
+      const pid = ns.exec(worker, p.host, p.threads, host, delay, batch.id, port, land, op, p.threads, pushes(op) ? 1 : 0);
 
       if (pid === 0) {
         // Hand back only what never launched. What did launch is running and
@@ -836,6 +850,16 @@ export function createStream(ns, math, opts) {
     const key = String(msg.b);
     const b = inFlight.get(key);
     if (!b) return false;
+    // BitNode 8: the hack's own return is 0 hit or miss (math.blindHacks), so
+    // read what it left on the server, now. The loop ticks every
+    // STREAM_TICK_MS (25) and this batch's grow lands a SPACER_MS (100) later,
+    // so the balance is still the post-hack one - unless the grow is already
+    // in, in which case there is nothing honest to read. getServer is the
+    // snapshot's own read, billed already. No call in the worker: the user's
+    // rule, and it would be paid per thread.
+    if (msg.op === "H" && blind && !b.reports.some((r) => r.op === "G")) {
+      msg.left = ns.getServer(host).moneyAvailable;
+    }
     b.reports.push(msg);
     touched.add(key);
 
@@ -912,7 +936,7 @@ export function createStream(ns, math, opts) {
       // `expected` is the exec count, not the op count: an op split across
       // hosts reports once per placement, so a healthy batch with a split grow
       // sends five messages for four ops.
-      const v = batchVerdict(b.reports, spacer, b.expected);
+      const v = batchVerdict(b.reports, spacer, b.expected, b.maxMoney);
       // An intrusion is a fault even though every op of THIS batch landed in
       // perfect order - which is exactly why the per-batch verdict cannot see
       // it and the flag has to be carried on the batch.
@@ -1171,6 +1195,8 @@ export function createStream(ns, math, opts) {
     setSlice,
     get cadence() { return cadence; },
     get slice() { return slice; },
+    get stockDir() { return stockDir; },
+    set stockDir(v) { stockDir = Math.sign(Number(v) || 0); },
     credit,
     retire,
     stats,

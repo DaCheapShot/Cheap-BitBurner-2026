@@ -337,6 +337,7 @@ export const tests = {
           },
           getSymbols: () => m.stocks.map((s) => s.sym),
           getMaxShares: (s) => by(s).max,
+          getOrganization: (s) => `Org ${s}`,
           getPrice: (s) => by(s).price,
           getAskPrice: (s) => m.ask(by(s)),
           getBidPrice: (s) => m.bid(by(s)),
@@ -362,6 +363,13 @@ export const tests = {
     const sale = held.reduce((n, s) => n + s.long * m.bid(s) + s.short * (2 * s.shortAvg - m.ask(s)) - 100e3, 0);
     const got = Number(ns.read(HELD_FILE));
     assert(Math.abs(got - sale) < 1, `HELD_FILE ${got} vs sale value ${sale}`);
+    // The batcher's half: one entry per held stock, keyed by its company, up
+    // for a long and down for a short.
+    const push = JSON.parse(ns.read(mods["stocks/config"].STOCK_PUSH_FILE));
+    assert(Object.keys(push).length === held.length, `push ${JSON.stringify(push)} vs ${held.length} held`);
+    for (const s of held) {
+      assert(push[`Org ${s.sym}`]?.dir === (s.long ? 1 : -1), `push for ${s.sym}: ${JSON.stringify(push)}`);
+    }
     // The log is a dashboard: cleared every tick, so it holds exactly the last
     // tick's picture - the same lines STATUS_FILE gets - and no trade spam.
     const dash = ns.read(STATUS_FILE).trimEnd().split("\n");

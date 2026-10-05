@@ -12,6 +12,9 @@
  *   - trades move no price, only drag the forecast toward 50 (influenceForecast)
  */
 
+/** Which way the batcher should push each held stock - a contract, so it lives in scripts/config.js. */
+export { STOCK_PUSH_FILE } from "scripts/config.js";
+
 /** The resident trader, started by boot like sing - it parks without TIX. */
 export const STOCKS_SERVICE = "/scripts/stocks/stocks.js";
 

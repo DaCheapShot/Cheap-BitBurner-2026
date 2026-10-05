@@ -238,6 +238,9 @@ export function makeNs(o = {}) {
       return true;
     },
     scp: () => true,
+    // The node a body asks about (math.prepare reads currentNode for BN8). Not
+    // BitNode 8 unless a test says so.
+    getResetInfo: () => ({ currentNode: 1, ownedSF: new Map() }),
 
     ...o.extra,
   };
