@@ -61,6 +61,7 @@ import { rpc } from "./rpc.js";
  *         run scripts/boot.js --no-sing           (don't run the singularity supervisor)
  *         run scripts/boot.js --no-hacknet        (do not buy hacknet nodes or spend hashes)
  *         run scripts/boot.js --no-stocks         (don't run the stock trader)
+ *         run scripts/boot.js --no-hud            (don't paint stats into the overview)
  *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
  *         run scripts/boot.js --targets 5         (cap the manager's target count)
  *         run scripts/boot.js --interval 30000
@@ -88,6 +89,8 @@ const BOOT = "/scripts/boot.js";
 const ROOT = "/scripts/root.js";
 const DEPLOY = "/scripts/deploy.js";
 const CLOUD = "/scripts/cloud.js";
+/** Paints the overview's extra rows and exits - a transient, once a tick. */
+const HUD = "/scripts/hud.js";
 /**
  * The manager. Both math backends live in scripts/continuous/lib/math.js, which
  * picks per process - so buying or losing Formulas.exe changes a branch inside
@@ -352,6 +355,7 @@ export async function main(ns) {
   const noHacknet = args.includes("--no-hacknet");
   const noSleeve = args.includes("--no-sleeve");
   const noStocks = args.includes("--no-stocks");
+  const noHud = args.includes("--no-hud");
   // sing.js holds share off whenever the player is not doing faction work, and
   // publishes the rep work sleeves take on. With sing opted out nothing would
   // ever release that hold or refresh that list, so clear both here.
@@ -634,6 +638,12 @@ export async function main(ns) {
     // have both attempting the same contracts.
     if (!noContracts && live("contracts") && !isUp(ns, CONTRACTS_SERVICE)) {
       await runToCompletion(ns, CONTRACTS_SERVICE, [], log);
+    }
+
+    // The overview stats, painted and gone in a few ms. The rows outlive the
+    // script, so a transient a tick is all the HUD costs.
+    if (!noHud && live("hud") && !isUp(ns, HUD)) {
+      await runToCompletion(ns, HUD, [], log);
     }
 
     firstPass = false;

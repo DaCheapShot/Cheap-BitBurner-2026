@@ -15,7 +15,7 @@ const COST = {
   getScriptRam: 0.1, getHackTime: 0.05, getGrowTime: 0.05, getWeakenTime: 0.05,
   getPlayer: 0.5, getFavorToDonate: 0.1, getBitNodeMultipliers: 4, nuke: 0.05, brutessh: 0.05, ftpcrack: 0.05,
   relaysmtp: 0.05, httpworm: 0.05, sqlinject: 0.05,
-  share: 2.4, getSharePower: 0.2,
+  share: 2.4, getSharePower: 0.2, getMoneySources: 1,
   // The fork's ns.cloud namespace, which replaces vanilla's top-level purchased
   // server functions. findFunc in RamCalculations.ts searches RamCosts
   // RECURSIVELY by bare name, so a namespaced function is charged by its last
@@ -478,6 +478,12 @@ export const tests = {
     assert(Math.abs(ram - 2.60) < 0.011, `expected 2.60 GB (1.60 + run 1.00), got ${ram.toFixed(2)}`);
   },
 
+  // hud.js reaches the DOM as globalThis["document"] - a bare `document` is 25.00.
+  "hud.js: 3.25 GB": () => {
+    const ram = ramOf("hud");
+    assert(Math.abs(ram - 3.25) < 0.011, `expected 3.25 GB, got ${ram.toFixed(2)}`);
+  },
+
   // config.js is imported by boot.js (pinned at 3.50) and by settings.js, which
   // every rpc body that reads a knob imports; plan.js by sleeve.js.
   "the sleeve subsystem's shared modules are free to import": () => {
@@ -607,7 +613,7 @@ export const tests = {
                          "root", "connectme",
                          "continuous/manager", "continuous/servers",
                          "gang/gang", "contracts/contracts", "sing/sing", "sleeve/sleeve",
-                         "stocks/stocks", "stocks/sellall"]) {
+                         "stocks/stocks", "stocks/sellall", "hud"]) {
       for (const mod of closure(entry)) seen.add(mod);
     }
 
@@ -645,7 +651,7 @@ export const tests = {
                      "continuous/manager", "continuous/servers",
                      "gang/gang", "contracts/contracts", "sing/sing",
                      "hacknet/hacknet", "hacknet/hashes", "sleeve/sleeve",
-                     "stocks/stocks", "stocks/sellall"]) {
+                     "stocks/stocks", "stocks/sellall", "hud"]) {
       for (const mod of closure(e)) entries.add(mod);
     }
 

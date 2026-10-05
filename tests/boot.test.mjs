@@ -9,6 +9,7 @@ import { loadScripts, assert } from "./harness.mjs";
 const TRANSIENT = [
   "scripts/root.js", "scripts/deploy.js", "scripts/contracts/contracts.js",
   "scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js", "scripts/sleeve/sleeve.js", "scripts/cloud.js",
+  "scripts/hud.js",
 ];
 
 /**

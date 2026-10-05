@@ -95,6 +95,7 @@ export const KNOBS = {
   "stocks.buy4S": { def: 1, min: 0, max: 1, bool: true, doc: "buy the 4S TIX API once net worth is twice its price" },
 
   "contracts.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },
+  "hud.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "overview stats (hud.js), once a boot tick" },
 
   "boot.tick": { def: BOOT_TICK_S, min: 5, max: 3600, doc: "seconds between boot ticks (--interval wins)" },
 };
