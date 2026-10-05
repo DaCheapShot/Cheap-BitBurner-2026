@@ -88,7 +88,10 @@ export async function prepare(ns) {
     got = await rpc(ns, `
       const weaken = [];
       for (let c = 1; c <= 64; c++) weaken.push(ns.weakenAnalyze(1, c));
-      return { weaken, hackSec: ns.hackAnalyzeSecurity(1), growSec: ns.growthAnalyzeSecurity(1) };
+      return {
+        weaken, hackSec: ns.hackAnalyzeSecurity(1), growSec: ns.growthAnalyzeSecurity(1),
+        node: ns.getResetInfo().currentNode,
+      };
     `);
   } catch (e) {
     return { ok: false, error: `could not measure the security constants: ${e.message ?? e}` };
@@ -109,8 +112,22 @@ export async function prepare(ns) {
     growSec: got.growSec,
     // Weaken is linear in threads, so the table answers any thread count.
     coreBonus: makeCoreBonus((t, c) => t * table[Math.min(c, CORE_TABLE) - 1]),
+    // BitNode 8 - see blindHacks().
+    blind: got.node === 8,
   };
   return { ok: true };
+}
+
+/**
+ * Are hack reports blind here? In BitNode 8 ns.hack returns the money GAINED,
+ * moneyDrained x ScriptHackMoneyGain = 0 (NetscriptHelpers.tsx), so a hit and a
+ * miss both read 0 and every batch looks like a miss: no drift evidence, no
+ * drain detection. lib/stream.js credit() then measures the take itself, and
+ * rescan aims at the stocks the trader holds instead of paper income. Read once
+ * at startup - the node cannot change under a running manager.
+ */
+export function blindHacks() {
+  return consts?.blind ?? false;
 }
 
 /**

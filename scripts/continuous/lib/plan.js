@@ -869,10 +869,14 @@ export function baselineDrift(snap, th, slack = BASELINE_SLACK_BATCHES, opts = {
  *   completeness can only mean "all four ops showed up", which a batch missing
  *   one worker of a split op would still satisfy.
  */
-export function batchVerdict(reports, spacerMs = SPACER_MS, expected = null) {
+export function batchVerdict(reports, spacerMs = SPACER_MS, expected = null, moneyMax = 0) {
   const landingByOp = new Map();
   let stolen = 0;
   let sawHack = false;
+  // BitNode 8's money-left samples (stream.js credit()). A split hack's workers
+  // each read after their own landing, so the take is max minus the LOWEST
+  // sample - summing per-worker differences would count the first take twice.
+  let left = Infinity;
 
   for (const r of reports) {
     const at = Number(r.a);
@@ -886,8 +890,13 @@ export function batchVerdict(reports, spacerMs = SPACER_MS, expected = null) {
     if (r.op === "H") {
       sawHack = true;
       stolen += Number(r.r) || 0;
+      if (r.left !== undefined) left = Math.min(left, Number(r.left));
     }
   }
+  // Only when the returns say nothing: everywhere but BN8 a hit returns its
+  // money and the sum above is exact. A miss leaves the server full, so it
+  // still reads as a take of 0.
+  if (stolen === 0 && Number.isFinite(left) && moneyMax > 0) stolen = Math.max(0, moneyMax - left);
 
   const orderSeen = [...landingByOp.entries()]
     .sort((a, b) => a[1] - b[1])

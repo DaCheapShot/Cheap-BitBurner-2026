@@ -9,6 +9,7 @@ import { CONTRACTS_SERVICE } from "./contracts/config.js";
 import { SING_SERVICE, GANG_KARMA_TARGET } from "./sing/config.js";
 import { SLEEVE_SERVICE, STATUS_FILE as SLEEVE_STATUS_FILE } from "./sleeve/config.js";
 import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE } from "./hacknet/config.js";
+import { STOCKS_SERVICE } from "./stocks/config.js";
 import { SETTINGS_FILE, setting, settingsLog, BOOT_TICK_S } from "./settings.js";
 import { rpc } from "./rpc.js";
 
@@ -59,6 +60,7 @@ import { rpc } from "./rpc.js";
  *         run scripts/boot.js --no-contracts      (don't solve coding contracts)
  *         run scripts/boot.js --no-sing           (don't run the singularity supervisor)
  *         run scripts/boot.js --no-hacknet        (do not buy hacknet nodes or spend hashes)
+ *         run scripts/boot.js --no-stocks         (don't run the stock trader)
  *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
  *         run scripts/boot.js --targets 5         (cap the manager's target count)
  *         run scripts/boot.js --interval 30000
@@ -349,6 +351,7 @@ export async function main(ns) {
   const noSing = args.includes("--no-sing");
   const noHacknet = args.includes("--no-hacknet");
   const noSleeve = args.includes("--no-sleeve");
+  const noStocks = args.includes("--no-stocks");
   // sing.js holds share off whenever the player is not doing faction work, and
   // publishes the rep work sleeves take on. With sing opted out nothing would
   // ever release that hold or refresh that list, so clear both here.
@@ -556,6 +559,15 @@ export async function main(ns) {
     } else if (!noSing) {
       killDuplicates(ns, SING_SERVICE, log);
       ensureService(ns, SING_SERVICE, [], log);
+    }
+    // The stock trader. Ungated for sing's reason: stocks.js parks without TIX
+    // access rather than exiting, so ensureService finds it up and there is no
+    // relaunch loop - and asking hasTixApiAccess here would cost boot 0.05.
+    if (!live("stocks")) {
+      stopService(ns, STOCKS_SERVICE, log);
+    } else if (!noStocks) {
+      killDuplicates(ns, STOCKS_SERVICE, log);
+      ensureService(ns, STOCKS_SERVICE, [], log);
     }
     // The hacknet, money sweep then hash sweep, every `hacknet.every` ticks (live setting).
     //

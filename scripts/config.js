@@ -344,6 +344,20 @@ export const CLOUD_BUDGET_FRACTION = 0.10;
 export const TARGETS_MARKER = "/data/targets.txt";
 
 /**
+ * Which way the stock trader wants each held stock to move, keyed by the
+ * company name a server carries as `organizationName` (the game's own link -
+ * PlayerInfluencing.ts looks the stock up by it). JSON
+ * `{ [org]: { dir: 1 | -1, value } }`: 1 for a long, -1 for a short, value the
+ * position's sale value. Written every market tick by scripts/stocks/stocks.js,
+ * read by the continuous manager, which flags the matching op of every batch on
+ * that company's server: grow for a long, hack for a short, never both.
+ *
+ * Missing, empty or unparseable means push nothing - the inert failure, for the
+ * same reason as TARGETS_MARKER.
+ */
+export const STOCK_PUSH_FILE = "/data/stocks-push.txt";
+
+/**
  * Hostname prefix of a BitNode 9 hacknet server, which both RAM pools skip.
  *
  * calculateHashGainRate (src/Hacknet/formulas/HacknetServers.ts) carries

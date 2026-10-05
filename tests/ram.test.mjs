@@ -114,6 +114,16 @@ const COST = {
   getSleeveAugmentations: 4, getSleevePurchasableAugs: 4, purchaseSleeveAug: 4,
   setToBladeburnerAction: 4, getSleeveAugmentationPrice: 4, getSleeveAugmentationRepReq: 4,
   purchaseSleeve: 4, upgradeMemory: 4, getSleeveCost: 4, getMemoryUpgradeCost: 4,
+  // ns.stock: GetStock = 2.00 for reads, BuySellStock = 2.50 for trades, the
+  // 4S reads and the purchases. `getConstants` and `nextUpdate` (above) are 0.
+  // The words to keep out of stocks/math.js are the obvious ones - a local
+  // `getPrice` or `getPosition` is 2.00 GB; `ask`, `bid`, `long`, `fc` are free.
+  getConstants: 0, hasWseAccount: 0.05, hasTixApiAccess: 0.05, has4SData: 0.05, has4SDataTixApi: 0.05,
+  getSymbols: 2, getPrice: 2, getOrganization: 2, getAskPrice: 2, getBidPrice: 2, getPosition: 2,
+  getMaxShares: 2, getPurchaseCost: 2, getSaleGain: 2,
+  buyStock: 2.5, sellStock: 2.5, buyShort: 2.5, sellShort: 2.5, placeOrder: 2.5, cancelOrder: 2.5,
+  getOrders: 2.5, getVolatility: 2.5, getForecast: 2.5, purchase4SMarketData: 2.5,
+  purchase4SMarketDataTixApi: 2.5, purchaseWseAccount: 2.5, purchaseTixApi: 2.5,
   // Not functions. RamCalculations.ts resolves a ref named `window` or
   // `document` to RamCostConstants.Dom and adds it, whatever the ref really is.
   window: 25, document: 25,
@@ -417,6 +427,8 @@ export const tests = {
       // The install: the sweep (run + isRunning) is split off installAugmentations,
       // which is 5.00 alone - together 7.70.
       SWEEP: 2.70, INSTALL: 6.60,
+      // The pre-batch sell-all: run + isRunning + getServerMoneyAvailable.
+      LIQUIDATE: 2.80,
       // The idle money crime: getCrimeStats and getCrimeChance, 5.00 each.
       CRIME_STATS: 6.60, CRIME_CHANCE: 6.60,
       // getAugmentationStats alone, rating each aug for tier 1 once per process.
@@ -594,7 +606,8 @@ export const tests = {
     for (const entry of ["boot", "cloud", "deploy",
                          "root", "connectme",
                          "continuous/manager", "continuous/servers",
-                         "gang/gang", "contracts/contracts", "sing/sing", "sleeve/sleeve"]) {
+                         "gang/gang", "contracts/contracts", "sing/sing", "sleeve/sleeve",
+                         "stocks/stocks", "stocks/sellall"]) {
       for (const mod of closure(entry)) seen.add(mod);
     }
 
@@ -631,7 +644,8 @@ export const tests = {
                      "root", "connectme",
                      "continuous/manager", "continuous/servers",
                      "gang/gang", "contracts/contracts", "sing/sing",
-                     "hacknet/hacknet", "hacknet/hashes", "sleeve/sleeve"]) {
+                     "hacknet/hacknet", "hacknet/hashes", "sleeve/sleeve",
+                     "stocks/stocks", "stocks/sellall"]) {
       for (const mod of closure(e)) entries.add(mod);
     }
 
@@ -767,6 +781,44 @@ export const tests = {
   // The two sweeps run one after the other under runToCompletion, so what has
   // to fit beside boot, cloud and a continuous manager on a fresh 32 GB home is
   // the larger of the two - never their sum.
+  // The trader holds the one stock call it needs before an rpc can run -
+  // hasTixApiAccess, to park - plus nextUpdate, which is 0. Everything priced
+  // is a body. 2.65 = 1.60 + run 1.00 + 0.05.
+  "stocks.js holds no priced stock API: 2.65 GB": () => {
+    const ram = ramOf("stocks/stocks");
+    assert(Math.abs(ram - 2.65) < 0.011, `expected 2.65 GB (1.60 + run 1.00 + hasTixApiAccess 0.05), got ${ram.toFixed(2)}`);
+  },
+
+  // config.js is imported by boot.js, settings.js and sing's SWEEP body;
+  // math.js by stocks.js. One billed name in either reaches all of them.
+  "the stock subsystem's shared modules are free to import": () => {
+    for (const mod of ["stocks/config", "stocks/math"]) {
+      const ram = ramOf(mod);
+      assert(Math.abs(ram - BASE) < 0.011,
+        `${mod}.js costs ${(ram - BASE).toFixed(2)} GB to import; it must be 0`);
+    }
+  },
+
+  // READ runs every 6 s tick and TRADE only on a tick that trades; INIT and
+  // TERMS once per process, BUY_API once per node. READ carries getPrice alone -
+  // the spread is fixed per stock, so INIT reads ask and bid once.
+  "every stock body is priced": () => {
+    const want = { INIT: 13.60, TERMS: 6.60, READ: 10.75, TRADE: 11.60, BUY_API: 4.10, BUY_TIX: 4.20 };
+    const got = bodiesOf("stocks/stocks");
+    assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),
+      `stocks.js bodies ${Object.keys(got)} - every body must be pinned here`);
+    for (const [name, gb] of Object.entries(want)) {
+      assert(Math.abs(got[name] - gb) < 0.011, `${name} body: expected ${gb.toFixed(2)} GB, got ${got[name].toFixed(2)}`);
+    }
+  },
+
+  // sing's SWEEP runs it before an install, so it must fit beside sing on a
+  // home that is about to be reset - every other script is still running.
+  "sellall.js costs 10.65 GB": () => {
+    const ram = ramOf("stocks/sellall");
+    assert(Math.abs(ram - 10.65) < 0.011, `expected 10.65 GB, got ${ram.toFixed(2)}`);
+  },
+
   "the hacknet subsystem's peak is one sweep, not both": () => {
     const peak = Math.max(ramOf("hacknet/hacknet"), ramOf("hacknet/hashes"));
     assert(peak < 7.0, `hacknet peak is ${peak.toFixed(2)} GB, over the 7.00 budget`);

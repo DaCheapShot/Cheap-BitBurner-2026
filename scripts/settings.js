@@ -2,6 +2,7 @@ import { CLOUD_BUDGET_FRACTION, SHARE_FRACTION, SHARE_MAX_FRACTION } from "./con
 import { HACKNET_CASH_FRACTION, PAYBACK_SECONDS, HACKNET_EVERY, STUDY_LEVELS } from "./hacknet/config.js";
 import { EQUIP_BUDGET_FRACTION, TICK_EVERY, WAR_EVERY, ASCEND_EVERY, EQUIP_EVERY } from "./gang/config.js";
 import { SLEEVE_AUG_CASH, SLEEVE_AUG_MIN, SLEEVE_COVENANT_CASH } from "./sleeve/config.js";
+import { STOCKS_CASH } from "./stocks/config.js";
 import {
   HOME_RAM_BUDGET_FRACTION, HOME_CORES_BUDGET_FRACTION, PROG_BUDGET_FRACTION, SING_TICK_MS,
   AUTO_INSTALL, MIN_AUG_BATCH, IDLE_STUDY, GRAFT, GRAFT_CASH, GRAFT_MIN_GAIN,
@@ -29,10 +30,10 @@ export const SETTINGS_FILE = "/data/settings.txt";
 /**
  * Keys are `<script>.<knob>`, and each script's knobs stay TOGETHER here:
  * set.js lists them in this order, a group per script, and a test holds every
- * prefix contiguous. Order: gang, cloud, share, hacknet, sing, sleeve, contracts, boot.
+ * prefix contiguous. Order: gang, cloud, share, hacknet, sing, sleeve, stocks, contracts, boot.
  *
  * `<script>.enabled` is the live switch, read by boot.js every tick. Off STOPS
- * a running resident (gang, sing) and skips a transient (cloud, hacknet,
+ * a running resident (gang, sing, stocks) and skips a transient (cloud, hacknet,
  * sleeve, contracts). The manager has none: stopping it drags in killOrphanWorkers and
  * the retired-manager rules, which --no-manager already owns.
  *
@@ -85,6 +86,13 @@ export const KNOBS = {
   "sleeve.augCash": { def: SLEEVE_AUG_CASH, min: 0, max: 1, doc: "fraction of cash one sleeve pass may spend on sleeve augs" },
   "sleeve.augMin": { def: SLEEVE_AUG_MIN, min: 1, max: 50, int: true, doc: "augs a sleeve's batch must reach (each buy wipes its exp)" },
   "sleeve.covenantCash": { def: SLEEVE_COVENANT_CASH, min: 0, max: 1, doc: "fraction of cash a Covenant sleeve or memory buy may cost (BN10)" },
+
+  // Read by stocks.js every market tick. Off STOPS the trader and leaves its
+  // positions open - selling them is sellall.js's job, or the next install's.
+  "stocks.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "stocks.js trader (off leaves positions open)" },
+  "stocks.cash": { def: STOCKS_CASH, min: 0, max: 1, doc: "fraction of net worth the trader may hold in stocks (BN8: 1)" },
+  "stocks.buyTix": { def: 1, min: 0, max: 1, bool: true, doc: "buy the TIX API (no SF8.1, not BN8) once cash is 4x its price" },
+  "stocks.buy4S": { def: 1, min: 0, max: 1, bool: true, doc: "buy the 4S TIX API once net worth is twice its price" },
 
   "contracts.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },
 

@@ -56,6 +56,9 @@ async function driveSing(mods, {
   // Extra getServer records by host - the backdoor pass reads them.
   servers = {},
   homeCores = 1,
+  // Called with each ns.run's file before the mock runs it - the game's side
+  // effects of a real script the mock does not execute (sellall.js).
+  onRun = null,
 } = {}) {
   const calls = [];
   let current = work;
@@ -158,6 +161,10 @@ async function driveSing(mods, {
       ...extra,
     },
   });
+  if (onRun) {
+    const run0 = ns.run;
+    ns.run = (f, ...a) => { onRun(f, ns); return run0(f, ...a); };
+  }
   try {
     await mods["sing/sing"].main(ns);
     assert(false, "the loop should only end by the STOP sentinel");
@@ -1273,6 +1280,46 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     assert(r.count("purchaseAugmentation") === 11, `batch still bought: ${r.count("purchaseAugmentation")}`);
     assert(r.count("installAugmentations") === 0, "installed over a running graft");
     assert(r.ns._log.some((l) => l.includes("install: waiting on the graft of BitWire")), r.ns._log.join("\n"));
+  },
+
+  // The user's rule: the batch plans against cash AND stocks together, and a
+  // batch about to be bought sells every position first - the install it
+  // leads to resets the market, so no position is worth keeping. Three cases:
+  // the batch needs the stock money; cash alone covers it (still sold); and a
+  // sell-all that leaves something held (nothing bought on money not there).
+  "the aug batch counts stocks as cash and sells every position before buying": async () => {
+    const mods = await loadScripts();
+    const { HELD_FILE, STOCKS_SELL_ALL } = mods["stocks/config"];
+    const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
+    const drive = (money, sells) => {
+      const order = [];
+      const p = player({ factions: ["CyberSec"], money });
+      return driveSing(mods, {
+        ticks: 1, p, rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
+        files: { [HELD_FILE]: "1e9" },
+        onRun: (f, ns) => {
+          if (`/${f.replace(/^\/+/, "")}` !== STOCKS_SELL_ALL) return;
+          order.push("sellall");
+          if (!sells) return;
+          ns._files[HELD_FILE] = "0";
+          p.money += 1e9;
+          ns._servers.home.moneyAvailable = p.money;
+        },
+        api: { purchaseAugmentation: (f, n) => { order.push("buy"); return true; } },
+      }).then((r) => ({ ...r, order }));
+    };
+
+    const needs = await drive(0, true);
+    assert(needs.order[0] === "sellall" && needs.order.filter((o) => o === "buy").length === 11,
+      `stock money funds the batch, sold first: ${needs.order}`);
+    assert(needs.ns._log.some((l) => l.includes("sold every stock position for the batch")), needs.ns._log.join("\n"));
+
+    const rich = await drive(1e9, true);
+    assert(rich.order[0] === "sellall", `cash covers it and positions are still sold first: ${rich.order}`);
+
+    const stuck = await drive(0, false);
+    assert(!stuck.order.includes("buy"), `a position survived the sell-all - nothing bought: ${stuck.order}`);
+    assert(stuck.ns._log.some((l) => l.includes("could not all be sold")), stuck.ns._log.join("\n"));
   },
 
   // The user's rule: the Red Pill ends the node's aug cycles, so it is bought

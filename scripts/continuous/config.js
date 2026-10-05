@@ -49,6 +49,8 @@ export {
   // Values a second party reads without knowing which batcher is up: the
   // hacknet reads the target list, and both pools skip hacknet servers.
   TARGETS_MARKER, HACKNET_HOST_PREFIX,
+  // The stock trader's wanted direction per company - see lib/stream.js exec.
+  STOCK_PUSH_FILE,
 } from "scripts/config.js";
 
 // -------------------------------------------------------------- batching ----
@@ -786,6 +788,12 @@ export const REPREP_GRACE_MS = 2000;
  * ranking pass over the candidate list - no placement, no exec.
  */
 export const RESCAN_MS = 60000;
+
+/**
+ * How often the manager re-reads the stock trader's push (STOCK_PUSH_FILE).
+ * The trader rewrites it once per 6 s market tick at most.
+ */
+export const PUSH_MS = 2000;
 
 /**
  * MAXIMUM unprepped targets QUEUED for prep at once, alongside the streams.

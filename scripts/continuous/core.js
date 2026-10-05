@@ -7,6 +7,7 @@ import { isPrepped, rankTargets } from "scripts/continuous/lib/target";
 import { launchPrepWave, placePrepWave, prepTargets } from "scripts/continuous/lib/prep";
 import { serviceShare } from "scripts/continuous/lib/share";
 import { createStream } from "scripts/continuous/lib/stream";
+import { createPushReader } from "scripts/continuous/lib/push";
 import {
   avgConcurrentRam,
   baselineDrift,
@@ -33,6 +34,7 @@ import {
   PREP_SPARE_SHARE,
   PROMOTE_PREP_FIRST,
   REPREP_GRACE_MS,
+  PUSH_MS,
   RESCAN_MS,
   SHARE_RAM_FALLBACK,
   SHARE_WORKER,
@@ -612,9 +614,15 @@ export async function supervise(ns, math, opts) {
   let repaired = 0;
   let nextReport = started + 10000;
   let nextRescan = 0;
+  // The stock trader's push, re-read every PUSH_MS: it changes once per 6 s
+  // market tick at most, and a flag one read late moves one batch the wrong
+  // way at worst - each op's push is a 0.1 nudge with probability = steal.
+  const push = createPushReader(ns);
+  let nextPush = 0;
 
   while (Date.now() < until) {
     const now = Date.now();
+    let rescanned = false;
 
     // The game frees a worker's RAM when it exits; refresh is how the pool
     // learns about it. Committed placements are off our ledger already, so this
@@ -627,10 +635,17 @@ export async function supervise(ns, math, opts) {
       // Formulas.exe can be bought at any time. The switch takes effect at the
       // next snapshot; batches already sized keep the backend they were sized on.
       if (math.refresh(ns)) log(`${INDENT}math: switched to ${math.backend()}`);
+      push.reload();
       streams = rescan(ns, math, {
         pool, ram, steal, pin, adaptive, maxTargets, forced,
-        streams, preps, learned, log, verbose, shareRam,
+        streams, preps, learned, log, verbose, shareRam, push,
       });
+      rescanned = true;
+    }
+    if (rescanned || now >= nextPush) {
+      nextPush = now + PUSH_MS;
+      push.reload();
+      for (const s of streams) s.stockDir = push.dirFor(s.host);
     }
 
     for (const s of streams) {
@@ -695,8 +710,15 @@ export function rescan(ns, math, opts) {
   const {
     pool, ram, steal, pin = null, adaptive = true, maxTargets, forced,
     streams, preps, learned = new Map(), log, verbose,
-    shareRam = SHARE_RAM_FALLBACK,
+    shareRam = SHARE_RAM_FALLBACK, push = null,
   } = opts;
+
+  // BitNode 8: hacking pays $0, so paper income is no reason to pick a target.
+  // What the batcher CAN do there is move the stocks the trader holds, so the
+  // servers of held companies go first, biggest position first, and the count
+  // picker below scores them on that. Nothing held: paper income, as anywhere
+  // else - the batcher still earns the hacking EXP that reaches w0r1d_d43m0n.
+  const byStocks = (math.blindHacks?.() ?? false) && Boolean(push?.any);
 
   const live = new Set(streams.filter((s) => !s.retiring).map((s) => s.host));
 
@@ -739,7 +761,11 @@ export function rescan(ns, math, opts) {
   const shared = serviceShare(ns, pool, log, { ramPerThread: shareRam });
   if (shared && shared.launched > 0) pool.refresh();
 
-  const ranked = rankTargets(ns, math, { steal });
+  const paperRanked = rankTargets(ns, math, { steal });
+  // Stable: unpushed targets (value 0) keep their paper order behind the pushed.
+  const ranked = byStocks
+    ? [...paperRanked].sort((a, b) => push.valueFor(b.host) - push.valueFor(a.host))
+    : paperRanked;
   const candidates = forced ? ranked.filter((t) => t.host === forced) : ranked;
   // Priced against the slice a FULL complement of targets would each get, so
   // ranking does not depend on how many happen to be admitted this pass.
@@ -762,7 +788,10 @@ export function rescan(ns, math, opts) {
   // usableRam, chose 84.9% steal, and then failed 402 of 439 dispatches with
   // "no room" - the bytes were there and the threads would not fit.
   const budget = pool.placeableRam(ram.grow) * TARGET_RAM_BUDGET;
-  const { admitted: feasible } = admitTargets(priced, budget, maxTargets);
+  // priceTargets sorts by paper income per GB-second; in BN8 admission goes by
+  // the stock position a target pushes first (stable, so ties stay in paper order).
+  const order = byStocks ? [...priced].sort((a, b) => push.valueFor(b.host) - push.valueFor(a.host)) : priced;
+  const { admitted: feasible } = admitTargets(order, budget, maxTargets);
 
   // Each admitted target gets an equal SHARE of the budget, not the whole of it.
   //
@@ -802,7 +831,10 @@ export function rescan(ns, math, opts) {
       // A target whose single batch cannot fit its slice earns NOTHING - it
       // places weakens and never places its grow. Scoring it at its arithmetic
       // income would have it justify the slice it is about to waste.
-      if (fit.fitsPeak) total += fit.income * 1000 * (p.chance ?? 1);
+      // In BN8 a target is worth the position it pushes; paper income only
+      // breaks ties, scaled far below any real position.
+      const paper = fit.income * 1000 * (p.chance ?? 1);
+      if (fit.fitsPeak) total += byStocks ? push.valueFor(p.host) + paper * 1e-6 : paper;
     }
     return { admitted: take, slice: width, picks, total };
   };

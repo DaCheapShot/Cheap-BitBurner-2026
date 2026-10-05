@@ -56,6 +56,12 @@ const NESTED = [
   "sleeve/config.js",
   "sleeve/plan.js",
   "sleeve/sleeve.js",
+  // The stock trader. math.js is pure and holds every decision; stocks.js and
+  // sellall.js hold ns calls only inside main().
+  "stocks/config.js",
+  "stocks/math.js",
+  "stocks/stocks.js",
+  "stocks/sellall.js",
 ];
 
 /** Every .js under scripts/, as posix paths relative to it. */

@@ -4480,4 +4480,106 @@ export const tests = {
       "rows must be sorted by income",
     );
   },
+
+  // ------------------------------------------------------ stock push -------
+
+  // PlayerInfluencing.ts: a flagged grow nudges the company's second-order
+  // forecast +0.1, a flagged hack -0.1, each with probability money-moved /
+  // moneyMax. A batch grows back what it hacks, so flagging both pushes
+  // nowhere: only the op that helps the held position carries it, weaken never.
+  "the stock push flags only the op that helps the position": async () => {
+    const { s, calls, fire } = await makeStream();
+    const flags = () => Object.fromEntries(["H", "W1", "G", "W2"].map((op) => [op, calls.find((c) => c.args[5] === op)?.args[7]]));
+    for (const [dir, want] of [[1, { H: 0, W1: 0, G: 1, W2: 0 }], [-1, { H: 1, W1: 0, G: 0, W2: 0 }], [0, { H: 0, W1: 0, G: 0, W2: 0 }]]) {
+      calls.length = 0;
+      s.stockDir = dir;
+      fire();
+      assert(JSON.stringify(flags()) === JSON.stringify(want), `dir ${dir}: ${JSON.stringify(flags())}`);
+    }
+  },
+
+  // The flag is an OPTION on the call each worker already makes - the user's
+  // rule is no new ns call in hack/grow/weaken, which are paid per thread.
+  "the workers forward the stock flag and make no other ns call": async () => {
+    for (const [file, op] of [["hack", "hack"], ["grow", "grow"]]) {
+      const src = stripComments(readScript(file));
+      const nsCalls = [...src.matchAll(/\bns\.([\w.]+)\s*\(/g)].map((m) => m[1]).sort();
+      assert(JSON.stringify(nsCalls) === JSON.stringify([op, "writePort"].sort()), `${file}.js calls ${nsCalls}`);
+      const seen = [];
+      const mod = await import("data:text/javascript," + encodeURIComponent(readScript(file)));
+      for (const flag of [1, 0]) {
+        await mod.main({
+          args: ["t", 0, "b1", 3, 0, "X", 1, flag],
+          [op]: async (_t, opts) => { seen.push(opts.stock); return 0; },
+          writePort: () => {},
+        });
+      }
+      assert(JSON.stringify(seen) === "[true,false]", `${file}.js passes stock: ${seen}`);
+    }
+  },
+
+  // BitNode 8: ns.hack returns moneyDrained x ScriptHackMoneyGain = 0, hit or
+  // miss. The manager reads what each hack left; a split hack's take is max
+  // minus the LOWEST sample, and a full server is still a miss.
+  "BN8: a hack's take is measured from the money it left": async () => {
+    const { mods } = await loadContinuous();
+    const { batchVerdict } = mods["lib/plan"];
+    const batch = (hacks) => [...hacks, { op: "W1", p: 1100, a: 1100 }, { op: "G", p: 1200, a: 1200 }, { op: "W2", p: 1300, a: 1300 }];
+    const split = batchVerdict(batch([
+      { op: "H", p: 1000, a: 1000, r: 0, left: 9e8 },
+      { op: "H", p: 1000, a: 1001, r: 0, left: 8.5e8 },
+    ]), 100, null, 1e9);
+    assert(split.hackHit && split.stolen === 1.5e8, `split take: ${split.stolen}`);
+    const miss = batchVerdict(batch([{ op: "H", p: 1000, a: 1000, r: 0, left: 1e9 }]), 100, null, 1e9);
+    assert(!miss.hackHit && miss.stolen === 0, "server still full: a miss");
+    const paid = batchVerdict(batch([{ op: "H", p: 1000, a: 1000, r: 5e6, left: 1 }]), 100, null, 1e9);
+    assert(paid.stolen === 5e6, "anywhere a hack pays, its return is the take");
+  },
+
+  "BN8: credit() samples the money a hack left, unless its grow is already in": async () => {
+    const { ns, math, pool, mods, ram } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: { t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+        hackPercentPerThread: 0.003, growBase: 1.0018, weakenTime: 20000, growTime: 16000, hackTime: 5000 } },
+    });
+    const calls = [];
+    ns.exec = (file, host, threads, ...args) => { calls.push(args); return calls.length; };
+    const blind = { ...math, blindHacks: () => true };
+    const s = mods["lib/stream"].createStream(ns, blind, { host: "t", pool, ram, log: () => {}, steal: 0.1 });
+    s.dispatch();
+    s.tick(Date.now() + 1e9);
+    const id = calls[0][2];
+    ns._servers.t.moneyAvailable = 9e8;
+    const h = { b: id, op: "H", p: 0, a: 0, r: 0 };
+    s.credit(h);
+    assert(h.left === 9e8, `sampled ${h.left}`);
+    s.dispatch();
+    s.tick(Date.now() + 2e9);
+    const id2 = calls[calls.length - 1][2];
+    s.credit({ b: id2, op: "G", p: 0, a: 0, r: 1.1 });
+    const late = { b: id2, op: "H", p: 0, a: 0, r: 0 };
+    s.credit(late);
+    assert(late.left === undefined, "grow already landed: no honest sample");
+  },
+
+  // BN8 hacking pays nothing, so the target is the server of a held stock -
+  // ahead of a richer paper target. Anywhere else the push changes no choice.
+  "BN8 aims at the held stock's server; elsewhere paper income still decides": async () => {
+    const { ns, math, pool, ram, mods } = await makeMath("analyze", {
+      hosts: { home: 262144 },
+      servers: {
+        a: { moneyMax: 1e10, moneyAvailable: 1e10, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018, weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+        b: { moneyMax: 1e8, moneyAvailable: 1e8, minDifficulty: 5, hackDifficulty: 5,
+             hackPercentPerThread: 0.003, growBase: 1.0018, weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+      },
+    });
+    ns.exec = () => 1;
+    const push = { any: true, valueFor: (h) => (h === "b" ? 5e9 : 0), dirFor: (h) => (h === "b" ? 1 : 0) };
+    const opts = { pool, ram, steal: 0.1, maxTargets: 1, forced: null, preps: new Map(), log: () => {}, verbose: false, streams: [], push };
+    const bn8 = mods["core"].rescan(ns, { ...math, blindHacks: () => true }, opts);
+    assert(bn8.map((x) => x.host).join() === "b", `BN8 took ${bn8.map((x) => x.host)}`);
+    const elsewhere = mods["core"].rescan(ns, math, { ...opts, preps: new Map() });
+    assert(elsewhere.map((x) => x.host).join() === "a", `elsewhere took ${elsewhere.map((x) => x.host)}`);
+  },
 };
