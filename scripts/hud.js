@@ -2,9 +2,9 @@ import { HACKNET_HOST_PREFIX } from "./config.js";
 import { HELD_FILE } from "./stocks/config.js";
 
 /**
- * Paints extra rows into the sidebar overview, then exits. boot runs it once a
- * tick, so the figures refresh every `boot.tick` (60 s) - the user's rule: no
- * new resident script.
+ * Paints extra rows into the sidebar overview, then exits. boot runs it every
+ * `hud.tick` (5 s) inside its sleep between ticks - the user's rule: no new
+ * resident script.
  *
  * The overview (src/ui/React/CharacterOverview.tsx) renders two empty
  * Typography cells, overview-extra-hook-0 and -1, that React never fills - so
@@ -17,8 +17,9 @@ import { HELD_FILE } from "./stocks/config.js";
  * globalThis is not in the cost table. Never write the bare name here.
  *
  * Income is the change in what getMoneySources().sinceInstall has EARNED, so a
- * server purchase does not read as negative income. The previous sample lives
- * in SAMPLE_FILE; the rate is over one boot tick.
+ * server purchase does not read as negative income. Samples live in
+ * SAMPLE_FILE and the rate is over the last WINDOW_MS - the user's 15 s, long
+ * enough to smooth the batcher's bursts of landing hacks.
  *
  * RAM: 1.60 base + getMoneySources 1.00 + getServerMoneyAvailable 0.10
  *      + getSharePower 0.20 + scan 0.20 + hasRootAccess/getServerMaxRam/
@@ -26,6 +27,7 @@ import { HELD_FILE } from "./stocks/config.js";
  */
 
 const SAMPLE_FILE = "/data/hud.txt";
+const WINDOW_MS = 15000;
 
 /** Every MoneySourceTracker field that records money coming IN. */
 const EARNINGS = ["hacking", "stock", "gang", "hacknet", "crime", "work", "codingcontract", "sleeves",
@@ -44,12 +46,17 @@ export async function main(ns) {
   const src = ns.getMoneySources().sinceInstall;
   const earned = EARNINGS.reduce((n, k) => n + (src[k] ?? 0), 0);
   const now = Date.now();
-  let prev = null;
-  try { prev = JSON.parse(ns.read(SAMPLE_FILE)); } catch { /* first run */ }
-  ns.write(SAMPLE_FILE, JSON.stringify({ t: now, earned }), "w");
-  // An install zeroes sinceInstall; that one sample would read as a huge loss.
-  if (prev && now > prev.t && earned >= prev.earned * 0.5) {
-    rows.push(["Income", `${$((earned - prev.earned) / ((now - prev.t) / 1000))}/s`]);
+  let samples = [];
+  try { samples = JSON.parse(ns.read(SAMPLE_FILE)); } catch { /* first run */ }
+  // An install zeroes sinceInstall; the old samples would read as a huge loss.
+  if (!Array.isArray(samples) || (samples.length && earned < samples.at(-1).earned * 0.5)) samples = [];
+  // Baseline: the newest sample at least WINDOW_MS old; anything older goes.
+  while (samples.length > 1 && now - samples[1].t >= WINDOW_MS) samples.shift();
+  const base = samples[0];
+  samples.push({ t: now, earned });
+  ns.write(SAMPLE_FILE, JSON.stringify(samples), "w");
+  if (base && now > base.t) {
+    rows.push(["Income", `${$((earned - base.earned) / ((now - base.t) / 1000))}/s`]);
   }
 
   // ponytail: after a sell-all HELD_FILE holds a COUNT of refused sales, not

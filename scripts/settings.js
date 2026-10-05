@@ -11,6 +11,9 @@ import {
 /** boot.js's tick. Here, not in boot.js, so the default has one home a pure module can import. */
 export const BOOT_TICK_S = 60;
 
+/** How often boot repaints the overview (hud.js) while it sleeps between ticks. */
+export const HUD_TICK_S = 5;
+
 /**
  * Live overrides for a handful of tunables, set from the terminal by
  * scripts/set.js and read at the point of use - so a change lands on the next
@@ -95,7 +98,8 @@ export const KNOBS = {
   "stocks.buy4S": { def: 1, min: 0, max: 1, bool: true, doc: "buy the 4S TIX API once net worth is twice its price" },
 
   "contracts.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },
-  "hud.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "overview stats (hud.js), once a boot tick" },
+  "hud.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "overview stats (hud.js)" },
+  "hud.tick": { def: HUD_TICK_S, min: 1, max: 600, doc: "seconds between overview repaints, inside boot's sleep" },
 
   "boot.tick": { def: BOOT_TICK_S, min: 5, max: 3600, doc: "seconds between boot ticks (--interval wins)" },
 };

@@ -106,6 +106,7 @@ run scripts/set.js hacknet.cash 0.9     # override one, live - next sweep, no re
 run scripts/set.js hacknet.cash default # back to config.js's value
 run scripts/set.js reset                # every setting back to config.js's value
 run scripts/set.js gang.enabled off     # live switch: boot stops gang.js next tick
+run scripts/set.js hud.tick 5           # overview repaint seconds (inside boot's sleep)
 run scripts/set.js boot.tick 30         # cadences: boot.tick, sing.tick, hacknet.every, gang.*Every
 run scripts/set.js sing.autoInstall off # sing: autoInstall, idleStudy, minAugBatch, graft, graftCash, graftMin
 node tests/run.mjs                      # run the test suite
@@ -364,13 +365,15 @@ editor's RAM panel when one moves.
 | `stocks/stocks.js` | entry: resident trader, one decision per market tick | 2.65 |
 | ↳ six bodies | transients: init, terms, read (every tick), trade, buy 4S API, buy TIX (parked) | 4.10–13.60 |
 | `stocks/sellall.js` | closes every position; sing's SWEEP runs it before an install | 10.65 |
-| `hud.js` | paints income/s, stocks, worth, karma, share, RAM into the overview; boot runs it per tick | 3.25 |
+| `hud.js` | paints income/s, stocks, worth, karma, share, RAM into the overview; boot runs it every `hud.tick` | 3.25 |
 
 `hud.js` writes into the overview's `overview-extra-hook-0/1` cells, which React never fills, so the
-rows outlive the transient - the user's rule was no new resident. It reaches the DOM as
+rows outlive the transient - the user's rule was no new resident. Boot runs it every `hud.tick` (5 s)
+by slicing its own sleep between ticks; every other step keeps `boot.tick`. It reaches the DOM as
 `globalThis["document"]`: a computed key is a Literal and free, the bare name is 25.00 GB. Income
-is the change in what `getMoneySources().sinceInstall` has EARNED, over one boot tick, so spending
-never reads as negative income; the last sample is `/data/hud.txt`.
+is the change in what `getMoneySources().sinceInstall` has EARNED over the last 15 s, so spending
+never reads as negative income; the samples are `/data/hud.txt`. The boot test mock ends a tick at
+the settings read straight after a sleep, not on each sleep, because the sleep is sliced.
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
