@@ -9,6 +9,7 @@ import { loadScripts, assert } from "./harness.mjs";
 const TRANSIENT = [
   "scripts/root.js", "scripts/deploy.js", "scripts/contracts/contracts.js",
   "scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js", "scripts/sleeve/sleeve.js", "scripts/cloud.js",
+  "scripts/hud.js",
 ];
 
 /**
@@ -41,6 +42,8 @@ async function runBoot({
 
   const network = ["home", ...new Set(workers.map((w) => w.host))].filter((h) => h !== undefined);
   let tick = 0;
+  let sleptThisTick = 0;
+  let afterSleep = false;
   const launched = [];
   const killed = [];
   const logs = [];
@@ -59,11 +62,25 @@ async function runBoot({
     gang: { inGang: () => inGang },
     heart: { break: () => karma },
     print: (msg) => logs.push(String(msg)), tprint: (msg) => onTprint(String(msg)),
-    read: (f) => store[f] ?? "",
+    // A tick ENDS at the settings read straight after a sleep, not on the sleep
+    // itself: boot's sleep is sliced into hud.tick pieces, and between two
+    // slices a repaint always calls ps or run, so only the read opening the
+    // next tick follows a sleep directly. onSleep gets the tick's whole sleep.
+    read: (f) => {
+      if (f === "/data/settings.txt" && afterSleep && sleptThisTick >= 1000) {
+        onSleep(sleptThisTick);
+        sleptThisTick = 0;
+        tick++;
+        if (tick >= ticks) throw new Error("STOP");
+        procs = onTick(tick, procs, store);
+      }
+      afterSleep = false;
+      return store[f] ?? "";
+    },
     write: (f, d) => { store[f] = d; },
     fileExists: (f, host = "home") => Boolean(store[`${host}:${f}`]),
     scan: (h) => (h === "home" ? network.filter((x) => x !== "home") : []),
-    ps: (host = "home") => procs.filter((p) => p.host === host).map((p) => ({ ...p })),
+    ps: (host = "home") => (afterSleep = false, procs).filter((p) => p.host === host).map((p) => ({ ...p })),
     kill: (pid) => { killed.push(procs.find((p) => p.pid === pid)?.filename); procs = procs.filter((p) => p.pid !== pid); return true; },
     // Enough of a port for boot's one rpc call (HAS_SLEEVES): the transient's
     // reply is queued the moment it is "run", as if it answered instantly.
@@ -74,6 +91,7 @@ async function runBoot({
     asleep: () => new Promise((r) => setTimeout(r, 1)),
     run: (file, threads, ...a) => {
       const stored = file.replace(/^\/+/, "");
+      afterSleep = false;
       if (stored.startsWith("tmp/rpc-")) {
         rpcCalls++;
         (ports[a[0]] ??= []).push(JSON.stringify({ v: sleeves }));
@@ -85,10 +103,10 @@ async function runBoot({
       return nextPid++;
     },
     sleep: async (ms) => {
-      if (ms >= 1000) onSleep(ms);
+      if (ms >= 1000) sleptThisTick += ms;
+      afterSleep = true;
       for (const p of procs) if (TRANSIENT.includes(p.filename)) p.life--;
       procs = procs.filter((p) => !TRANSIENT.includes(p.filename) || (p.life ?? 99) > 0);
-      if (ms >= 1000) { tick++; if (tick >= ticks) throw new Error("STOP"); procs = onTick(tick, procs, store); }
       await new Promise((r) => setTimeout(r, 1));
     },
   };
@@ -550,6 +568,23 @@ export const tests = {
       onSleep: (ms) => slept.push(ms),
     });
     assert(slept.includes(7000) && !slept.includes(30000), `--interval should win, slept ${slept}`);
+  },
+
+  // The HUD repaints inside boot's sleep, every hud.tick, while every other
+  // step keeps boot.tick - and its off switch stops both the slices and the run.
+  "the hud repaints every hud.tick between boot ticks": async () => {
+    const slept = [];
+    const r = await runBoot({
+      ticks: 2, files: { "/data/settings.txt": '{"boot.tick":30,"hud.tick":5}' },
+      onSleep: (ms) => slept.push(ms),
+    });
+    const huds = r.launched.filter((f) => f === "scripts/hud.js").length;
+    const roots = r.launched.filter((f) => f === "scripts/root.js").length;
+    // per tick: one at the tick's end + 5 in the 30 s sleep (none after the last slice)
+    assert(roots === 2 && huds === 12, `expected 2 root runs and 12 repaints, got ${roots} and ${huds}`);
+    assert(slept[0] === 30000, `the slices must add up to the tick, slept ${slept}`);
+    const off = await runBoot({ ticks: 2, files: { "/data/settings.txt": '{"hud.enabled":0}' } });
+    assert(!off.launched.includes("scripts/hud.js"), `hud.enabled off still painted: ${off.launched}`);
   },
 
   "hacknet.every changes the sweep cadence": async () => {

@@ -61,6 +61,7 @@ import { rpc } from "./rpc.js";
  *         run scripts/boot.js --no-sing           (don't run the singularity supervisor)
  *         run scripts/boot.js --no-hacknet        (do not buy hacknet nodes or spend hashes)
  *         run scripts/boot.js --no-stocks         (don't run the stock trader)
+ *         run scripts/boot.js --no-hud            (don't paint stats into the overview, every hud.tick)
  *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
  *         run scripts/boot.js --targets 5         (cap the manager's target count)
  *         run scripts/boot.js --interval 30000
@@ -88,6 +89,8 @@ const BOOT = "/scripts/boot.js";
 const ROOT = "/scripts/root.js";
 const DEPLOY = "/scripts/deploy.js";
 const CLOUD = "/scripts/cloud.js";
+/** Paints the overview's extra rows and exits - a transient, once a tick. */
+const HUD = "/scripts/hud.js";
 /**
  * The manager. Both math backends live in scripts/continuous/lib/math.js, which
  * picks per process - so buying or losing Formulas.exe changes a branch inside
@@ -352,6 +355,7 @@ export async function main(ns) {
   const noHacknet = args.includes("--no-hacknet");
   const noSleeve = args.includes("--no-sleeve");
   const noStocks = args.includes("--no-stocks");
+  const noHud = args.includes("--no-hud");
   // sing.js holds share off whenever the player is not doing faction work, and
   // publishes the rep work sleeves take on. With sing opted out nothing would
   // ever release that hold or refresh that list, so clear both here.
@@ -636,9 +640,28 @@ export async function main(ns) {
       await runToCompletion(ns, CONTRACTS_SERVICE, [], log);
     }
 
+    // The overview stats, painted and gone in a few ms. The rows outlive the
+    // script, so no resident is needed; the sleep below repaints between ticks.
+    if (!noHud && live("hud") && !isUp(ns, HUD)) {
+      await runToCompletion(ns, HUD, [], log);
+    }
+
     firstPass = false;
     ticks++;
-    if (!once) await ns.sleep(tickMsFrom(cfgText));
+    // BOOT'S SLEEP IS THE HUD'S CADENCE. Every step above runs once a
+    // boot.tick; the overview repaints every hud.tick in between, because a
+    // 30 s HUD reads stale. hud.js is a few ms of 3.25 GB, the one step cheap
+    // enough to run that often. Slices are counted, not timed off the clock.
+    // ponytail: each repaint adds runToCompletion's 200 ms poll to the tick
+    // (~1 s per 30 s at 5 s slices); time the slices if that ever matters.
+    for (let left = once ? 0 : tickMsFrom(cfgText); left > 0;) {
+      const text = ns.read(SETTINGS_FILE);
+      const hudOn = !noHud && setting(text, "hud.enabled") !== 0;
+      const ms = hudOn ? Math.min(left, setting(text, "hud.tick") * 1000) : left;
+      await ns.sleep(ms);
+      left -= ms;
+      if (hudOn && left > 0 && !isUp(ns, HUD)) await runToCompletion(ns, HUD, [], log);
+    }
   } while (!once);
 
   ns.tprint("boot: one pass done.");
