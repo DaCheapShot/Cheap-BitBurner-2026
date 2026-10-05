@@ -43,6 +43,12 @@ export const UPGRADE_EVERY = 3;
 export const PROGS_EVERY = 6;
 export const JOIN_EVERY = 3;
 export const AUGS_EVERY = 3;
+/**
+ * After a batch that will be installed, wait this long and run the aug pass
+ * once more before installing: on a high-income node the cash earned meanwhile
+ * buys or donates for more augs that this install would otherwise leave behind.
+ */
+export const FINAL_CHECK_MS = 20000;
 /** How long a parked supervisor (no Source-File 4) sleeps between checks of nothing. */
 export const PARKED_MS = 3600000;
 

@@ -1217,7 +1217,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const mods = await loadScripts();
     const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
     const r = await driveSing(mods, {
-      ticks: 1, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
+      ticks: 2, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
     });
     const buys = r.calls.filter((c) => c.startsWith("purchaseAugmentation:"));
     assert(buys.length === 11, `all eleven, got ${buys.length}`);
@@ -1256,7 +1256,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const { CONTRACTS_SERVICE } = mods["contracts/config"];
     const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
     const r = await driveSing(mods, {
-      ticks: 1, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
+      ticks: 2, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
     });
     const ran = r.ns.ps("home");
     assert(ran.some((q) => `/${q.filename}` === CONTRACTS_SERVICE), `a contract sweep ran first: ${ran.map((q) => q.filename)}`);
@@ -1268,13 +1268,32 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     assert(!r.ns._log.some((l) => l.includes("WARN")), `a body failed: ${r.ns._log.filter((l) => l.includes("WARN"))}`);
   },
 
+  // The user's rule: after a batch that will be installed, wait FINAL_CHECK_MS
+  // and plan once more on fresh money and rep - income during the wait may buy
+  // more. Rep stands in for the income here; the wait is the mock's sleep.
+  "the final check before an install buys what came into reach during the wait": async () => {
+    const mods = await loadScripts();
+    const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
+    const rep = { CyberSec: 1e5 };
+    let sleeps = 0;
+    const r = await driveSing(mods, {
+      p: player({ factions: ["CyberSec"], money: 1e13 }), rep,
+      augs: { CyberSec: [...eleven, { name: "late", rep: 5e5, price: 1e4 }] },
+      extra: { sleep: async () => { rep.CyberSec = 1e6; if (++sleeps >= 2) throw new Error("STOP"); } },
+    });
+    const buys = r.calls.filter((c) => c.startsWith("purchaseAugmentation:"));
+    assert(buys.length === 12 && buys[11] === "purchaseAugmentation:CyberSec,late", `late bought last: ${buys}`);
+    assert(r.count("installAugmentations") === 1, "and installed once, after the final check");
+    assert(r.ns._log.some((l) => l.includes("final check")), r.ns._log.join("\n"));
+  },
+
   // prestigeAugmentation calls finishWork(true): an install mid-graft cancels
   // it and the game keeps the money. The batch is still bought.
   "no install while a graft runs": async () => {
     const mods = await loadScripts();
     const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
     const r = await driveSing(mods, {
-      ticks: 1, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
+      ticks: 2, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
       work: { type: "GRAFTING", augmentation: "BitWire" },
     });
     assert(r.count("purchaseAugmentation") === 11, `batch still bought: ${r.count("purchaseAugmentation")}`);
@@ -1327,7 +1346,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
   "the Red Pill in reach is bought and installed at once, batch of one": async () => {
     const mods = await loadScripts();
     const r = await driveSing(mods, {
-      ticks: 1, p: player({ factions: ["Daedalus"] }), rep: { Daedalus: 3e6 },
+      ticks: 2, p: player({ factions: ["Daedalus"] }), rep: { Daedalus: 3e6 },
       augs: { Daedalus: [{ name: "The Red Pill", rep: 2.5e6, price: 0 }] },
     });
     assert(r.count("purchaseAugmentation") === 1, `the pill alone: ${r.calls.filter((c) => c.startsWith("purchase"))}`);
@@ -1341,7 +1360,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const mods = await loadScripts();
     const lift = (2.5e6 - 1e6 + 1) * 1e6 / 0.75;
     const r = await driveSing(mods, {
-      ticks: 1, p: player({ factions: ["Daedalus", "CyberSec"], money: lift + 1e9 }),
+      ticks: 2, p: player({ factions: ["Daedalus", "CyberSec"], money: lift + 1e9 }),
       rep: { Daedalus: 1e6, CyberSec: 1e9 }, favor: { Daedalus: 150 },
       augs: { Daedalus: [{ name: "The Red Pill", rep: 2.5e6, price: 0 }], CyberSec: [{ name: "Dear", rep: 1, price: 1.5e12 }] },
     });
@@ -1357,7 +1376,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const two = [{ name: "a", rep: 1e3, price: 1e4 }, { name: "b", rep: 1e3, price: 1e4 },
       { name: "The Red Pill", rep: 2.5e6, price: 0 }];
     const go = (favorGain) => driveSing(mods, {
-      ticks: 1, p: player({ factions: ["Daedalus"] }), rep: { Daedalus: 5e5 }, favorGain, augs: { Daedalus: two },
+      ticks: 2, p: player({ factions: ["Daedalus"] }), rep: { Daedalus: 5e5 }, favorGain, augs: { Daedalus: two },
     });
     const crossed = await go({ Daedalus: 151 });
     assert(crossed.count("purchaseAugmentation") === 2 && crossed.count("installAugmentations") === 1,

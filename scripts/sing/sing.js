@@ -1,5 +1,5 @@
 import {
-  UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
+  UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS, FINAL_CHECK_MS,
   CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
@@ -788,7 +788,7 @@ export async function main(ns) {
    * MIN_AUG_BATCH are queued. Every read is its own body - see the aug bodies
    * above for why.
    */
-  const augsPass = async (r) => {
+  const augsPass = async (r, final = false) => {
     // Live `sing.minAugBatch`, read once per pass so the plan, the log and the
     // install trigger below all agree on the same number.
     const minBatch = setting(ns.read(SETTINGS_FILE), "sing.minAugBatch");
@@ -924,7 +924,22 @@ export async function main(ns) {
     const now = [...owned.all, ...bought];
     targets = repTargets(augsOf, now, info);
     priorityTargets = repTargets(augsOf, now, info, priority);
-    if (queued >= minBatch || force || owned.pill || bought.includes(RED_PILL)) await install(queued);
+    if (queued >= minBatch || force || owned.pill || bought.includes(RED_PILL)) {
+      // One final pass before installing (FINAL_CHECK_MS): the cash earned in
+      // the wait may buy or donate for more. Fresh READ, since money and rep
+      // moved; the queue already meets the batch rule, so any extra fits. Once
+      // only - `final` - and a failed READ installs what is queued.
+      if (!final && bought.length) {
+        log(`augs: final check in ${ns.format.time(FINAL_CHECK_MS)} before installing`);
+        await ns.sleep(FINAL_CHECK_MS);
+        const again = await call("read", READ);
+        if (again) {
+          grafting = again.work?.type === "GRAFTING" ? again.work.augmentation : null;
+          return augsPass(again, true);
+        }
+      }
+      await install(queued);
+    }
     // Still here, so not installed. What is left would be reset by the install
     // when it comes; home RAM survives it.
     if (bought.length) {
