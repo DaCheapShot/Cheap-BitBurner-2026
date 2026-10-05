@@ -1269,36 +1269,39 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
   },
 
   // The user's rule: after a batch that will be installed, wait FINAL_CHECK_MS
-  // and plan once more on fresh money and rep - income during the wait may buy
-  // more. Rep stands in for the income here; the wait is the mock's sleep.
-  "the final check before an install buys what came into reach during the wait": async () => {
+  // and plan again on fresh money and rep - buy, wait, buy - until a pass buys
+  // nothing, then install. Rep stands in for the income here, rising at each
+  // wait (the mock's sleep), so two more augs come into reach one per wait.
+  "before an install it buys, waits and buys again until nothing more is in reach": async () => {
     const mods = await loadScripts();
     const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
     const rep = { CyberSec: 1e5 };
     let sleeps = 0;
     const r = await driveSing(mods, {
       p: player({ factions: ["CyberSec"], money: 1e13 }), rep,
-      augs: { CyberSec: [...eleven, { name: "late", rep: 5e5, price: 1e4 }] },
-      extra: { sleep: async () => { rep.CyberSec = 1e6; if (++sleeps >= 2) throw new Error("STOP"); } },
+      augs: { CyberSec: [...eleven, { name: "late1", rep: 5e5, price: 1e4 }, { name: "late2", rep: 5e6, price: 1e4 }] },
+      extra: { sleep: async () => { rep.CyberSec *= 10; if (++sleeps >= 4) throw new Error("STOP"); } },
     });
     const buys = r.calls.filter((c) => c.startsWith("purchaseAugmentation:"));
-    assert(buys.length === 12 && buys[11] === "purchaseAugmentation:CyberSec,late", `late bought last: ${buys}`);
-    assert(r.count("installAugmentations") === 1, "and installed once, after the final check");
-    assert(r.ns._log.some((l) => l.includes("final check")), r.ns._log.join("\n"));
+    assert(JSON.stringify(buys.slice(11)) === '["purchaseAugmentation:CyberSec,late1","purchaseAugmentation:CyberSec,late2"]',
+      `one per wait: ${buys}`);
+    assert(r.count("installAugmentations") === 1, "installed once, after a pass bought nothing");
+    assert(r.ns._log.filter((l) => l.includes("checking again")).length === 3, r.ns._log.join("\n"));
   },
 
   // prestigeAugmentation calls finishWork(true): an install mid-graft cancels
-  // it and the game keeps the money. The batch is still bought.
-  "no install while a graft runs": async () => {
+  // it and the game keeps the money. The user's rule: the batch is not even
+  // bought - it would only sit queued with its cash.
+  "no aug bought and no install while a graft runs": async () => {
     const mods = await loadScripts();
     const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
     const r = await driveSing(mods, {
       ticks: 2, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
       work: { type: "GRAFTING", augmentation: "BitWire" },
     });
-    assert(r.count("purchaseAugmentation") === 11, `batch still bought: ${r.count("purchaseAugmentation")}`);
+    assert(r.count("purchaseAugmentation") === 0, `bought while grafting: ${r.count("purchaseAugmentation")}`);
     assert(r.count("installAugmentations") === 0, "installed over a running graft");
-    assert(r.ns._log.some((l) => l.includes("install: waiting on the graft of BitWire")), r.ns._log.join("\n"));
+    assert(r.ns._log.some((l) => l.includes("not buying while grafting BitWire")), r.ns._log.join("\n"));
   },
 
   // The user's rule: the batch plans against cash AND stocks together, and a

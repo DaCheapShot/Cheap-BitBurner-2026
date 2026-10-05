@@ -1157,9 +1157,10 @@ kills the process anyway.
 
 **Once `MIN_AUG_BATCH` are queued, the queue is installed** - right after the batch that reached it,
 or on the next pass if something stopped it. A batch that triggers the install first waits
-`FINAL_CHECK_MS` (20 s), re-READs and runs the aug pass once more - the user's rule: on a
-high-income node the cash earned in the wait buys or donates for more before the install
-resets it. `installAugmentations("/scripts/boot.js")` kills every
+`FINAL_CHECK_MS` (20 s), re-READs and runs the aug pass again - buy, wait, buy - until a pass
+buys nothing, and that pass installs. The user's rule: on a high-income node the cash earned in
+each wait buys or donates for more before the install resets it. **No aug is bought while a graft
+runs** (the user's rule too): the batch would only sit queued, since an install cancels the graft. `installAugmentations("/scripts/boot.js")` kills every
 script, sing included, and 500 ms after the reset runs boot with **no arguments and one thread**
 (`Singularity.ts` `runAfterReset`) - so boot's defaults are what comes back up, and any flag typed by
 hand is gone. The callback is skipped only when home lacks the RAM, which cannot happen: every

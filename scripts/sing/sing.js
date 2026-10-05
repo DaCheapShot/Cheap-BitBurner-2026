@@ -788,7 +788,7 @@ export async function main(ns) {
    * MIN_AUG_BATCH are queued. Every read is its own body - see the aug bodies
    * above for why.
    */
-  const augsPass = async (r, final = false) => {
+  const augsPass = async (r) => {
     // Live `sing.minAugBatch`, read once per pass so the plan, the log and the
     // install trigger below all agree on the same number.
     const minBatch = setting(ns.read(SETTINGS_FILE), "sing.minAugBatch");
@@ -877,6 +877,14 @@ export async function main(ns) {
       minBatch,
     });
     let plan = planFor(cash);
+    // The user's rule: no aug is bought while a graft runs. A batch bought now
+    // would only sit in the queue - install() will not cancel the graft - while
+    // its cash waits there instead of finishing the graft or growing the batch.
+    // Checked before the sell-all and the donations, which exist only for it.
+    if (plan.buys.length && grafting) {
+      log(`augs: a batch of ${plan.buys.length} is due - not buying while grafting ${grafting}`);
+      return;
+    }
     // A batch is due: sell every position first - the install it leads to
     // would reset them anyway - then plan again on the cash actually in hand,
     // since prices moved since stocks.js's last tick. Not bought at all if a
@@ -925,17 +933,19 @@ export async function main(ns) {
     targets = repTargets(augsOf, now, info);
     priorityTargets = repTargets(augsOf, now, info, priority);
     if (queued >= minBatch || force || owned.pill || bought.includes(RED_PILL)) {
-      // One final pass before installing (FINAL_CHECK_MS): the cash earned in
-      // the wait may buy or donate for more. Fresh READ, since money and rep
-      // moved; the queue already meets the batch rule, so any extra fits. Once
-      // only - `final` - and a failed READ installs what is queued.
-      if (!final && bought.length) {
-        log(`augs: final check in ${ns.format.time(FINAL_CHECK_MS)} before installing`);
+      // Buy, wait, buy again until a pass buys nothing - the user's rule: the
+      // cash earned in each FINAL_CHECK_MS wait may buy or donate for more.
+      // Fresh READ, since money and rep moved; the queue already meets the
+      // batch rule, so any extra fits. It ends: every buy raises every later
+      // price 1.9x. The pass that buys nothing installs (the branch above),
+      // and a failed READ installs what is queued.
+      if (bought.length) {
+        log(`augs: checking again in ${ns.format.time(FINAL_CHECK_MS)} before installing`);
         await ns.sleep(FINAL_CHECK_MS);
         const again = await call("read", READ);
         if (again) {
           grafting = again.work?.type === "GRAFTING" ? again.work.augmentation : null;
-          return augsPass(again, true);
+          return augsPass(again);
         }
       }
       await install(queued);
