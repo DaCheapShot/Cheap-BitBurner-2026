@@ -595,13 +595,13 @@ export const tests = {
 
   "boot logs overrides at start and each change as it lands": async () => {
     const r = await runBoot({
-      ticks: 3, files: { "/data/settings.txt": '{"boot.tick":30}' },
+      ticks: 3, files: { "/data/settings.txt": '{"boot.tick":45}' },
       onTick: (tick, procs, store) => {
-        if (tick === 1) store["/data/settings.txt"] = '{"boot.tick":30,"gang.enabled":0}';
+        if (tick === 1) store["/data/settings.txt"] = '{"boot.tick":45,"gang.enabled":0}';
         return procs;
       },
     });
-    assert(r.logs.some((l) => l.includes("settings (vs default): boot.tick 60 -> 30")),
+    assert(r.logs.some((l) => l.includes("settings (vs default): boot.tick 30 -> 45")),
       `start line missing: ${r.logs.join(" | ")}`);
     const changes = r.logs.filter((l) => l.includes("settings changed"));
     assert(changes.length === 1 && changes[0].includes("gang.enabled on -> off") && !changes[0].includes("boot.tick"),

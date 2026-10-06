@@ -201,7 +201,7 @@ export const tests = {
   "shock first: a sleeve over the bar recovers, on every rung": async () => {
     const { assign } = (await loadScripts())["sleeve/plan"];
     const want = { factions: [{ faction: "CyberSec", types: HACK }], companies: [] };
-    const sleeves = [sleeve({ shock: 20.1 }), sleeve({ shock: 20 }), sleeve({ shock: 100, sync: 1 })];
+    const sleeves = [sleeve({ shock: 0.1 }), sleeve({ shock: 0 }), sleeve({ shock: 100, sync: 1 })];
     for (const over of [{ karma: false }, { karma: true, canGang: true, inGang: false }]) {
       const a = assign({ sleeves, player: { karma: 0, skills: skills(1) }, want, ...over });
       assert(a[0].kind === "recover" && a[2].kind === "recover", `shocked sleeves recover: ${JSON.stringify(a)}`);
