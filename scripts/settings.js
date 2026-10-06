@@ -9,7 +9,7 @@ import {
 } from "./sing/config.js";
 
 /** boot.js's tick. Here, not in boot.js, so the default has one home a pure module can import. */
-export const BOOT_TICK_S = 60;
+export const BOOT_TICK_S = 30;
 
 /** How often boot repaints the overview (hud.js) while it sleeps between ticks. */
 export const HUD_TICK_S = 5;
