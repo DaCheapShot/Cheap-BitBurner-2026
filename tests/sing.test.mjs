@@ -1217,7 +1217,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const mods = await loadScripts();
     const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
     const r = await driveSing(mods, {
-      ticks: 1, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
+      ticks: 2, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
     });
     const buys = r.calls.filter((c) => c.startsWith("purchaseAugmentation:"));
     assert(buys.length === 11, `all eleven, got ${buys.length}`);
@@ -1256,7 +1256,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const { CONTRACTS_SERVICE } = mods["contracts/config"];
     const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
     const r = await driveSing(mods, {
-      ticks: 1, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
+      ticks: 2, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
     });
     const ran = r.ns.ps("home");
     assert(ran.some((q) => `/${q.filename}` === CONTRACTS_SERVICE), `a contract sweep ran first: ${ran.map((q) => q.filename)}`);
@@ -1268,18 +1268,40 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     assert(!r.ns._log.some((l) => l.includes("WARN")), `a body failed: ${r.ns._log.filter((l) => l.includes("WARN"))}`);
   },
 
+  // The user's rule: after a batch that will be installed, wait FINAL_CHECK_MS
+  // and plan again on fresh money and rep - buy, wait, buy - until a pass buys
+  // nothing, then install. Rep stands in for the income here, rising at each
+  // wait (the mock's sleep), so two more augs come into reach one per wait.
+  "before an install it buys, waits and buys again until nothing more is in reach": async () => {
+    const mods = await loadScripts();
+    const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
+    const rep = { CyberSec: 1e5 };
+    let sleeps = 0;
+    const r = await driveSing(mods, {
+      p: player({ factions: ["CyberSec"], money: 1e13 }), rep,
+      augs: { CyberSec: [...eleven, { name: "late1", rep: 5e5, price: 1e4 }, { name: "late2", rep: 5e6, price: 1e4 }] },
+      extra: { sleep: async () => { rep.CyberSec *= 10; if (++sleeps >= 4) throw new Error("STOP"); } },
+    });
+    const buys = r.calls.filter((c) => c.startsWith("purchaseAugmentation:"));
+    assert(JSON.stringify(buys.slice(11)) === '["purchaseAugmentation:CyberSec,late1","purchaseAugmentation:CyberSec,late2"]',
+      `one per wait: ${buys}`);
+    assert(r.count("installAugmentations") === 1, "installed once, after a pass bought nothing");
+    assert(r.ns._log.filter((l) => l.includes("checking again")).length === 3, r.ns._log.join("\n"));
+  },
+
   // prestigeAugmentation calls finishWork(true): an install mid-graft cancels
-  // it and the game keeps the money. The batch is still bought.
-  "no install while a graft runs": async () => {
+  // it and the game keeps the money. The user's rule: the batch is not even
+  // bought - it would only sit queued with its cash.
+  "no aug bought and no install while a graft runs": async () => {
     const mods = await loadScripts();
     const eleven = Array.from({ length: 11 }, (_, i) => ({ name: `aug${i}`, rep: 1e3, price: (i + 1) * 1e4 }));
     const r = await driveSing(mods, {
-      ticks: 1, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
+      ticks: 2, p: player({ factions: ["CyberSec"] }), rep: { CyberSec: 1e5 }, augs: { CyberSec: eleven },
       work: { type: "GRAFTING", augmentation: "BitWire" },
     });
-    assert(r.count("purchaseAugmentation") === 11, `batch still bought: ${r.count("purchaseAugmentation")}`);
+    assert(r.count("purchaseAugmentation") === 0, `bought while grafting: ${r.count("purchaseAugmentation")}`);
     assert(r.count("installAugmentations") === 0, "installed over a running graft");
-    assert(r.ns._log.some((l) => l.includes("install: waiting on the graft of BitWire")), r.ns._log.join("\n"));
+    assert(r.ns._log.some((l) => l.includes("not buying while grafting BitWire")), r.ns._log.join("\n"));
   },
 
   // The user's rule: the batch plans against cash AND stocks together, and a
@@ -1327,7 +1349,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
   "the Red Pill in reach is bought and installed at once, batch of one": async () => {
     const mods = await loadScripts();
     const r = await driveSing(mods, {
-      ticks: 1, p: player({ factions: ["Daedalus"] }), rep: { Daedalus: 3e6 },
+      ticks: 2, p: player({ factions: ["Daedalus"] }), rep: { Daedalus: 3e6 },
       augs: { Daedalus: [{ name: "The Red Pill", rep: 2.5e6, price: 0 }] },
     });
     assert(r.count("purchaseAugmentation") === 1, `the pill alone: ${r.calls.filter((c) => c.startsWith("purchase"))}`);
@@ -1341,7 +1363,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const mods = await loadScripts();
     const lift = (2.5e6 - 1e6 + 1) * 1e6 / 0.75;
     const r = await driveSing(mods, {
-      ticks: 1, p: player({ factions: ["Daedalus", "CyberSec"], money: lift + 1e9 }),
+      ticks: 2, p: player({ factions: ["Daedalus", "CyberSec"], money: lift + 1e9 }),
       rep: { Daedalus: 1e6, CyberSec: 1e9 }, favor: { Daedalus: 150 },
       augs: { Daedalus: [{ name: "The Red Pill", rep: 2.5e6, price: 0 }], CyberSec: [{ name: "Dear", rep: 1, price: 1.5e12 }] },
     });
@@ -1357,7 +1379,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const two = [{ name: "a", rep: 1e3, price: 1e4 }, { name: "b", rep: 1e3, price: 1e4 },
       { name: "The Red Pill", rep: 2.5e6, price: 0 }];
     const go = (favorGain) => driveSing(mods, {
-      ticks: 1, p: player({ factions: ["Daedalus"] }), rep: { Daedalus: 5e5 }, favorGain, augs: { Daedalus: two },
+      ticks: 2, p: player({ factions: ["Daedalus"] }), rep: { Daedalus: 5e5 }, favorGain, augs: { Daedalus: two },
     });
     const crossed = await go({ Daedalus: 151 });
     assert(crossed.count("purchaseAugmentation") === 2 && crossed.count("installAugmentations") === 1,

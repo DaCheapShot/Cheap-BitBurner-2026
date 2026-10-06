@@ -1,5 +1,5 @@
 import {
-  UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS,
+  UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS, FINAL_CHECK_MS,
   CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
@@ -877,6 +877,14 @@ export async function main(ns) {
       minBatch,
     });
     let plan = planFor(cash);
+    // The user's rule: no aug is bought while a graft runs. A batch bought now
+    // would only sit in the queue - install() will not cancel the graft - while
+    // its cash waits there instead of finishing the graft or growing the batch.
+    // Checked before the sell-all and the donations, which exist only for it.
+    if (plan.buys.length && grafting) {
+      log(`augs: a batch of ${plan.buys.length} is due - not buying while grafting ${grafting}`);
+      return;
+    }
     // A batch is due: sell every position first - the install it leads to
     // would reset them anyway - then plan again on the cash actually in hand,
     // since prices moved since stocks.js's last tick. Not bought at all if a
@@ -924,7 +932,24 @@ export async function main(ns) {
     const now = [...owned.all, ...bought];
     targets = repTargets(augsOf, now, info);
     priorityTargets = repTargets(augsOf, now, info, priority);
-    if (queued >= minBatch || force || owned.pill || bought.includes(RED_PILL)) await install(queued);
+    if (queued >= minBatch || force || owned.pill || bought.includes(RED_PILL)) {
+      // Buy, wait, buy again until a pass buys nothing - the user's rule: the
+      // cash earned in each FINAL_CHECK_MS wait may buy or donate for more.
+      // Fresh READ, since money and rep moved; the queue already meets the
+      // batch rule, so any extra fits. It ends: every buy raises every later
+      // price 1.9x. The pass that buys nothing installs (the branch above),
+      // and a failed READ installs what is queued.
+      if (bought.length) {
+        log(`augs: checking again in ${ns.format.time(FINAL_CHECK_MS)} before installing`);
+        await ns.sleep(FINAL_CHECK_MS);
+        const again = await call("read", READ);
+        if (again) {
+          grafting = again.work?.type === "GRAFTING" ? again.work.augmentation : null;
+          return augsPass(again);
+        }
+      }
+      await install(queued);
+    }
     // Still here, so not installed. What is left would be reset by the install
     // when it comes; home RAM survives it.
     if (bought.length) {
