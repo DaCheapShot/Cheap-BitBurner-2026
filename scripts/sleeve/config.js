@@ -52,7 +52,7 @@ export { GANG_KARMA_TARGET, MONEY_CRIMES } from "scripts/sing/config.js";
  * the shared-exp end. Recovering the last 20 points takes ~3.7 h of nothing,
  * against ~1.1 h of output lost by working them off over ~11 h.
  */
-export const SHOCK_RECOVER_ABOVE = 20;
+export const SHOCK_RECOVER_ABOVE = 0;
 
 /**
  * A karma sleeve with no gym stat left does its best karma crime only at these
