@@ -59,10 +59,14 @@ async function driveSing(mods, {
   // Called with each ns.run's file before the mock runs it - the game's side
   // effects of a real script the mock does not execute (sellall.js).
   onRun = null,
+  // The stock APIs sing buys: owned by default, so TIX and 4S stop asking.
+  hasTix = true, has4S = true,
 } = {}) {
   const calls = [];
   let current = work;
   let tor = hasTor;
+  let tix = hasTix;
+  let fourS = has4S;
   let sleeps = 0;
   let cores = homeCores;
   const rec = (name, fn) => (...a) => { calls.push(`${name}:${a.join(",")}`); return fn(...a); };
@@ -149,7 +153,14 @@ async function driveSing(mods, {
       getResetInfo: () => ({ currentNode: 4, ownedSF }),
       getFavorToDonate: () => 150,
       getServer: (h) => ({ hostname: h, ...servers[h] }),
-      getBitNodeMultipliers: () => ({ FactionWorkRepGain: 0.75 }),
+      getBitNodeMultipliers: () => ({ FactionWorkRepGain: 0.75, FourSigmaMarketDataApiCost: 1 }),
+      stock: {
+        hasTixApiAccess: rec("hasTixApiAccess", () => tix),
+        has4SDataTixApi: rec("has4SDataTixApi", () => fourS),
+        getConstants: () => ({ TixApiCost: 5e9, MarketDataTixApi4SCost: 25e9 }),
+        purchaseTixApi: rec("purchaseTixApi", () => { tix = true; return true; }),
+        purchase4SMarketDataTixApi: rec("purchase4SMarketDataTixApi", () => { fourS = true; return true; }),
+      },
       hasTorRouter: rec("hasTorRouter", () => tor),
       // The pre-install contract sweep: started, and finished by the next look.
       isRunning: rec("isRunning", () => false),
@@ -1026,6 +1037,44 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     assert(!r.calls.includes("purchaseProgram:ServerProfiler.exe"), "only PROGS_WANTED is bought");
   },
 
+  // stocks.js exits without TIX; sing buys it at TIX_CASH_MULT x $5b (no WSE:
+  // purchaseTixApi checks money only), and stops asking once it is owned.
+  "the TIX API is bought once cash allows - and only then": async () => {
+    const mods = await loadScripts();
+    const { PROGS_EVERY } = mods["sing/config"];
+    const { TIX_CASH_MULT } = mods["stocks/config"];
+    const drive = (cash, files = {}) => driveSing(mods, {
+      ticks: PROGS_EVERY * 2 + 1, hasTix: false, servers: { home: { moneyAvailable: cash } }, files,
+    });
+    const rich = await drive(TIX_CASH_MULT * 5e9);
+    assert(rich.count("purchaseTixApi") === 1, `bought once: ${rich.count("purchaseTixApi")}`);
+    assert(rich.ns._log.some((l) => /tix: bought for \$5\.00b/.test(l)), "logged");
+    assert((await drive(TIX_CASH_MULT * 5e9 - 1)).count("purchaseTixApi") === 0, "not a dollar under it");
+    const off = await drive(TIX_CASH_MULT * 5e9, { "/data/settings.txt": '{"gang.enabled":0,"stocks.buyTix":0}' });
+    assert(off.count("purchaseTixApi") === 0, "stocks.buyTix off: never");
+    const owned = await driveSing(mods, { ticks: PROGS_EVERY * 2 + 1 });
+    // TIX and FOUR_S each check TIX once, FOUR_S checks 4S once - then neither runs again.
+    assert(owned.count("hasTixApiAccess") === 2 && owned.count("has4SDataTixApi") === 1,
+      `owned: each body runs once: ${owned.count("hasTixApiAccess")}, ${owned.count("has4SDataTixApi")}`);
+  },
+
+  // 4S: net worth (cash + HELD_FILE) at FS_WORTH_MULT x its price, and cash
+  // covering it - the gate stocks.js used, while it holds the price back.
+  "the 4S API is bought at twice its price in net worth, with the cash in hand": async () => {
+    const mods = await loadScripts();
+    const { PROGS_EVERY } = mods["sing/config"];
+    const { HELD_FILE } = mods["stocks/config"];
+    const drive = (cash, held, settings = '{"gang.enabled":0}') => driveSing(mods, {
+      ticks: PROGS_EVERY + 1, has4S: false, servers: { home: { moneyAvailable: cash } },
+      files: { [HELD_FILE]: String(held), "/data/settings.txt": settings },
+    });
+    assert((await drive(25e9, 25e9)).count("purchase4SMarketDataTixApi") === 1, "worth 2x, cash 1x: bought");
+    assert((await drive(25e9, 25e9 - 1)).count("purchase4SMarketDataTixApi") === 0, "worth short: not bought");
+    assert((await drive(25e9 - 1, 1e12)).count("purchase4SMarketDataTixApi") === 0, "cash short: not bought");
+    assert((await drive(50e9, 50e9, '{"gang.enabled":0,"stocks.buy4S":0}')).count("purchase4SMarketDataTixApi") === 0,
+      "stocks.buy4S off: never");
+  },
+
   "denied invites never reach JOIN, allowed ones do": async () => {
     const mods = await loadScripts();
     const denied = await driveSing(mods, { ticks: 1, invites: ["Chongqing", "Volhaven"] });
@@ -1588,7 +1637,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const r = await driveSing(mods, { ticks: 6, run: () => 0 });
     const warns = r.ns._log.filter((l) => l.includes("WARN"));
     const tags = warns.map((l) => l.match(/WARN: (\w+) failed/)[1]).sort();
-    assert(JSON.stringify(tags) === JSON.stringify(["backdoors", "cores", "invites", "read", "tor", "upgrade"]),
+    assert(JSON.stringify(tags) === JSON.stringify(["backdoors", "cores", "invites", "read", "tix", "tor", "upgrade"]),
       `each failing body should warn exactly once, got ${tags}`);
     assert(!r.ns._log.some((l) => l.includes("Parked")), "a RAM failure must never park the subsystem");
   },

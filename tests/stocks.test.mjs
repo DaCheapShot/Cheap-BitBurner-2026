@@ -274,36 +274,24 @@ export const tests = {
 
   // ------------------------------------------------------------ stocks.js --
 
-  // Outside BN8 without SF8.1 the trader parks; the TIX API is all it needs
-  // (no WSE: purchaseTixApi checks money only), bought at TIX_CASH_MULT x $5b.
-  "parked without TIX, it buys the API once cash allows - and only then": async () => {
+  // Outside BN8 without SF8.1 there is no TIX: the trader exits at once (sing
+  // buys the API, boot starts this after) and leaves sing and the batcher
+  // reading "nothing held".
+  "without TIX it exits at once, writing nothing held and nothing to push": async () => {
     const mods = await loadScripts();
-    const { TIX_CASH_MULT, HISTORY_FILE } = mods["stocks/config"];
-    const drive = async (cash, files = {}) => {
-      let tix = false;
-      const bought = [];
-      const ns = makeNs({
-        files,
-        servers: { home: { moneyAvailable: cash } },
-        extra: {
-          sleep: async () => { throw new Error("STOP"); },
-          stock: {
-            hasTixApiAccess: () => tix,
-            getConstants: () => ({ TixApiCost: 5e9 }),
-            purchaseTixApi: () => { bought.push(cash); tix = true; return true; },
-            nextUpdate: async () => { throw new Error("STOP"); },
-          },
+    const { HELD_FILE, STOCK_PUSH_FILE } = mods["stocks/config"];
+    const ns = makeNs({
+      files: { [HELD_FILE]: "123", [STOCK_PUSH_FILE]: '{"x":1}' },
+      extra: {
+        stock: {
+          hasTixApiAccess: () => false,
+          nextUpdate: async () => { throw new Error("nextUpdate without TIX"); },
         },
-      });
-      try { await mods["stocks/stocks"].main(ns); } catch (e) { if (e.message !== "STOP") throw e; }
-      return { bought, ns };
-    };
-    const rich = await drive(TIX_CASH_MULT * 5e9);
-    assert(rich.bought.length === 1, "bought at the threshold");
-    assert(/bought the TIX API for \$5\.00b/.test(rich.ns.read(HISTORY_FILE)), `logged: ${rich.ns.read(HISTORY_FILE)}`);
-    assert((await drive(TIX_CASH_MULT * 5e9 - 1)).bought.length === 0, "not a dollar under it");
-    const off = await drive(1e15, { "/data/settings.txt": '{"stocks.buyTix":0}' });
-    assert(off.bought.length === 0, "stocks.buyTix off: never");
+      },
+    });
+    await mods["stocks/stocks"].main(ns);
+    assert(ns.read(HELD_FILE) === "0", `HELD_FILE: ${ns.read(HELD_FILE)}`);
+    assert(ns.read(STOCK_PUSH_FILE) === "{}", `STOCK_PUSH_FILE: ${ns.read(STOCK_PUSH_FILE)}`);
   },
 
   // Driven against the simulated market through a mock ns.stock: READ, plan,

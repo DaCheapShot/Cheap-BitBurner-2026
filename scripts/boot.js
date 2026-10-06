@@ -564,12 +564,12 @@ export async function main(ns) {
       killDuplicates(ns, SING_SERVICE, log);
       ensureService(ns, SING_SERVICE, [], log);
     }
-    // The stock trader. Ungated for sing's reason: stocks.js parks without TIX
-    // access rather than exiting, so ensureService finds it up and there is no
-    // relaunch loop - and asking hasTixApiAccess here would cost boot 0.05.
+    // The stock trader. Gated on TIX like the gang on inGang(): stocks.js exits
+    // without it (sing buys it), so ungated ensureService would relaunch it
+    // every tick. hasTixApiAccess is 0.05 GB - the one stock name boot pays for.
     if (!live("stocks")) {
       stopService(ns, STOCKS_SERVICE, log);
-    } else if (!noStocks) {
+    } else if (!noStocks && ns.stock.hasTixApiAccess()) {
       killDuplicates(ns, STOCKS_SERVICE, log);
       ensureService(ns, STOCKS_SERVICE, [], log);
     }
