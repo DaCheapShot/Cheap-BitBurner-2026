@@ -40,17 +40,18 @@ export { GANG_KARMA_TARGET, MONEY_CRIMES } from "scripts/sing/config.js";
 // ------------------------------------------------------------- game rules ---
 
 /**
- * Every sleeve recovers shock above this before any other work; at or under it,
- * work finishes the job (any work lowers shock at a third of recovery's rate).
+ * Every sleeve recovers shock above this before any other work. 0, because the
+ * game refuses a sleeve aug while shock is above 0 - a higher bar parks every
+ * sleeve where it can never buy one.
  *
- * Shock scales a sleeve's output by (1 - s/100), and the exp it SHARES twice:
+ * The old bar, 20, came from output alone. Shock scales a sleeve's output by (1 - s/100), and the exp it SHARES twice:
  * once at the sender, once at the receiver (applySleeveGains). With every sleeve
  * at about the same shock, the shared output scales by (1 - s/100)^2. Recover
  * while the future loss it avoids beats the output it gives up now:
  * f(s) > 1/3, where f is the fraction of output lost. Linear f (own rep) gives
- * s > 33.3; squared f (shared exp) gives s > 18.4. 20 is the user's call, at
- * the shared-exp end. Recovering the last 20 points takes ~3.7 h of nothing,
- * against ~1.1 h of output lost by working them off over ~11 h.
+ * s > 33.3; squared f (shared exp) gives s > 18.4. Recovering the last 20
+ * points takes ~3.7 h of nothing, against ~1.1 h of output lost by working
+ * them off over ~11 h - a trade that ignored the aug lock.
  */
 export const SHOCK_RECOVER_ABOVE = 0;
 

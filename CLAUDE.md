@@ -123,7 +123,7 @@ manager itself: lowest PID wins).
 The manager guards itself too: `findRivals` in `continuous/core.js` **aborts** rather than
 starting beside any other manager, and does not kill the rival. That is why boot has to clear
 them first: a survivor does not make the incoming manager degrade, it makes it exit, and boot
-would restart it into the same wall once a minute forever.
+would restart it into the same wall every tick forever.
 
 Killing a retired manager must also clear its workers. The shotgun exec'd the **same**
 `scripts/{hack,grow,weaken}.js` (reports told apart by the port in argv), so `killOrphanWorkers`'
@@ -791,7 +791,7 @@ Contracts never expire, so the wait costs nothing WITHIN an aug cycle - they sim
 `prestigeAugmentation` and `prestigeSourceFile`, and `initForeignServers` then builds fresh
 ones - so every unsolved contract on the network goes with them, and a backlog at install
 time is lost reputation. This is the second reason the per-tick cadence beats the ten-minute
-one it replaced: nothing is ever more than a minute old, so there is no backlog to lose. A
+one it replaced: nothing is ever more than a tick (30 s) old, so there is no backlog to lose. A
 hand-run `run scripts/contracts/contracts.js` before installing is still free insurance.
 
 Hence **both halves of the gate**: 10 minutes past `max(lastAugReset, lastNodeReset)` *and*
@@ -807,16 +807,16 @@ was the wrong trade: 4.10 GB pinned forever to re-read a clock that only matters
 ten minutes. A shut gate now costs 4.10 GB for about 300 ms and zero in between.
 
 **So the gate lives in `contracts.js`, not in the FIND body.** A shut gate is the common case
-for the first ten minutes and must not cost a 12.00 GB transient once a minute to discover.
-`getResetInfo` (1.00) and `getPlayer` (0.50) resident here is what makes a per-minute cadence
+for the first ten minutes and must not cost a 12.00 GB transient every 30 s to discover.
+`getResetInfo` (1.00) and `getPlayer` (0.50) resident here is what makes a per-tick cadence
 affordable — it is why the entry is 4.10 and not 2.60.
 
 **Everything that must outlive a run is a file**, because a transient forgets and its
 `ns.print` log window dies with it:
 
 - `/data/contracts-refused.txt` — the skip list. This **had** to become a file. An in-memory
-  set was fine for a service; at once a minute a deterministic wrong answer spends all ten of
-  a contract's tries inside ten minutes, and "Array Jumping Game" allows exactly **one**, so
+  set was fine for a service; at once a tick a deterministic wrong answer spends all ten of
+  a contract's tries inside five minutes, and "Array Jumping Game" allows exactly **one**, so
   it would be destroyed on the very next run. `--forget` clears it, which is what to run after
   fixing a solver — entries are otherwise skipped for the life of the BitNode.
 - `/data/contracts-gate.txt` — the last gate message, so it is said **once** rather than every
@@ -966,7 +966,7 @@ transient; a test asserts the body touches it only through `.has()`.
 tick about it buries the warning that matters. `HOME_RESERVE_GB` was left at 32 deliberately: the
 worst overlap of awaited transients from three processes (contracts find 12.00 + gang equip
 14.70 + CRIME 6.60) is 33.30, and the failure that 1.30 GB buys is one deduped WARN and a retry.
-The sleeve pass adds a fourth process (2.60 + a 6.60 body) for about a second a minute. boot awaits
+The sleeve pass adds a fourth process (2.60 + a 6.60 body) for about a second a tick. boot awaits
 it and the contract sweep one after the other, so the two never overlap; the same one-WARN failure
 covers the rare tick where it lands on a gang equip and a sing CRIME.
 
@@ -1195,7 +1195,7 @@ from The Covenant. Self-contained like `gang/`: it imports
 `scripts/rpc.js`, `scripts/settings.js` and 0 GB constants, and boot reads one path out of it.
 
 **A transient, the contracts shape.** Sleeve work runs on its own - a crime loops, faction work
-accrues - so one decision a minute loses nothing, and nothing is worth holding between passes.
+accrues - so one decision a tick loses nothing, and nothing is worth holding between passes.
 boot runs `sleeve.js` with `runToCompletion` every tick; resident, it would pin 2.60 GB to buy a
 log window. Every `ns.sleeve` function is **4.00 GB** (`SleeveBase`), so each call is its own rpc
 body (5.60; COUNT is 6.60 with `getResetInfo`). A transient's `ns.print` dies with it, so the pass
@@ -1218,13 +1218,15 @@ already pays `ns.run` - so boot stays at 3.50.
 identifiers anywhere in the closure; `tests/ram.test.mjs` bans them and pins `sleeve/plan.js` and
 `sleeve/config.js` at the base.
 
-**Every sleeve recovers shock to `SHOCK_RECOVER_ABOVE` = 20 before anything else** - the user's
-rule, on every rung. A sleeve starts at shock 100; rep and exp are x `(100-shock)/100`, and the exp
-it SHARES (`applySleeveGains`) is cut twice, at sender and receiver - a shocked gym trainer raises
-almost nobody. Recover while `f(s) > 1/3`, f the fraction of output lost: linear (own rep) gives
-33.3, squared (shared exp) 18.4; 20 sits at the shared-exp end. Work wears off the rest at a third
-of recovery's rate - the last 20 points recovered cost ~3.7 h of nothing against ~1.1 h lost
-working them off. Recovery to 0 was tried first and dropped for that.
+**Every sleeve recovers shock to `SHOCK_RECOVER_ABOVE` = 0 before anything else** - the user's
+rule, on every rung, because the game refuses a sleeve aug while shock is above 0
+(`Sleeve.installAugmentation`), so a sleeve parked at any higher bar could never buy one. A sleeve
+starts at shock 100; rep and exp are x `(100-shock)/100`, and the exp it SHARES
+(`applySleeveGains`) is cut twice, at sender and receiver - a shocked gym trainer raises almost
+nobody. The bar was 20 for a while, from output alone: recover while `f(s) > 1/3`, f the fraction
+of output lost (linear, own rep: 33.3; squared, shared exp: 18.4), since the last 20 points cost
+~3.7 h of nothing against ~1.1 h lost working them off. That trade ignored the aug lock, and the
+aug lock wins.
 
 **Sync gates karma, and the switch point is computed.** Karma per sleeve crime is
 `crime.karma x sync/100`. Sync starts at 1 (`memory`) and climbs ~0.001/s, **stopping itself to
