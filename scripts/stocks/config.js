@@ -95,6 +95,9 @@ export const MIN_TRADE = 20e6;
  * by 0.1 with probability moneyGrown / moneyMax (PlayerInfluencing.ts), and the
  * forecast drifts toward it every tick - fastest near neutral, where Stock.ts
  * steps otlkMag by 10x or a flat 1. Ranking only: the buy edge still applies.
- * 1 turns it off.
+ * 1 turns it off, and is the default: outside BN8 the manager picks targets by
+ * income, not by what is held, so most "pushable" stocks never get pushed and
+ * the bonus would trade edge for nothing. In BN8 the manager follows the
+ * positions - `run scripts/set.js stocks.pushBonus 2` there.
  */
-export const PUSH_BONUS = 2;
+export const PUSH_BONUS = 1;

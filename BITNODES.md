@@ -52,6 +52,6 @@ Fill these in during a run - what broke, what had to be tuned, how long it took.
   - **Cloud off at the start**: `run scripts/set.js cloud.enabled off`. Hacking pays $0, so a
     server only buys EXP and push strength, and every dollar comes out of the trading stake. Turn
     it back on near $1t net worth.
-  - The trader ranks stocks the batcher can push ahead (`stocks.pushBonus`, default 2), and the
+  - The trader ranks stocks the batcher can push ahead once `run scripts/set.js stocks.pushBonus 2` is set (default 1 = off), and the
     manager aims at the biggest held positions' servers (up to 3). `cat /data/stocks-pushable.txt`
     lists the reachable companies.
