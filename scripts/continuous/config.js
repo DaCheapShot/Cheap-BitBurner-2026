@@ -50,7 +50,7 @@ export {
   // hacknet reads the target list, and both pools skip hacknet servers.
   TARGETS_MARKER, HACKNET_HOST_PREFIX,
   // The stock trader's wanted direction per company - see lib/stream.js exec.
-  STOCK_PUSH_FILE,
+  STOCK_PUSH_FILE, STOCK_PUSHABLE_FILE,
 } from "scripts/config.js";
 
 // -------------------------------------------------------------- batching ----

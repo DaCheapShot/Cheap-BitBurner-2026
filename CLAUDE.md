@@ -98,6 +98,7 @@ cat /data/stocks.txt                    # the dashboard: start vs now, profit, P
 cat /data/stocks.log.txt                # every trade with P/L, the 4S buy, warnings (last 500)
 run scripts/stocks/sellall.js           # close every position (sing runs it before an install)
 run scripts/set.js stocks.cash 1        # BN8: the whole net worth may sit in stocks (default 0.5)
+run scripts/set.js stocks.pushBonus 3   # rank stocks the batcher can push 3x ahead (1 = off)
 run scripts/last.js /data/sleeves.log.txt  # its last 10 lines in a tail window (any file; 2nd arg = count)
 run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
 run scripts/set.js sleeve.covenantCash 0.5  # BN10: fraction of cash a Covenant sleeve/memory buy may cost
@@ -1390,6 +1391,13 @@ name. Hack influences on `moneyDrained`, before `ScriptHackMoneyGain`, so it wor
   **no new ns call in a worker, ever** (the user's rule; they are paid per thread). A test counts
   the ns calls in `hack.js` / `grow.js`.
 - Prep waves are not flagged (ponytail: prep grows push hard - add when measured).
+- **The trader prefers what the batcher can reach.** The push only moves a stock whose company
+  server is a target, so the manager writes `STOCK_PUSHABLE_FILE` every rescan (the orgs of every
+  ranked host, through the same `getServer` cache) and `planTrades` multiplies those stocks' rank
+  by `stocks.pushBonus` (default 2, 1 = off). Ranking only - the buy edge still applies, so it never
+  holds a pushable stock that reads the wrong way. A flagged grow lifts `otlkMagForecast` by 0.1
+  with probability moneyGrown / moneyMax, and the forecast drifts toward it fastest near neutral
+  (`Stock.ts` steps `otlkMag` 10x or a flat 1 below 5). The 75-tick flip mirrors it.
 
 **BitNode 8 changes two things in the batcher** (`math.blindHacks()`, from `currentNode` read in
 the constants rpc at startup):

@@ -48,6 +48,8 @@ export function createPushReader(ns) {
     valueFor(host) {
       return entry(host) ? Number(entry(host).value) || 0 : 0;
     },
+    /** The host's company, "" for none - one getServer per host, ever. */
+    orgFor: orgOf,
     get any() { return Object.keys(want).length > 0; },
   };
 }

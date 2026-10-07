@@ -4575,11 +4575,17 @@ export const tests = {
       },
     });
     ns.exec = () => 1;
-    const push = { any: true, valueFor: (h) => (h === "b" ? 5e9 : 0), dirFor: (h) => (h === "b" ? 1 : 0) };
+    const push = {
+      any: true, valueFor: (h) => (h === "b" ? 5e9 : 0), dirFor: (h) => (h === "b" ? 1 : 0),
+      orgFor: (h) => (h === "b" ? "B Corp" : ""),
+    };
     const opts = { pool, ram, steal: 0.1, maxTargets: 1, forced: null, preps: new Map(), log: () => {}, verbose: false, streams: [], push };
     const bn8 = mods["core"].rescan(ns, { ...math, blindHacks: () => true }, opts);
     assert(bn8.map((x) => x.host).join() === "b", `BN8 took ${bn8.map((x) => x.host)}`);
     const elsewhere = mods["core"].rescan(ns, math, { ...opts, preps: new Map() });
     assert(elsewhere.map((x) => x.host).join() === "a", `elsewhere took ${elsewhere.map((x) => x.host)}`);
+    // The trader is told which companies are reachable; a host with no org is not one.
+    const { STOCK_PUSHABLE_FILE } = mods["config"];
+    assert(ns.read(STOCK_PUSHABLE_FILE) === '["B Corp"]', `pushable: ${ns.read(STOCK_PUSHABLE_FILE)}`);
   },
 };

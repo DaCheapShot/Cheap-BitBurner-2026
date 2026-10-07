@@ -13,7 +13,7 @@
  */
 
 /** Which way the batcher should push each held stock - a contract, so it lives in scripts/config.js. */
-export { STOCK_PUSH_FILE } from "scripts/config.js";
+export { STOCK_PUSH_FILE, STOCK_PUSHABLE_FILE } from "scripts/config.js";
 
 /** The resident trader, started by boot like sing - it parks without TIX. */
 export const STOCKS_SERVICE = "/scripts/stocks/stocks.js";
@@ -88,3 +88,13 @@ export const PRE_FLIP_EDGE = 0.35;
  * position spends 1% of itself on fees.
  */
 export const MIN_TRADE = 20e6;
+
+/**
+ * Default rank multiplier on a stock whose company server the batcher can push
+ * (STOCK_PUSHABLE_FILE). A flagged grow lifts the stock's second-order forecast
+ * by 0.1 with probability moneyGrown / moneyMax (PlayerInfluencing.ts), and the
+ * forecast drifts toward it every tick - fastest near neutral, where Stock.ts
+ * steps otlkMag by 10x or a flat 1. Ranking only: the buy edge still applies.
+ * 1 turns it off.
+ */
+export const PUSH_BONUS = 2;
