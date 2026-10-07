@@ -7,6 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Netscript 2 (ES modules) scripts for **Bitburner**, running against a personal fork:
 `DaCheapShot/bitburner-src`. Everything in `scripts/` executes inside the game, not on Node.
 
+**Which BitNode to do next lives in `BITNODES.md`** - owned Source-Files and the queue. Read it
+before answering a "what next" question, and update it when the user reports a node destroyed.
+
 There is no build, no linter, and no `package.json`. Do not add one expecting it to run the
 scripts. A test suite exists — run it with `node tests/run.mjs`.
 
