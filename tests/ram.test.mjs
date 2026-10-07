@@ -386,7 +386,7 @@ export const tests = {
     assert(Math.abs(ram - 2.60) < 0.011, `expected 2.60 GB (1.60 + run 1.00), got ${ram.toFixed(2)}`);
   },
 
-  // config.js is imported by boot.js (pinned at 3.50) and by the UPGRADE and
+  // config.js is imported by boot.js (pinned at 3.55) and by the UPGRADE and
   // PROGS bodies; plan.js is imported by sing.js. One billed name in either is
   // charged to all of them.
   "the singularity subsystem's shared modules are free to import": () => {
@@ -409,6 +409,9 @@ export const tests = {
   "every sing body is priced, and none but GRAFT exceeds CRIME's 6.60": () => {
     const want = {
       UPGRADE: 6.25, TOR: 3.65,
+      // The stock APIs, bought here so stocks.js can simply exit without TIX.
+      // FS_MULT is getBitNodeMultipliers alone: inside FOUR_S it would be 8.30.
+      TIX: 4.25, FOUR_S: 4.30, FS_MULT: 5.60,
       // upgradeHomeCores 3.00 + its cost 1.50 + getServerMoneyAvailable 0.10;
       // the count is derived from the price, not a 2.00 getServer.
       CORES: 6.20, PROGS: 4.70, INVITES: 4.60, JOIN: 4.60,
@@ -484,7 +487,7 @@ export const tests = {
     assert(Math.abs(ram - 3.25) < 0.011, `expected 3.25 GB, got ${ram.toFixed(2)}`);
   },
 
-  // config.js is imported by boot.js (pinned at 3.50) and by settings.js, which
+  // config.js is imported by boot.js (pinned at 3.55) and by settings.js, which
   // every rpc body that reads a knob imports; plan.js by sleeve.js.
   "the sleeve subsystem's shared modules are free to import": () => {
     for (const mod of ["sleeve/config", "sleeve/plan"]) {
@@ -543,7 +546,7 @@ export const tests = {
   // every name in the cost table, which is why it is the real check.
   //
   // config.js is imported by the FIND body as well as by boot.js, so one billed
-  // identifier in it would be charged to boot - which is pinned at 3.50.
+  // identifier in it would be charged to boot - which is pinned at 3.55.
   "the contract subsystem's shared modules are free to import": () => {
     for (const mod of ["contracts/config", "contracts/solvers"]) {
       const ram = ramOf(mod);
@@ -560,16 +563,18 @@ export const tests = {
   //
   // 3.60 -> 3.50: fileExists went with the per-tick Formulas.exe check, which
   // existed only to pick between two continuous files that are now one.
+  // 3.50 -> 3.55: hasTixApiAccess gates the stock trader, which exits without
+  // TIX - ungated, ensureService would relaunch it every tick.
   "boot.js still costs 3.50 GB with the gang service wired in": () => {
     // Unmoved by the hacknet subsystem: hacknet/config.js is constants only, so
     // importing it for two path strings and a number adds exactly nothing - the
     // same reason gang/config.js and contracts/config.js are free to boot.
     const ram = ramOf("boot");
-    assert(Math.abs(ram - 3.50) < 0.011, `expected 3.50 GB, got ${ram.toFixed(2)}`);
+    assert(Math.abs(ram - 3.55) < 0.011, `expected 3.55 GB, got ${ram.toFixed(2)}`);
   },
 
   // boot's one body: the SF10 check, asked once per boot. getResetInfo (1.00)
-  // there rather than in boot, which is pinned at 3.50 - and importing rpc.js
+  // there rather than in boot, which is pinned at 3.55 - and importing rpc.js
   // costs boot nothing, since it already pays ns.run for runToCompletion.
   "boot's SF10 check is its only body, at 2.60": () => {
     const got = bodiesOf("boot");
@@ -735,7 +740,7 @@ export const tests = {
   },
 
   // config.js is imported by boot.js as well as by both sweeps, so one billed
-  // identifier in it would be charged to boot - which is pinned at 3.50. math.js
+  // identifier in it would be charged to boot - which is pinned at 3.55. math.js
   // is imported by both entries, so a slip there is charged twice.
   //
   // The hazard here is unusually high: ns.hacknet has 21 names at 0.50 GB each
@@ -806,10 +811,10 @@ export const tests = {
   },
 
   // READ runs every 6 s tick and TRADE only on a tick that trades; INIT and
-  // TERMS once per process, BUY_API once per node. READ carries getPrice alone -
-  // the spread is fixed per stock, so INIT reads ask and bid once.
+  // TERMS once per process; the TIX and 4S purchases are sing's. READ carries
+  // getPrice alone - the spread is fixed per stock, so INIT reads ask and bid once.
   "every stock body is priced": () => {
-    const want = { INIT: 13.60, TERMS: 6.60, READ: 10.75, TRADE: 11.60, BUY_API: 4.10, BUY_TIX: 4.20 };
+    const want = { INIT: 13.60, TERMS: 6.60, READ: 10.75, TRADE: 11.60 };
     const got = bodiesOf("stocks/stocks");
     assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),
       `stocks.js bodies ${Object.keys(got)} - every body must be pinned here`);

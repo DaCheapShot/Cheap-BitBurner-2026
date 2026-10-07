@@ -28,7 +28,7 @@ const TRANSIENT = [
 async function runBoot({
   args = [], files = {}, running = [], workers = [], ticks = 3, hasFormulas = false,
   inGang = false, karma = 0, onTprint = () => {}, onTick = (_tick, procs) => procs, onSleep = () => {},
-  sleeves = true,
+  sleeves = true, tix = true,
 }) {
   const ports = {};
   const runs = [];
@@ -61,6 +61,8 @@ async function runBoot({
     // every tick forever.
     gang: { inGang: () => inGang },
     heart: { break: () => karma },
+    // stocks.js exits without TIX, so boot starts it only once this is true.
+    stock: { hasTixApiAccess: () => tix },
     print: (msg) => logs.push(String(msg)), tprint: (msg) => onTprint(String(msg)),
     // A tick ENDS at the settings read straight after a sleep, not on the sleep
     // itself: boot's sleep is sliced into hud.tick pieces, and between two
@@ -414,6 +416,15 @@ export const tests = {
     const starts = r.launched.filter((f) => f === "scripts/sing/sing.js").length;
     assert(starts === 1, `sing should be started once and then adopted, got ${starts} starts`);
     assert(r.procs.some((p) => p.filename === "scripts/sing/sing.js"), "it should still be up");
+  },
+
+  // stocks.js exits without TIX (sing buys it), so boot gates on it like the
+  // gang on inGang() - ungated, it would relaunch the trader every tick.
+  "boot starts the stock trader only once TIX is owned": async () => {
+    const starts = (r) => r.launched.filter((f) => f === "scripts/stocks/stocks.js").length;
+    assert(starts(await runBoot({ tix: false, ticks: 4 })) === 0, "no TIX: never started");
+    const r = await runBoot({ ticks: 4 });
+    assert(starts(r) === 1, `TIX: started once and adopted, got ${starts(r)}`);
   },
 
   "--no-sing leaves singularity alone": async () => {

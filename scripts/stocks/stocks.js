@@ -20,13 +20,12 @@ import { SETTINGS_FILE, setting } from "scripts/settings.js";
  * EVERY PRICED CALL IS AN RPC BODY - the gang/sing shape. The stock API is
  * 2.00-2.50 GB a name; reading and trading in one process is ~22 GB. Here:
  * READ every tick (10.75), TRADE only on a tick that trades (11.60), INIT /
- * TERMS once per process, BUY_API once per node. The resident is 2.65.
+ * TERMS once per process. The resident is 2.65.
  *
- * PARKS WITHOUT TIX rather than exiting - nextUpdate throws without it, and
- * an exit would have boot's ensureService relaunch it every tick. While
- * parked, BUY_TIX buys the TIX API once a minute's check finds cash at
- * TIX_CASH_MULT x its price (stocks.buyTix). No WSE account: nothing here
- * needs one. SF8.1 makes TIX permanent.
+ * EXITS WITHOUT TIX - nextUpdate throws without it. sing buys the TIX API
+ * (and the 4S API after it) like every other purchase, and boot launches this
+ * only once hasTixApiAccess is true, so the exit is no relaunch loop. No WSE
+ * account: nothing here needs one. SF8.1 makes TIX permanent.
  *
  * INSTALLS SELL FIRST. Prestige resets the market and every position in it.
  * sing's SWEEP runs sellall.js when HELD_FILE says something is held, and
@@ -111,25 +110,6 @@ return JSON.parse(args[0]).map((o) => {
 });
 `;
 
-/** 4S Market Data TIX API. The $1b 4S Market Data alone is UI-only: getForecast checks the API flag. */
-const BUY_API = `return ns.stock.purchase4SMarketDataTixApi();`;
-
-/**
- * The TIX API, while parked without it - outside BN8 before SF8.1. It is all
- * the trader needs: purchaseTixApi checks money only (no WSE account), and so
- * does the 4S API after it (NetscriptFunctions/StockMarket.ts). Bought once
- * cash is TIX_CASH_MULT x the price; the setting is read here so it is live.
- * Returns the price when it bought, 0 when it did not.
- */
-const BUY_TIX = `
-import { SETTINGS_FILE, setting } from "/scripts/settings.js";
-import { TIX_CASH_MULT } from "/scripts/stocks/config.js";
-if (!setting(ns.read(SETTINGS_FILE), "stocks.buyTix")) return 0;
-const cost = ns.stock.getConstants().TixApiCost;
-if (ns.getServerMoneyAvailable("home") < TIX_CASH_MULT * cost) return 0;
-return ns.stock.purchaseTixApi() ? cost : 0;
-`;
-
 // -------------------------------------------------------------------- main ---
 
 /** Dashboard column widths: SYM SIDE SHARES ENTRY NOW P/L FCST. */
@@ -167,19 +147,14 @@ export async function main(ns) {
   };
 
   if (!ns.stock.hasTixApiAccess()) {
-    ns.print("no TIX API access - parked; buying it once cash allows (stocks.buyTix), re-checking every minute");
+    ns.print("no TIX API access - exiting; sing buys it (stocks.buyTix) and boot starts this after");
     ns.write(HELD_FILE, "0", "w");
     ns.write(STOCK_PUSH_FILE, "{}", "w");
-    while (!ns.stock.hasTixApiAccess()) {
-      const paid = await call("tix", BUY_TIX);
-      if (paid) event(`bought the TIX API for ${$(paid)}`);
-      else await ns.sleep(60e3);
-    }
+    return;
   }
 
   let init = null;
   let terms = null;
-  let fsRefused = false;
   const recs = new Map();
   // The dashboard's baseline: positions held at the first tick this
   // process saw, and what closed positions have made since.
@@ -209,25 +184,10 @@ export async function main(ns) {
     start ??= { at: Date.now(), held: stocks.filter((s) => s.long > 0 || s.short > 0).length, invested };
     const cfg = ns.read(SETTINGS_FILE);
 
-    // 4S: bought once net worth is FS_WORTH_MULT x its price. Until cash alone
-    // covers it, nothing new opens - positions close on their own signals.
-    //
-    // A refusal is final for the process: BitNode options can disable 4S, or
-    // the price can be wrong without SF5 - and retrying it every tick would
-    // also skip every tick's trading, since a buy re-prices the cash.
-    let reserve = 0;
-    if (!r.fs && !fsRefused && setting(cfg, "stocks.buy4S") && worth >= FS_WORTH_MULT * terms.fsApi) {
-      if (r.cash >= terms.fsApi) {
-        if (await call("4S", BUY_API)) {
-          event(`bought 4S Market Data TIX API for ${$(terms.fsApi)} - forecasts are exact from the next tick`);
-          continue;
-        }
-        fsRefused = true;
-        event(`WARN: the 4S TIX API purchase was refused at ${$(r.cash)} cash - trading on estimates until restart`);
-      } else {
-        reserve = terms.fsApi;
-      }
-    }
+    // 4S: sing buys it once net worth is FS_WORTH_MULT x its price and cash
+    // covers it. Until then this holds its price back from opens, so cash
+    // pools - positions close on their own signals.
+    const reserve = !r.fs && setting(cfg, "stocks.buy4S") && worth >= FS_WORTH_MULT * terms.fsApi ? terms.fsApi : 0;
 
     const hold = Number(ns.read(HOLD_FILE)) > Date.now() - HOLD_MS;
     const { sells, buys } = planTrades({

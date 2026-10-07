@@ -90,7 +90,7 @@ run scripts/hacknet/hashes.js --dry-run      # plan a hash spend and print it, s
 run scripts/sleeve/sleeve.js            # one sleeve assignment pass (boot runs it every tick)
 cat /data/sleeves.txt                   # what each sleeve is doing now, and why
 cat /data/sleeves.log.txt               # what happened: task changes, purchases, warnings (last 500)
-run scripts/stocks/stocks.js            # the stock trader (boot starts it too; parks without TIX)
+run scripts/stocks/stocks.js            # the stock trader (boot starts it once TIX is owned; sing buys TIX)
 cat /data/stocks.txt                    # the dashboard: start vs now, profit, P/L per position (its tail too)
 cat /data/stocks.log.txt                # every trade with P/L, the 4S buy, warnings (last 500)
 run scripts/stocks/sellall.js           # close every position (sing runs it before an install)
@@ -327,7 +327,7 @@ editor's RAM panel when one moves.
 | `rpc.js` | run a body in a throwaway script, get its value back | 1.00 |
 | `settings.js` | live overrides registry (`KNOBS`) + parser for `/data/settings.txt` | 0 |
 | `set.js` | terminal CLI that writes `/data/settings.txt` | 1.60 |
-| `boot.js` | supervisor, kills retired managers | 3.50 |
+| `boot.js` | supervisor, kills retired managers | 3.55 |
 | `root.js` | port openers + NUKE | 2.15 |
 | `cloud.js` | one pass per boot tick: buys/upgrades servers, 10% of cash per action | 5.75 |
 | `deploy.js` | scp workers home → every rooted host | 2.50 |
@@ -349,7 +349,7 @@ editor's RAM panel when one moves.
 | `sing/config.js` | singularity tunables, `SING_SERVICE`, `WORK_ORDER`, `CITY_GROUPS` | 0 |
 | `sing/plan.js` | `chooseAction` + `sameAsCurrent` — every decision, pure | 0 |
 | `sing/sing.js` | entry: resident supervisor; every singularity call is an rpc body | 2.60 |
-| ↳ thirty-two bodies | transients: read, upgrade, cores, tor, progs, invites, join, travel, apply, gym, crime, study, faction, company, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors, graft price, graftable; graft (9.10, the one over the ceiling) | 2.35–9.10 |
+| ↳ thirty-five bodies | transients: read, upgrade, cores, tor, tix, 4S, 4S mult, progs, invites, join, travel, apply, gym, crime, study, faction, company, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, donate, bitnode mults, sweep, install, crime stats, crime chance, backdoors, graft price, graftable; graft (9.10, the one over the ceiling) | 2.35–9.10 |
 | `sing/backdoor.js` | one fire-and-forget backdoor; many run at once | 5.60 each |
 | `sing/grafts.js` | hand-run: top grafts in sing's order; five rpc bodies, peak 11.60 | 2.60 |
 | `hacknet/config.js` | hacknet tunables, the two service paths, the hash price | 0 |
@@ -363,7 +363,7 @@ editor's RAM panel when one moves.
 | `stocks/config.js` | trader tunables, paths, `HELD_FILE`/`HOLD_FILE` | 0 |
 | `stocks/math.js` | forecast estimate, exits, `planTrades` - pure | 0 |
 | `stocks/stocks.js` | entry: resident trader, one decision per market tick | 2.65 |
-| ↳ six bodies | transients: init, terms, read (every tick), trade, buy 4S API, buy TIX (parked) | 4.10–13.60 |
+| ↳ four bodies | transients: init, terms, read (every tick), trade | 6.60–13.60 |
 | `stocks/sellall.js` | closes every position; sing's SWEEP runs it before an install | 10.65 |
 | `hud.js` | paints income/s, stocks, worth, karma, share, RAM into the overview; boot runs it every `hud.tick` | 3.25 |
 
@@ -927,14 +927,14 @@ split. Splitting *below* 6.60 lowers nothing and costs a round trip, which is wh
 and READ stay whole - READ sits exactly ON the ceiling since `getCompanyRep` joined it, so the
 next read it needs is a second body, not a bigger one. `tests/ram.test.mjs` prices every body
 through `bodiesOf()` - the only place a body is priced before the game does it - and pins all
-thirty-two - all but GRAFT at or under 6.60.
+thirty-five - all but GRAFT at or under 6.60.
 
 The split also retired two calls outright: `gymWorkout`, `commitCrime` and `workForFaction` all
 take `focus` as an argument, so `setFocus` is never needed, and starting work finishes the
 previous work, so `stopAction` is not either.
 
 **Always on, and it PARKS rather than exits.** Singularity has no 0 GB availability check -
-`getResetInfo` is 1.00 and boot is pinned at 3.50 - so boot cannot gate it the way it gates the
+`getResetInfo` is 1.00 and boot is pinned at 3.55 - so boot cannot gate it the way it gates the
 gang on `inGang()`. Without Source-File 4 outside BN4, every call throws `checkSingularityAccess`'s
 "requires Source-File 4"; `sing.js` matches that **message** and sleeps forever. Exiting would
 have `ensureService` relaunch it every tick, and matching the message rather than "the first call
@@ -1212,7 +1212,7 @@ first pass it appears) are also appended, timestamped, to `/data/sleeves.log.txt
 first tick the sleeve step is live and the answer is kept for boot's life: Source-Files change
 only when a BitNode ends, which restarts boot. A failed ask (no RAM yet) stays null and is asked
 again next tick. Without SF10 the pass never runs. Importing `rpc.js` costs boot nothing - it
-already pays `ns.run` - so boot stays at 3.50.
+already pays `ns.run` - so boot stays at 3.55.
 
 **The name tax is at its worst here.** `travel`, `getTask` and `getSleeve` are 4.00 GB each as
 identifiers anywhere in the closure; `tests/ram.test.mjs` bans them and pins `sleeve/plan.js` and
@@ -1333,20 +1333,22 @@ under `MIN_TRADE` ($20m - two commissions are then 1%). The budget is the lesser
 the 4S reserve and `stocks.cash` × net worth minus what is held. Never long and short in one
 stock. No rotation: a strong signal waits for a weak position to close on its own.
 
-**4S is bought at `FS_WORTH_MULT` (2) × its price.** Until cash alone covers it nothing opens;
-positions close on their own signals and the cash pools. A refused purchase (4S disabled by
-BitNode options, or no SF5 to price it) is final for the process - retrying it every tick would
-skip every tick's trading.
+**4S is bought by sing at `FS_WORTH_MULT` (2) × its price** in net worth (cash + `HELD_FILE`), once
+cash covers it. Until then the trader holds the price back from opens; positions close on their
+own signals and the cash pools. sing's FOUR_S body (4.30) runs on the PROGS cadence and a refusal
+just waits for the next one; the price multiplier is its own FS_MULT body (5.60,
+`getBitNodeMultipliers`, base price without SF5) because together they would be 8.30.
 
 **Every priced call is an rpc body, the gang/sing shape.** The API is 2.00-2.50 GB a name. The
-resident holds `hasTixApiAccess` (0.05) to park and nothing else: 2.65. READ runs every tick at
+resident holds `hasTixApiAccess` (0.05) to exit and nothing else: 2.65. READ runs every tick at
 10.75 - it carries `getPrice` alone, because the spread is fixed per stock (`spreadPerc` is
 readonly) and INIT reads ask/price and bid/price once. TRADE (11.60) only on a tick that trades.
 
-**Without TIX it PARKS, sing's reason**: an exit would have `ensureService` relaunch it every
-tick. While parked it buys the TIX API itself (`BUY_TIX`, 4.20, checked once a minute) once cash is
-`TIX_CASH_MULT` (4) x its $5b price - `stocks.buyTix` turns that off. No WSE account: `purchaseTixApi`
-and the 4S API purchase both check money only.
+**Without TIX it EXITS, and sing buys it** like every other purchase: the TIX body (4.25) on the
+PROGS cadence, once cash is `TIX_CASH_MULT` (4) x its $5b price - `stocks.buyTix` turns that off.
+boot gates the launch on `hasTixApiAccess` (0.05, boot 3.50 -> 3.55), the gang's `inGang()` shape,
+so the exit is no relaunch loop. Without SF4 sing parks, and nothing buys TIX. No WSE account:
+`purchaseTixApi` and the 4S API purchase both check money only.
 
 **sing's aug batch counts stocks as cash, and sells them all before buying** - the user's rule: a
 batch leads to an install, which resets the market, so no position is worth keeping. `HELD_FILE`

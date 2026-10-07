@@ -141,6 +141,51 @@ return { had, owned: had || ns.singularity.purchaseTor() };
 `;
 
 /**
+ * The TIX API - all the stock trader needs: purchaseTixApi checks money only
+ * (no WSE account). Bought once cash is TIX_CASH_MULT x the price; the setting
+ * is read here so it is live. -1 already owned, the price when it bought, 0
+ * when it did not. boot starts stocks.js the tick after.
+ */
+const TIX = `
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
+import { TIX_CASH_MULT } from "/scripts/stocks/config.js";
+if (ns.stock.hasTixApiAccess()) return -1;
+if (!setting(ns.read(SETTINGS_FILE), "stocks.buyTix")) return 0;
+const cost = ns.stock.getConstants().TixApiCost;
+if (ns.getServerMoneyAvailable("home") < TIX_CASH_MULT * cost) return 0;
+return ns.stock.purchaseTixApi() ? cost : 0;
+`;
+
+/**
+ * 4S Market Data TIX API (the $1b 4S Market Data alone is UI-only:
+ * getForecast checks the API flag). Bought once net worth - cash plus what the
+ * trader holds, HELD_FILE - is FS_WORTH_MULT x its price and cash covers it;
+ * stocks.js holds the price back from opens meanwhile so the cash pools.
+ * args[0] is the node's FourSigmaMarketDataApiCost (FS_MULT). -2 no TIX yet,
+ * -1 already owned, the price when it bought, 0 when it did not.
+ */
+const FOUR_S = `
+import { SETTINGS_FILE, setting } from "/scripts/settings.js";
+import { FS_WORTH_MULT, HELD_FILE } from "/scripts/stocks/config.js";
+if (!ns.stock.hasTixApiAccess()) return -2;
+if (ns.stock.has4SDataTixApi()) return -1;
+if (!setting(ns.read(SETTINGS_FILE), "stocks.buy4S")) return 0;
+const cost = ns.stock.getConstants().MarketDataTixApi4SCost * args[0];
+const cash = ns.getServerMoneyAvailable("home");
+if (cash < cost || cash + (Number(ns.read(HELD_FILE)) || 0) < FS_WORTH_MULT * cost) return 0;
+return ns.stock.purchase4SMarketDataTixApi() ? cost : 0;
+`;
+
+/**
+ * The 4S API's price multiplier, once per process. Its own body: 4.00 GB on
+ * top of FOUR_S would be over the 6.60 ceiling. Without SF5 the base price is
+ * assumed (stocks.js TERMS does the same) and the purchase refuses if wrong.
+ */
+const FS_MULT = `
+try { return ns.getBitNodeMultipliers().FourSigmaMarketDataApiCost; } catch { return 1; }
+`;
+
+/**
  * Cheapest WANTED program first, each at most the live `sing.progs` fraction of what is
  * left. getDarkwebProgramCost returns 0 for a program already owned, so it
  * doubles as the ownership check and fileExists is not needed.
@@ -648,6 +693,10 @@ export async function main(ns) {
 
   let tick = 0;
   let tor = false;
+  // The stock APIs: each asked until owned, then never again this process.
+  let tix = false;
+  let fourS = false;
+  let fsMult = null;
 
   // Fixed for the BitNode, so read once and kept: what each faction sells, and
   // each aug's prerequisites. targets is re-derived every AUGS pass.
@@ -1055,6 +1104,21 @@ export async function main(ns) {
       if (tor) {
         const p = await call("progs", PROGS);
         if (p) log(`progs: ${progsLine(ns, p)}`);
+      }
+      if (!tix) {
+        const t = await call("tix", TIX);
+        if (t !== null) {
+          tix = t !== 0;
+          log(`tix: ${t < 0 ? "already owned" : t ? `bought for $${ns.format.number(t, 2)}` : "waiting on cash (or stocks.buyTix off)"}`);
+        }
+      }
+      if (tix && !fourS) {
+        fsMult ??= await call("4S mult", FS_MULT);
+        const f = fsMult === null ? null : await call("4S", FOUR_S, fsMult);
+        if (f !== null && f !== -2) {
+          fourS = f !== 0;
+          log(`4S: ${f < 0 ? "already owned" : f ? `bought for $${ns.format.number(f, 2)}` : "waiting on cash (or stocks.buy4S off)"}`);
+        }
       }
     }
 
