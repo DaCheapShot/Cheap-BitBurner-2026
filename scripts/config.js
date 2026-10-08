@@ -358,6 +358,16 @@ export const TARGETS_MARKER = "/data/targets.txt";
 export const STOCK_PUSH_FILE = "/data/stocks-push.txt";
 
 /**
+ * The companies the continuous manager CAN push: a JSON array of the
+ * `organizationName` of every server it ranks as a target (rooted, within
+ * hacking level, money above 0). Written every rescan by the manager, read
+ * every market tick by scripts/stocks/stocks.js, which ranks those stocks
+ * ahead by `stocks.pushBonus` - a position the batcher can push earns more than
+ * the same edge on one it cannot reach. Missing or broken reads as none.
+ */
+export const STOCK_PUSHABLE_FILE = "/data/stocks-pushable.txt";
+
+/**
  * Hostname prefix of a BitNode 9 hacknet server, which both RAM pools skip.
  *
  * calculateHashGainRate (src/Hacknet/formulas/HacknetServers.ts) carries

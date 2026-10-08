@@ -42,6 +42,7 @@ import {
   STREAM_TICK_MS,
   TARGET_RAM_BUDGET,
   TARGETS_MARKER,
+  STOCK_PUSHABLE_FILE,
   WORKER_FILES,
   WORKER_RAM_FALLBACK,
 } from "scripts/continuous/config";
@@ -762,6 +763,12 @@ export function rescan(ns, math, opts) {
   if (shared && shared.launched > 0) pool.refresh();
 
   const paperRanked = rankTargets(ns, math, { steal });
+  // Tell the trader which companies this batcher can reach, so it prefers
+  // positions the push below can actually move (stocks.pushBonus).
+  if (push) {
+    const orgs = new Set(paperRanked.map((t) => push.orgFor(t.host)).filter(Boolean));
+    ns.write(STOCK_PUSHABLE_FILE, JSON.stringify([...orgs]), "w");
+  }
   // Stable: unpushed targets (value 0) keep their paper order behind the pushed.
   const ranked = byStocks
     ? [...paperRanked].sort((a, b) => push.valueFor(b.host) - push.valueFor(a.host))

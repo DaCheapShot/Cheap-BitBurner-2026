@@ -170,6 +170,28 @@ export const tests = {
     assert(!noShort.some((b) => b.kind === "short"), "no shorts without BN8 / SF8.2");
   },
 
+  // A stock the batcher can push earns more than the same edge on one it
+  // cannot reach, so it ranks ahead - but the bonus is ranking only.
+  "a pushable stock ranks ahead by pushBonus, and still needs the edge": async () => {
+    const { planTrades, pushableSyms } = (await loadScripts())["stocks/math"];
+    const stocks = [
+      stock({ sym: "BIG", fc: 0.7, vol: 0.02 }),
+      stock({ sym: "PUSH", fc: 0.65, vol: 0.02 }),
+      stock({ sym: "WEAK", fc: 0.52, vol: 0.05 }),
+    ];
+    // $1.5b buys one full position and part of a second: order decides who gets it.
+    const order = (o) => planTrades({ stocks, cash: 1.5e9, cap: 1e12, fs: true, ...o }).buys.map((b) => b.sym).join();
+    const pushable = pushableSyms('["Push Corp","Weak Corp"]', [
+      { sym: "BIG", org: "Big Corp" }, { sym: "PUSH", org: "Push Corp" }, { sym: "WEAK", org: "Weak Corp" },
+    ]);
+    assert(order({}) === "BIG,PUSH", `no bonus: ${order({})}`);
+    assert(order({ pushable, pushBonus: 1 }) === "BIG,PUSH", `bonus 1 is off: ${order({ pushable, pushBonus: 1 })}`);
+    assert(order({ pushable, pushBonus: 2 }) === "PUSH,BIG", `bonus 2: ${order({ pushable, pushBonus: 2 })}`);
+    assert(!order({ pushable, pushBonus: 100 }).includes("WEAK"), "under the buy edge stays unbought");
+    assert(pushableSyms("not json", [{ sym: "X", org: "X" }]).size === 0, "broken file is none");
+    assert(pushableSyms("", [{ sym: "X", org: "X" }]).size === 0, "missing file is none");
+  },
+
   "nothing under MIN_TRADE, nothing past the cap or the reserve, nothing while held": async () => {
     const mods = await loadScripts();
     const { planTrades } = mods["stocks/math"];

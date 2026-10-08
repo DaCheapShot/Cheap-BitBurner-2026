@@ -2,7 +2,7 @@ import { CLOUD_BUDGET_FRACTION, SHARE_FRACTION, SHARE_MAX_FRACTION } from "./con
 import { HACKNET_CASH_FRACTION, PAYBACK_SECONDS, HACKNET_EVERY, STUDY_LEVELS } from "./hacknet/config.js";
 import { EQUIP_BUDGET_FRACTION, TICK_EVERY, WAR_EVERY, ASCEND_EVERY, EQUIP_EVERY } from "./gang/config.js";
 import { SLEEVE_AUG_CASH, SLEEVE_AUG_MIN, SLEEVE_COVENANT_CASH } from "./sleeve/config.js";
-import { STOCKS_CASH } from "./stocks/config.js";
+import { STOCKS_CASH, PUSH_BONUS } from "./stocks/config.js";
 import {
   HOME_RAM_BUDGET_FRACTION, HOME_CORES_BUDGET_FRACTION, PROG_BUDGET_FRACTION, SING_TICK_MS,
   AUTO_INSTALL, MIN_AUG_BATCH, IDLE_STUDY, GRAFT, GRAFT_CASH, GRAFT_MIN_GAIN,
@@ -94,6 +94,7 @@ export const KNOBS = {
   // positions open - selling them is sellall.js's job, or the next install's.
   "stocks.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "stocks.js trader (off leaves positions open)" },
   "stocks.cash": { def: STOCKS_CASH, min: 0, max: 1, doc: "fraction of net worth the trader may hold in stocks (BN8: 1)" },
+  "stocks.pushBonus": { def: PUSH_BONUS, min: 1, max: 100, doc: "rank multiplier on stocks the batcher can push (1 = off)" },
   "stocks.buyTix": { def: 1, min: 0, max: 1, bool: true, doc: "sing buys the TIX API (no SF8.1, not BN8) once cash is 4x its price" },
   "stocks.buy4S": { def: 1, min: 0, max: 1, bool: true, doc: "sing buys the 4S TIX API once net worth is twice its price" },
 

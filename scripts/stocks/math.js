@@ -83,6 +83,20 @@ export function positionValue(s) {
 }
 
 /**
+ * The syms whose company the manager can push, off STOCK_PUSHABLE_FILE (an
+ * array of org names). Missing or broken is none - the inert failure.
+ */
+export function pushableSyms(text, init) {
+  let orgs;
+  try {
+    orgs = new Set(JSON.parse(String(text ?? "").trim() || "[]"));
+  } catch {
+    return new Set();
+  }
+  return new Set(init.filter((i) => orgs.has(i.org)).map((i) => i.sym));
+}
+
+/**
  * The tick's orders.
  *
  *   stocks:   [{ sym, ask, bid, long, longAvg, short, shortAvg, max, fc, vol, moves }]
@@ -92,6 +106,8 @@ export function positionValue(s) {
  *   fs:       4S forecasts are in hand
  *   canShort: BitNode 8 or SF8.2
  *   hold:     a sell-all is in force - close nothing, open nothing
+ *   pushable: syms whose company server the batcher can push
+ *   pushBonus: rank multiplier on those - ranking only, the edge still applies
  *
  * Sells first and their proceeds are spent the same tick. Opens go to the best
  * expected gain first, each one as big as max shares and the budget allow,
@@ -101,7 +117,9 @@ export function positionValue(s) {
  * ponytail: no rotation. A strong signal does not evict a weaker held one;
  * the weaker one closes on its own signal and frees the money.
  */
-export function planTrades({ stocks, cash, cap, reserve = 0, fs, canShort, hold = false }) {
+export function planTrades({
+  stocks, cash, cap, reserve = 0, fs, canShort, hold = false, pushable = new Set(), pushBonus = 1,
+}) {
   const sells = [];
   const buys = [];
   if (hold) return { sells, buys };
@@ -133,7 +151,7 @@ export function planTrades({ stocks, cash, cap, reserve = 0, fs, canShort, hold 
       // Before 4S, the short window has to agree too: a stock that just flipped
       // still reads strong on the long window for half of it.
       const agrees = recent === null || (kind === "long" ? recent > 0.5 : recent < 0.5);
-      return { s, kind, er, agrees };
+      return { s, kind, er: er * (pushable.has(s.sym) ? pushBonus : 1), agrees };
     })
     .filter((w) => w.kind && w.agrees)
     // Never both ways: a long is not opened beside a short, nor the reverse.

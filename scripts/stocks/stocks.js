@@ -1,7 +1,8 @@
 import {
   STATUS_FILE, HISTORY_FILE, HISTORY_KEEP, HELD_FILE, HOLD_FILE, HOLD_MS, FS_WORTH_MULT, STOCK_PUSH_FILE,
+  STOCK_PUSHABLE_FILE,
 } from "./config.js";
-import { track, planTrades, positionValue, signal, COMMISSION } from "./math.js";
+import { track, planTrades, positionValue, signal, pushableSyms, COMMISSION } from "./math.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting } from "scripts/settings.js";
 
@@ -192,6 +193,7 @@ export async function main(ns) {
     const hold = Number(ns.read(HOLD_FILE)) > Date.now() - HOLD_MS;
     const { sells, buys } = planTrades({
       stocks, cash: r.cash, cap: setting(cfg, "stocks.cash") * worth, reserve, fs: r.fs, canShort: terms.canShort, hold,
+      pushable: pushableSyms(ns.read(STOCK_PUSHABLE_FILE), init), pushBonus: setting(cfg, "stocks.pushBonus"),
     });
     const orders = [...sells.map((o) => ({ ...o, open: false })), ...buys.map((o) => ({ ...o, open: true }))];
     const bySym = new Map(stocks.map((s) => [s.sym, s]));

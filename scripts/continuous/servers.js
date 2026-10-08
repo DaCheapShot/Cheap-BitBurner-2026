@@ -2,6 +2,7 @@ import { ServerPool } from "scripts/continuous/lib/server";
 import { candidates, isPrepped } from "scripts/continuous/lib/target";
 import { chooseSteal } from "scripts/continuous/lib/plan";
 import { fmtMoney } from "scripts/continuous/lib/fmt";
+import { createPushReader } from "scripts/continuous/lib/push";
 import * as math from "scripts/continuous/lib/math";
 import {
   HOME_RESERVE_GB,
@@ -40,6 +41,12 @@ import {
  * growthAnalyze reads current security and so over-states grow threads (and
  * under-states steal). Unprepped rows are flagged for that reason.
  *
+ * STOCK is the trader's position on the server's company (STOCK_PUSH_FILE), the
+ * op the batcher flags for it, and "pushable" for a company it could reach. In
+ * BitNode 8 with anything held, rows go in the order rescan admits them: the
+ * biggest position first, income only after - hacking pays $0 there.
+ * stocks.pushBonus is the TRADER's knob (which stocks it buys) and moves no row.
+ *
  * RAM cost is the same looping or not - clearLog, sleep and args are all 0 GB.
  * 9.35 GB, most of it lib/math.js's live reads: hackAnalyze, hackAnalyzeChance
  * and growthAnalyze at 1.00 each, getServer 2.00, getPlayer 0.50, and ns.run
@@ -48,6 +55,12 @@ import {
 
 const pad = (s, n) => String(s).padEnd(n);
 const padL = (s, n) => String(s).padStart(n);
+
+/** "long $1.20b (grow)", "short ... (hack)", "pushable", or "" for no company. */
+export const stockCell = (r) =>
+  r.dir > 0 ? `long ${fmtMoney(r.value)} (grow)`
+    : r.dir < 0 ? `short ${fmtMoney(r.value)} (hack)`
+      : r.org ? "pushable" : "";
 
 const fmtRam = (gb) => (gb >= 1024 ? `${(gb / 1024).toFixed(2)}TB` : `${gb.toFixed(2)}GB`);
 
@@ -74,9 +87,10 @@ export const incomePerSec = (row) => row.fit.income * 1000 * row.chance;
  *
  * Sorted on income rather than on money-per-GB-second: that is what rescan now
  * admits on, and a report that ranks differently from the thing it describes is
- * a report that gets misread.
+ * a report that gets misread. For the same reason BN8 re-sorts on the held
+ * position, stable, exactly as rescan's `byStocks` does.
  */
-export function buildRows(math, snaps, ram, slice) {
+export function buildRows(math, snaps, ram, slice, push = null) {
   const rows = [];
   for (const snap of snaps) {
     const fit = chooseSteal(math, snap, ram, slice);
@@ -87,9 +101,13 @@ export function buildRows(math, snaps, ram, slice) {
       chance: math.hackChance(snap),
       weakenMs: math.opTimes(snap).weaken,
       fit,
+      dir: push ? push.dirFor(snap.host) : 0,
+      value: push ? push.valueFor(snap.host) : 0,
+      org: push ? push.orgFor(snap.host) : "",
     });
   }
   rows.sort((a, b) => incomePerSec(b) - incomePerSec(a));
+  if ((math.blindHacks?.() ?? false) && push?.any) rows.sort((a, b) => b.value - a.value);
   return rows;
 }
 
@@ -102,10 +120,11 @@ export function buildRows(math, snaps, ram, slice) {
  * against the network as it stood when the script started. It allocates nothing
  * and touches no port either way, so it stays safe beside a running manager.
  */
-function render(ns, ram) {
+function render(ns, ram, push) {
   const pool = ServerPool.build(ns, { homeReserve: HOME_RESERVE_GB });
   const slice = (pool.placeableRam(ram.grow) * TARGET_RAM_BUDGET) / MAX_TARGETS;
-  const rows = buildRows(math, candidates(ns).map((h) => math.snapshot(ns, h)), ram, slice);
+  push.reload();
+  const rows = buildRows(math, candidates(ns).map((h) => math.snapshot(ns, h)), ram, slice, push);
 
   ns.print("");
   // Stamped so a window left open is visibly stale when the script has died -
@@ -123,7 +142,7 @@ function render(ns, ram) {
   ns.print(
     pad("HOST", 20) + padL("PREP", 5) + padL("MAX $", 10) + padL("AT%", 8) +
       padL("SEC", 8) + padL("MIN", 7) + padL("CHANCE", 8) + padL("STEAL", 8) +
-      padL("H", 7) + padL("BATCH", 10) + padL("CAD", 8) + padL("$/SEC", 11),
+      padL("H", 7) + padL("BATCH", 10) + padL("CAD", 8) + padL("$/SEC", 11) + "  STOCK",
   );
 
   for (const r of rows) {
@@ -146,6 +165,7 @@ function render(ns, ram) {
         // not fit the slice at all (earns NOTHING - it places weakens and never
         // places its grow), the target had to widen its pace to fit, and the
         // fraction is at its protectable ceiling rather than RAM-bound.
+        "  " + stockCell(r) +
         (f.fitsPeak ? "" : "  NO ROOM") +
         (f.fits || !f.fitsPeak ? "" : "  paced") +
         (f.capped ? "  capped" : ""),
@@ -159,6 +179,9 @@ function render(ns, ram) {
       `${dirty} target(s) NOT prepped: growthAnalyze sizes grow at CURRENT security, ` +
         `so their STEAL is under-stated and their BATCH over-stated.`,
     );
+  }
+  if (math.blindHacks() && push.any) {
+    ns.print("BitNode 8: ordered by held position, as rescan admits - hacking pays $0 here.");
   }
   ns.print(
     `STEAL is what chooseSteal picks for a target admitted now at the slice above. ` +
@@ -186,12 +209,14 @@ export async function main(ns) {
   }
 
   const ram = workerRam(ns);
+  // One reader for the life of the script: it caches each host's company.
+  const push = createPushReader(ns);
 
   // do/while, so no flag runs exactly one pass and exits - the behaviour every
   // existing invocation of this script expects.
   do {
     if (loopMs) ns.clearLog();
-    render(ns, ram);
+    render(ns, ram, push);
     if (loopMs) await ns.sleep(loopMs);
   } while (loopMs);
 }
