@@ -4479,6 +4479,18 @@ export const tests = {
       mods["servers"].incomePerSec(rows[0]) >= mods["servers"].incomePerSec(rows[1]),
       "rows must be sorted by income",
     );
+
+    // BN8: rescan admits the held position first, so the report must too.
+    const push = {
+      any: true, dirFor: (h) => (h === "poor" ? 1 : 0), valueFor: (h) => (h === "poor" ? 5e9 : 0),
+      orgFor: (h) => (h === "poor" ? "Poor Corp" : "Rich Corp"),
+    };
+    const bn8 = mods["servers"].buildRows({ ...math, blindHacks: () => true }, snaps, ram, 1e6, push);
+    assert(bn8[0].snap.host === "poor", `BN8 must lead with the held position, got ${bn8[0].snap.host}`);
+    assert(mods["servers"].stockCell(bn8[0]).startsWith("long "), mods["servers"].stockCell(bn8[0]));
+    assert(mods["servers"].stockCell(bn8[1]) === "pushable", mods["servers"].stockCell(bn8[1]));
+    const other = mods["servers"].buildRows(math, snaps, ram, 1e6, push);
+    assert(other[0].snap.host === "rich", "outside BN8 income still decides");
   },
 
   // ------------------------------------------------------ stock push -------
