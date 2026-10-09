@@ -368,6 +368,36 @@ export const STOCK_PUSH_FILE = "/data/stocks-push.txt";
 export const STOCK_PUSHABLE_FILE = "/data/stocks-pushable.txt";
 
 /**
+ * Home RAM Stanek's charge worker wants, for the continuous manager to leave
+ * alone. JSON `{ want, held }` in GB: `want` is stanek.fraction of home, `held`
+ * what the running worker already occupies. Written by scripts/stanek/stanek.js
+ * each pass, read by the manager each rescan.
+ *
+ * WHY THROUGH THE MANAGER. A charge is one process's thread count, so the worker
+ * must be ONE big process on home - and RAM taken from under the manager makes
+ * its dispatches find no room, which its controller reads as "back the steal
+ * off". The share rule again: whoever owns the pool decides what leaves it.
+ *
+ * Missing, empty or unparseable reserves nothing - the inert failure.
+ */
+export const STANEK_RESERVE_FILE = "/data/stanek-reserve.txt";
+
+/**
+ * GB the manager withholds on home ON TOP of HOME_RESERVE_GB. `want - held`,
+ * because the worker's own RAM is already in the game's usedRam - reserving
+ * `want` whole would hold the same bytes twice.
+ */
+export function stanekReserveGb(text) {
+  try {
+    const { want, held } = JSON.parse(String(text ?? "").trim() || "{}");
+    const gb = Number(want) - (Number(held) || 0);
+    return Number.isFinite(gb) && gb > 0 ? gb : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Hostname prefix of a BitNode 9 hacknet server, which both RAM pools skip.
  *
  * calculateHashGainRate (src/Hacknet/formulas/HacknetServers.ts) carries

@@ -61,6 +61,7 @@ run scripts/boot.js --no-hacknet        # do not buy hacknet nodes or spend hash
 run scripts/boot.js --no-sleeve         # do not assign sleeve tasks
 run scripts/boot.js --no-stocks         # do not run the stock trader
 run scripts/boot.js --no-hud            # do not paint stats into the overview sidebar
+run scripts/boot.js --no-stanek         # do not run the Stanek's Gift pass (BN13/SF13 only anyway)
 ```
 
 **There is one batcher**, `scripts/continuous/`. A second, the volley-firing "shotgun"
@@ -99,6 +100,8 @@ cat /data/stocks.log.txt                # every trade with P/L, the 4S buy, warn
 run scripts/stocks/sellall.js           # close every position (sing runs it before an install)
 run scripts/set.js stocks.cash 1        # BN8: the whole net worth may sit in stocks (default 0.5)
 run scripts/set.js stocks.pushBonus 2   # BN8: rank stocks the batcher can push 2x ahead (default 1 = off)
+cat /data/stanek.txt                    # the gift: board, each fragment's effect, the charge worker's size
+run scripts/set.js stanek.fraction 0.5  # home RAM the Stanek charge worker gets (default 0.25), live
 run scripts/last.js /data/sleeves.log.txt  # its last 10 lines in a tail window (any file; 2nd arg = count)
 run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
 run scripts/set.js sleeve.covenantCash 0.5  # BN10: fraction of cash a Covenant sleeve/memory buy may cost
@@ -370,6 +373,11 @@ editor's RAM panel when one moves.
 | ↳ four bodies | transients: init, terms, read (every tick), trade | 6.60–13.60 |
 | `stocks/sellall.js` | closes every position; sing's SWEEP runs it before an install | 10.65 |
 | `hud.js` | paints income/s, stocks, worth, karma, share, RAM into the overview; boot runs it every `hud.tick` | 3.25 |
+| `stanek/config.js` | Stanek tunables, `FRAGMENT_ORDER`, paths | 0 |
+| `stanek/plan.js` | rotation (`fullAt` transcribed), board packer, worker sizing - pure | 0 |
+| `stanek/stanek.js` | entry: ONE pass then exits; boot runs it every tick before sing, BN13/SF13 only | 3.40 |
+| ↳ three bodies | transients: accept 3.60, read 7.40, place 6.60 | 3.60–7.40 |
+| `stanek/charge.js` | the charge worker: one process on home, charges every fragment forever | 2.00 **per thread** |
 
 `hud.js` writes into the overview's `overview-extra-hook-0/1` cells, which React never fills, so the
 rows outlive the transient - the user's rule was no new resident. Boot runs it every `hud.tick` (5 s)
@@ -1411,6 +1419,51 @@ the constants rpc at startup):
   ticks every 25 ms and the grow lands ≥ 100 ms later, and if the grow is already in nothing is
   read. `batchVerdict` takes `moneyMax − min(left)` as the take only when every return was 0;
   a full server is still a miss. Elsewhere the return is exact and wins.
+
+### Stanek's Gift (`scripts/stanek/`)
+
+Prep for BitNode 13, untested live. Self-contained like `sleeve/`: it imports `scripts/rpc.js`,
+`scripts/settings.js` and two 0 GB names from `scripts/config.js`, and boot reads three paths out of
+`stanek/config.js`. **It never runs where the gift cannot exist**: boot asks `HAS_STANEK`
+(`currentNode === 13 || ownedSF.has(13)`, 2.60) once, the `HAS_SLEEVES` shape, and without either the
+pass never starts and a stale reserve is cleared.
+
+**Accepting is a race, and boot runs the pass BEFORE sing so it wins.** `acceptGift` refuses once any
+aug but NeuroFlux is installed or queued (`canAcceptStaneksGift`), and outside BN13 the first install
+without the gift BANS the Church for the node (`Prestige.ts`). An install with the gift rejoins it. The
+pass reads the board first and accepts only when the read throws "not installed", so an installed gift
+is never re-asked.
+
+**One big worker on home, charging forever.** From `StaneksGift.ts` and `formulas/effect.ts`: a charge
+adds the CALLING script's `threads x coreBonus`, and the effect is
+`1 + ln(highestCharge+1)/60 x ((numCharge+1)/5)^0.07 x power x boost x StaneksGiftPowerMultiplier`
+(BN13: 2). `highestCharge` is the most threads one call brought, so the threads must be in ONE
+process, on home for the cores. `numCharge` keeps growing after that (x0.94 after one charge, x1.70
+after ten thousand), so the worker never stops. It imports nothing and is not in `WORKER_LIST`, so
+`killOrphanWorkers` spares it like share. It is restarted only when it could run `RELAUNCH_RATIO`
+(1.5) times its threads, or when it holds more than `stanek.fraction` now wants.
+
+**The RAM comes through the manager, never from under it.** RAM taken from a planned timeline is "no
+room" for a dispatch, and the controller reads that as "back the steal off". The pass writes
+`STANEK_RESERVE_FILE` (`{want, held}` GB). Each rescan the manager sets home's `staticReserve` to
+`HOME_RESERVE_GB + (want - held)`, through `stanekReserveGb` in `scripts/config.js`. `held` is
+subtracted because the worker's RAM is already in `usedRam`. The worker starts small on the first
+pass, while the manager still holds home, and grows as the reserve drains in. It never takes from the
+`HOME_RESERVE_GB` that every other transient was promised. The manager stays at 11.55: `ns.read` is
+0 GB. Kill and run happen with no await between them, so the manager cannot dispatch into the gap.
+
+**An empty board is laid out; anything else is left alone.** A hand layout is never overwritten. An
+install keeps the board and clears the charges; a new BitNode clears both. `layout` packs the longest
+prefix of `FRAGMENT_ORDER` (the user's hacking-first order: Hacking S and Z, HackingSpeed, HackingMoney,
+HackingGrow, Rep) with a depth-first search over cells. The empties are capped at the spare area, and
+BN13.1's 6x5 board takes all six. Shapes come from `fragmentDefinitions()` (0 GB). Rotation is
+`Fragment.fullAt` transcribed: rotation k is k quarter-turns clockwise. The test derives that a second
+way, by turning the matrix. **ponytail:** no boosters, and a short board drops from the end of the
+order rather than searching subsets.
+
+READ is 7.40 GB, over sing's 6.60 ceiling: `activeFragments` alone is 5.00, and splitting off the two
+size reads would cost a round trip. Boot awaits each transient one at a time, so it never stacks with
+another of the subsystem's own.
 
 ### The hacknet subsystem (`scripts/hacknet/`)
 

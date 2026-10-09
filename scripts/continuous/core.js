@@ -38,6 +38,8 @@ import {
   RESCAN_MS,
   SHARE_RAM_FALLBACK,
   SHARE_WORKER,
+  STANEK_RESERVE_FILE,
+  stanekReserveGb,
   STEAL_FRACTION,
   STREAM_TICK_MS,
   TARGET_RAM_BUDGET,
@@ -747,6 +749,14 @@ export function rescan(ns, math, opts) {
   if (grown.grewGb > 1) {
     log(`  pool grew ${(grown.grewGb / 1024).toFixed(2)}TB since the last rescan`);
   }
+
+  // Stanek's charge worker gets home RAM by the manager leaving it free, never by
+  // taking it: RAM taken from under a planned timeline is "no room" for a
+  // dispatch, which the controller reads as "back the steal off". Read every
+  // rescan so stanek.fraction and a home upgrade land without a restart;
+  // freeRam reads staticReserve live, so setting it is the whole change.
+  const home = pool.servers.find((s) => s.hostname === "home");
+  if (home) home.staticReserve = HOME_RESERVE_GB + stanekReserveGb(ns.read(STANEK_RESERVE_FILE));
 
   // Share BEFORE the budget, and the order is not cosmetic. Share workers exec
   // outside the reservation system and are never released, so a budget measured

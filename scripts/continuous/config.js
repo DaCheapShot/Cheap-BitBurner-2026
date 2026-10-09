@@ -51,6 +51,8 @@ export {
   TARGETS_MARKER, HACKNET_HOST_PREFIX,
   // The stock trader's wanted direction per company - see lib/stream.js exec.
   STOCK_PUSH_FILE, STOCK_PUSHABLE_FILE,
+  // Home RAM the Stanek charge worker holds back - see core.js rescan.
+  STANEK_RESERVE_FILE, stanekReserveGb,
 } from "scripts/config.js";
 
 // -------------------------------------------------------------- batching ----

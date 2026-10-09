@@ -9,7 +9,7 @@ import { loadScripts, assert } from "./harness.mjs";
 const TRANSIENT = [
   "scripts/root.js", "scripts/deploy.js", "scripts/contracts/contracts.js",
   "scripts/hacknet/hacknet.js", "scripts/hacknet/hashes.js", "scripts/sleeve/sleeve.js", "scripts/cloud.js",
-  "scripts/hud.js",
+  "scripts/hud.js", "scripts/stanek/stanek.js",
 ];
 
 /**
@@ -28,11 +28,12 @@ const TRANSIENT = [
 async function runBoot({
   args = [], files = {}, running = [], workers = [], ticks = 3, hasFormulas = false,
   inGang = false, karma = 0, onTprint = () => {}, onTick = (_tick, procs) => procs, onSleep = () => {},
-  sleeves = true, tix = true,
+  sleeves = true, tix = true, stanek = false,
 }) {
   const ports = {};
   const runs = [];
   let rpcCalls = 0;
+  let stanekAsks = 0;
   const { main } = (await loadScripts())["boot"];
   let procs = running.map((f, i) => ({ filename: f, host: "home", pid: i + 1, args: [], threads: 1 }));
   let nextPid = procs.length + 1;
@@ -95,8 +96,12 @@ async function runBoot({
       const stored = file.replace(/^\/+/, "");
       afterSleep = false;
       if (stored.startsWith("tmp/rpc-")) {
-        rpcCalls++;
-        (ports[a[0]] ??= []).push(JSON.stringify({ v: sleeves }));
+        // Boot's two bodies, told apart by what they ask: HAS_STANEK reads SF13.
+        // rpcCalls counts the SF10 ask, stanekAsks the other.
+        const asksStanek = (store[file] ?? "").includes("has(13)");
+        if (asksStanek) stanekAsks++;
+        else rpcCalls++;
+        (ports[a[0]] ??= []).push(JSON.stringify({ v: asksStanek ? stanek : sleeves }));
         return nextPid++;
       }
       launched.push(stored);
@@ -114,7 +119,7 @@ async function runBoot({
   };
 
   try { await main(ns); } catch (e) { if (e.message !== "STOP") throw e; }
-  return { launched, killed, procs, store, logs, rpcCalls, runs };
+  return { launched, killed, procs, store, logs, rpcCalls, stanekAsks, runs };
 }
 
 /** A killed manager's batches, still running out on the network. */
@@ -481,6 +486,45 @@ export const tests = {
   },
 
   // Karma buys nothing but a gang, so --no-gang reaches the sleeve pass.
+  // The user's rule: no Stanek pass where the gift cannot exist. Asked once,
+  // like SF10, and a reserve left by an earlier node is released - otherwise the
+  // manager would hold home RAM back for a worker that will never run.
+  "no BN13/SF13: the stanek pass never runs, boot asks once, a stale reserve is cleared": async () => {
+    const r = await runBoot({ stanek: false, ticks: 4, files: { "/data/stanek-reserve.txt": '{"want":64,"held":0}' } });
+    assert(!r.launched.includes("scripts/stanek/stanek.js"), `ran without BN13/SF13: ${r.launched}`);
+    assert(r.stanekAsks === 1, `asked ${r.stanekAsks} times`);
+    assert(r.store["/data/stanek-reserve.txt"] === "", "the stale reserve must be cleared");
+  },
+
+  // acceptGift refuses once any aug but NeuroFlux is queued, so on a fresh node
+  // the pass has to run before sing can buy its first batch.
+  "BN13: the stanek pass runs every tick, ahead of sing": async () => {
+    const r = await runBoot({ stanek: true, ticks: 3 });
+    const runs = r.launched.filter((f) => f === "scripts/stanek/stanek.js").length;
+    assert(runs === 3, `expected a pass per tick, got ${runs}`);
+    const first = r.launched.indexOf("scripts/stanek/stanek.js");
+    const sing = r.launched.indexOf("scripts/sing/sing.js");
+    assert(first >= 0 && sing >= 0 && first < sing, `stanek must start before sing: ${r.launched}`);
+  },
+
+  "stanek.enabled off kills the charge worker and releases its home reserve": async () => {
+    const r = await runBoot({
+      stanek: true, ticks: 2, running: ["scripts/stanek/charge.js"],
+      files: { "/data/settings.txt": '{"stanek.enabled":0}', "/data/stanek-reserve.txt": '{"want":64,"held":64}' },
+    });
+    assert(r.killed.includes("scripts/stanek/charge.js"), `worker not killed: ${r.killed}`);
+    assert(r.store["/data/stanek-reserve.txt"] === "", "the reserve must be released");
+    assert(!r.launched.includes("scripts/stanek/stanek.js"), "the pass must not run while off");
+  },
+
+  // Every --no-X only stops boot STARTING something; it never kills.
+  "--no-stanek skips the pass and leaves a running worker alone": async () => {
+    const r = await runBoot({ stanek: true, ticks: 2, args: ["--no-stanek"], running: ["scripts/stanek/charge.js"] });
+    assert(!r.launched.includes("scripts/stanek/stanek.js"), `launched ${r.launched}`);
+    assert(!r.killed.includes("scripts/stanek/charge.js"), "--no-stanek must not kill");
+    assert(r.stanekAsks === 0, "nothing to ask when the pass is opted out");
+  },
+
   "--no-gang is passed through to the sleeve pass": async () => {
     const argsOf = (r) => r.runs.filter((x) => x.file === "scripts/sleeve/sleeve.js").map((x) => x.args);
     const off = argsOf(await runBoot({ args: ["--no-gang"], ticks: 2 }));
