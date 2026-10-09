@@ -3,7 +3,7 @@ import { HACKNET_CASH_FRACTION, PAYBACK_SECONDS, HACKNET_EVERY, STUDY_LEVELS } f
 import { EQUIP_BUDGET_FRACTION, TICK_EVERY, WAR_EVERY, ASCEND_EVERY, EQUIP_EVERY } from "./gang/config.js";
 import { SLEEVE_AUG_CASH, SLEEVE_AUG_MIN, SLEEVE_COVENANT_CASH } from "./sleeve/config.js";
 import { STOCKS_CASH, PUSH_BONUS } from "./stocks/config.js";
-import { STANEK_FRACTION } from "./stanek/config.js";
+import { STANEK_MAX_GB } from "./stanek/config.js";
 import {
   HOME_RAM_BUDGET_FRACTION, HOME_CORES_BUDGET_FRACTION, PROG_BUDGET_FRACTION, SING_TICK_MS,
   AUTO_INSTALL, MIN_AUG_BATCH, IDLE_STUDY, GRAFT, GRAFT_CASH, GRAFT_MIN_GAIN,
@@ -100,10 +100,10 @@ export const KNOBS = {
   "stocks.buy4S": { def: 1, min: 0, max: 1, bool: true, doc: "sing buys the 4S TIX API once net worth is twice its price" },
 
   // Read by stanek.js each pass, which sizes the charge worker and publishes the
-  // reserve the manager withholds on home next rescan. Off: boot kills the worker
-  // and clears the reserve.
+  // reserve the manager withholds on its host next rescan. Off: boot kills the
+  // worker and clears the reserve.
   "stanek.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "Stanek's Gift pass + charge worker (BN13/SF13 only)" },
-  "stanek.fraction": { def: STANEK_FRACTION, min: 0.01, max: 0.9, doc: "fraction of home RAM the Stanek charge worker gets" },
+  "stanek.maxGb": { def: STANEK_MAX_GB, min: 2, max: 2 ** 30, doc: "GB the Stanek charge worker takes at most - the whole largest non-home host up to this" },
 
   "contracts.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },
   "hud.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "overview stats (hud.js)" },

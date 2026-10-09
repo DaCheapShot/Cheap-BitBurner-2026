@@ -590,16 +590,18 @@ export const tests = {
   },
 
   // Stanek's Gift. The worker is paid PER THREAD and imports nothing, like the
-  // batch workers. The pass holds only what deciding the worker needs - run,
-  // kill, ps and home's two RAM reads - and every gift call is a body.
+  // batch workers. The pass holds only what placing the worker needs - the
+  // network walk, the host's two RAM reads, scp/exec/kill to put it on a host
+  // that is not home - and every gift call is a body. A transient, so the
+  // 5.55 is held for a few hundred ms a tick.
   "stanek: the charge worker is 2.00 GB a thread and imports nothing": () => {
     const ram = ramOf("stanek/charge");
     assert(Math.abs(ram - 2.00) < 0.011, `expected 2.00 GB, got ${ram.toFixed(2)}`);
     assert(!/\bimport\b/.test(codeOnly(readScript("stanek/charge"))), "charge.js must import nothing");
   },
-  "stanek: the pass is 3.40 GB and its shared modules are free": () => {
+  "stanek: the pass is 5.55 GB and its shared modules are free": () => {
     const ram = ramOf("stanek/stanek");
-    assert(Math.abs(ram - 3.40) < 0.011, `expected 3.40 GB, got ${ram.toFixed(2)}`);
+    assert(Math.abs(ram - 5.55) < 0.011, `expected 5.55 GB, got ${ram.toFixed(2)}`);
     for (const mod of ["stanek/config", "stanek/plan"]) {
       const r = ramOf(mod);
       assert(Math.abs(r - BASE) < 0.011, `${mod}.js costs ${(r - BASE).toFixed(2)} GB to import; it must be 0`);

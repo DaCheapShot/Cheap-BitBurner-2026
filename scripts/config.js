@@ -368,32 +368,36 @@ export const STOCK_PUSH_FILE = "/data/stocks-push.txt";
 export const STOCK_PUSHABLE_FILE = "/data/stocks-pushable.txt";
 
 /**
- * Home RAM Stanek's charge worker wants, for the continuous manager to leave
- * alone. JSON `{ want, held }` in GB: `want` is stanek.fraction of home, `held`
- * what the running worker already occupies. Written by scripts/stanek/stanek.js
- * each pass, read by the manager each rescan.
+ * The host Stanek's charge worker runs on and the RAM it wants there, for the
+ * continuous manager to leave alone. JSON `{ host, want, held }`, GB: `want` is
+ * the whole host up to stanek.maxGb, `held` what the running worker already
+ * occupies ON that host. Written by scripts/stanek/stanek.js each pass, read by
+ * the manager each rescan and by boot to find the worker it has to stop.
  *
  * WHY THROUGH THE MANAGER. A charge is one process's thread count, so the worker
- * must be ONE big process on home - and RAM taken from under the manager makes
- * its dispatches find no room, which its controller reads as "back the steal
- * off". The share rule again: whoever owns the pool decides what leaves it.
+ * must be ONE big process on one host - and RAM taken from under the manager
+ * makes its dispatches find no room, which its controller reads as "back the
+ * steal off". The share rule again: whoever owns the pool decides what leaves it.
  *
  * Missing, empty or unparseable reserves nothing - the inert failure.
  */
 export const STANEK_RESERVE_FILE = "/data/stanek-reserve.txt";
 
 /**
- * GB the manager withholds on home ON TOP of HOME_RESERVE_GB. `want - held`,
- * because the worker's own RAM is already in the game's usedRam - reserving
- * `want` whole would hold the same bytes twice.
+ * The worker's host, and how much the manager withholds there ON TOP of that
+ * host's own reserve: `want - held`, because the worker's own RAM is already in
+ * the game's usedRam - reserving `want` whole would hold the same bytes twice.
+ * `host` is kept even at gb 0, for boot to find the worker it has to stop.
+ * `{ host: null, gb: 0 }` for anything it cannot read.
  */
-export function stanekReserveGb(text) {
+export function stanekReserve(text) {
   try {
-    const { want, held } = JSON.parse(String(text ?? "").trim() || "{}");
+    const { host, want, held } = JSON.parse(String(text ?? "").trim() || "{}");
+    if (typeof host !== "string" || !host) return { host: null, gb: 0 };
     const gb = Number(want) - (Number(held) || 0);
-    return Number.isFinite(gb) && gb > 0 ? gb : 0;
+    return { host, gb: Number.isFinite(gb) && gb > 0 ? gb : 0 };
   } catch {
-    return 0;
+    return { host: null, gb: 0 };
   }
 }
 

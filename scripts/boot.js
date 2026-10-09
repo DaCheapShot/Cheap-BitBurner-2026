@@ -1,7 +1,7 @@
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS, CLOUD_STATUS_FILE,
          WORKER_LIST,
          DEPLOY_LIST, DEPLOY_MANIFEST, SHARE_HOLD_MARKER, TARGETS_MARKER,
-         REP_WANT_MARKER, SLEEVE_FACTION_MARKER, STANEK_RESERVE_FILE } from "./config.js";
+         REP_WANT_MARKER, SLEEVE_FACTION_MARKER, STANEK_RESERVE_FILE, stanekReserve } from "./config.js";
 // The gang supervisor's path. Same kind of import as the line above - that file
 // is constants only, no ns call anywhere in it, so this is 0 GB.
 import { GANG_SERVICE } from "./gang/config.js";
@@ -32,7 +32,8 @@ import { rpc } from "./rpc.js";
  *                     supervisor holds no gang API itself; it runs transients.
  *   6b. stanek      - a transient, one pass per tick, BN13/SF13 only, and
  *                     BEFORE sing: it must accept the gift before any aug is
- *                     bought. It keeps the charge worker running on home.
+ *                     bought. It keeps the charge worker running on the
+ *                     largest host that is not home.
  *   7. sing         - kept alive as a service, ALWAYS. Singularity has no 0 GB
  *                     availability check, so sing.js gates itself: without
  *                     Source-File 4 it parks rather than exits.
@@ -569,7 +570,7 @@ export async function main(ns) {
       ensureService(ns, GANG_SERVICE, [], log);
     }
     // Stanek's Gift, one pass per tick - a TRANSIENT, the sleeve shape; what it
-    // leaves running is the charge worker on home. BEFORE SING, and that is the
+    // leaves running is the charge worker, on the host the reserve file names. BEFORE SING, and that is the
     // point of its position: acceptGift refuses once any aug but NeuroFlux is
     // installed or queued, so on a fresh node it must win the race with sing's
     // first aug batch. Gated on BN13/SF13, asked once - without either it never
@@ -581,8 +582,16 @@ export async function main(ns) {
       if (hasStanek !== null) log(hasStanek ? "stanek: BN13/SF13 - running the gift every tick" : "stanek: no BN13/SF13 - not running");
     }
     if (!live("stanek") || hasStanek === false) {
-      stopService(ns, CHARGE_WORKER, log);
-      if (ns.read(STANEK_RESERVE_FILE) !== "") ns.write(STANEK_RESERVE_FILE, "", "w");
+      // The file names the worker's host, so off costs one ps there - not a walk
+      // of the network every tick it stays off. Cleared once, so this is once.
+      const text = ns.read(STANEK_RESERVE_FILE);
+      if (text !== "") {
+        const { host } = stanekReserve(text);
+        for (const p of host ? ns.ps(host) : []) {
+          if (normPath(p.filename) === normPath(CHARGE_WORKER) && ns.kill(p.pid)) log(`stopped the Stanek charge worker on ${host}`);
+        }
+        ns.write(STANEK_RESERVE_FILE, "", "w");
+      }
     } else if (stanekOn && hasStanek && !isUp(ns, STANEK_SERVICE)) {
       await runToCompletion(ns, STANEK_SERVICE, [], log);
       // Only on a change, and the charge figures - everything in parentheses -

@@ -1,8 +1,8 @@
 /**
  * Charge every fragment, round and round, until killed. Started by
- * scripts/stanek/stanek.js on home with as many threads as stanek.fraction
- * buys; each call adds `threads x coreBonus` to one fragment and takes 1 s
- * (200 ms in bonus time).
+ * scripts/stanek/stanek.js on the largest host that is not home, with the whole
+ * of it up to stanek.maxGb; each call adds `threads x coreBonus` to one
+ * fragment and takes 1 s (200 ms in bonus time).
  *
  * Imports nothing and reads no file, like the batch workers: it is paid per
  * thread. The roots arrive as args, flattened: x0 y0 x1 y1 ...

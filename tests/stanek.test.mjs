@@ -82,14 +82,20 @@ function giftApi({ installed = false, augs = false, w = 6, h = 5, placed = [] } 
   return state;
 }
 
-/** One stanek.js pass. `store` carries /data files between passes, as boot's ticks do. */
-async function pass(mods, { gift, store = {}, home = 1024, procs = [] } = {}) {
-  const ns = makeNs({ files: store, hosts: { home }, extra: { stanek: gift.api } });
-  for (const p of procs) ns.exec(p.file, "home", p.threads, ...p.args);
+/**
+ * One stanek.js pass. `store` carries /data files between passes, as boot's
+ * ticks do. `workers` lists every charge worker on the network afterwards, with
+ * its host.
+ */
+async function pass(mods, { gift, store = {}, hosts = { home: 1024, "cloud-0": 256 }, procs = [] } = {}) {
+  const ns = makeNs({ files: store, hosts, extra: { stanek: gift.api } });
+  for (const p of procs) ns.exec("scripts/stanek/charge.js", p.host, p.threads, ...p.args);
   await mods["stanek/stanek"].main(ns);
-  const workers = ns.ps("home").filter((p) => p.filename === "scripts/stanek/charge.js");
+  const workers = Object.keys(hosts).flatMap((h) => ns.ps(h)).filter((p) => p.filename === "scripts/stanek/charge.js");
   return { ns, store, workers, status: store["/data/stanek.txt"] ?? "" };
 }
+
+const reserveOf = (r) => JSON.parse(r.store["/data/stanek-reserve.txt"] || "null");
 
 export const tests = {
   // ------------------------------------------------------------- the math ---
@@ -132,48 +138,105 @@ export const tests = {
     assert(got.length === 1 && got[0].id === 0, `got ${JSON.stringify(got)}`);
   },
 
-  "chargePlan: sized at the fraction, held to what home can spare, restarted only on a real gain": async () => {
+  "chargePlan: the whole host up to maxGb, held to its free RAM, restarted only on a real gain": async () => {
     const { chargePlan } = (await loadScripts())["stanek/plan"];
-    const base = { homeMax: 1024, used: 0, heldThreads: 0, fraction: 0.25, keepGb: 32 };
+    const base = { hostMax: 1024, hostUsed: 0, heldHere: 0, heldThreads: 0, maxGb: 65536 };
     let p = chargePlan(base);
-    assert(p.want === 128 && p.threads === 128 && p.act, `fresh: ${JSON.stringify(p)}`);
-    // The manager has not drained home yet: only what is free above the keep.
-    p = chargePlan({ ...base, used: 1024 - 32 - 20 });
+    assert(p.want === 512 && p.threads === 512 && p.act, `fresh: ${JSON.stringify(p)}`);
+    // 128 TB host, 64 TB cap: half of it.
+    p = chargePlan({ ...base, hostMax: 131072 });
+    assert(p.want === 32768 && p.threads === 32768, `capped: ${JSON.stringify(p)}`);
+    // The manager has not drained the host yet: only what is free.
+    p = chargePlan({ ...base, hostUsed: 1024 - 20 });
     assert(p.threads === 10 && p.act, `squeezed: ${JSON.stringify(p)}`);
-    // Running 100; the kill would hand back 200 GB. 14 more GB free is 107 < 150.
-    p = chargePlan({ ...base, used: 1024 - 32 - 14, heldThreads: 100 });
+    // Running 100 here; the kill would hand back 200 GB. 14 more GB free is 107 < 150.
+    p = chargePlan({ ...base, hostUsed: 1024 - 14, heldHere: 100, heldThreads: 100 });
     assert(p.threads === 107 && !p.act, `small gain: ${JSON.stringify(p)}`);
-    p = chargePlan({ ...base, heldThreads: 80 });
-    assert(p.threads === 128 && p.act, `1.6x gain: ${JSON.stringify(p)}`);
-    // stanek.fraction lowered under what runs: shrink.
-    p = chargePlan({ ...base, fraction: 0.1, heldThreads: 128 });
-    assert(p.want === 51 && p.act, `shrink: ${JSON.stringify(p)}`);
+    // A worker on ANOTHER host frees nothing here: the move waits for room.
+    p = chargePlan({ ...base, hostUsed: 1024 - 200, heldThreads: 100 });
+    assert(p.threads === 100 && !p.act, `move waits: ${JSON.stringify(p)}`);
+    p = chargePlan({ ...base, hostUsed: 1024 - 300, heldThreads: 100 });
+    assert(p.threads === 150 && p.act, `move goes: ${JSON.stringify(p)}`);
+    // stanek.maxGb lowered under what runs: shrink.
+    p = chargePlan({ ...base, maxGb: 256, heldHere: 512, heldThreads: 512 });
+    assert(p.want === 128 && p.act, `shrink: ${JSON.stringify(p)}`);
+  },
+
+  "pickHost: the largest, kept until another would be 1.5x its capped size": async () => {
+    const { pickHost } = (await loadScripts())["stanek/plan"];
+    const hs = (o) => Object.entries(o).map(([host, maxRam]) => ({ host, maxRam }));
+    assert(pickHost(hs({ a: 64, b: 256 }), null, 65536) === "b", "largest");
+    assert(pickHost(hs({ b: 256, a: 256 }), null, 65536) === "a", "ties to the lower name");
+    assert(pickHost(hs({ a: 256, b: 300 }), "a", 65536) === "a", "a small gain does not move it");
+    assert(pickHost(hs({ a: 256, b: 384 }), "a", 65536) === "b", "1.5x does");
+    // Both past the cap: equal once capped, so the worker stays.
+    assert(pickHost(hs({ a: 131072, b: 1048576 }), "a", 65536) === "a", "capped hosts are equal");
+    assert(pickHost(hs({ a: 1 }), null, 65536) === null, "nothing can hold one thread");
+    assert(pickHost([], null, 65536) === null, "no host");
   },
 
   // The manager reads this every rescan; a mangled file must reserve nothing.
-  "stanekReserveGb: want minus held, and 0 for anything it cannot read": async () => {
-    const { stanekReserveGb } = (await loadScripts())["config"];
-    assert(stanekReserveGb('{"want":256,"held":64}') === 192, "want - held");
-    assert(stanekReserveGb('{"want":256,"held":256}') === 0, "a full worker holds its own RAM");
-    assert(stanekReserveGb('{"want":64,"held":128}') === 0, "never negative");
-    for (const t of ["", "garbage", "[]", '{"want":"x"}', null]) {
-      assert(stanekReserveGb(t) === 0, `${JSON.stringify(t)} must reserve nothing`);
+  "stanekReserve: the host, and want minus held there; nothing for what it cannot read": async () => {
+    const { stanekReserve } = (await loadScripts())["config"];
+    const r = (t) => JSON.stringify(stanekReserve(t));
+    assert(r('{"host":"c","want":256,"held":64}') === '{"host":"c","gb":192}', "want - held");
+    // gb 0, host kept: boot needs it to find the worker it is switching off.
+    assert(r('{"host":"c","want":256,"held":256}') === '{"host":"c","gb":0}', "a full worker holds its own RAM");
+    assert(r('{"host":"c","want":64,"held":128}') === '{"host":"c","gb":0}', "never negative");
+    for (const t of ["", "garbage", "[]", '{"want":256}', '{"host":"","want":256}', null]) {
+      assert(r(t) === '{"host":null,"gb":0}', `${JSON.stringify(t)} must reserve nothing`);
     }
   },
 
   // --------------------------------------------------------------- a pass ---
 
-  "a fresh node: accept, lay out the empty board, start one worker, publish the reserve": async () => {
+  "a fresh node: accept, lay out the empty board, start one worker off home, publish the reserve": async () => {
     const mods = await loadScripts();
     const gift = giftApi();
     const r = await pass(mods, { gift });
     assert(gift.installed, "the gift must be accepted");
     assert(gift.placed.length === 6, `placed ${gift.placed.length}`);
-    assert(r.workers.length === 1 && r.workers[0].threads === 128, `workers ${JSON.stringify(r.workers)}`);
+    assert(r.workers.length === 1 && r.workers[0].host === "cloud-0" && r.workers[0].threads === 128,
+      `workers ${JSON.stringify(r.workers)}`);
     const roots = gift.placed.flatMap((p) => [p.x, p.y]).map(String).join(",");
     assert(r.workers[0].args.map(String).join(",") === roots, "the worker must charge every placed root");
-    assert(r.store["/data/stanek-reserve.txt"] === JSON.stringify({ want: 256, held: 256 }), r.store["/data/stanek-reserve.txt"]);
+    assert(JSON.stringify(reserveOf(r)) === JSON.stringify({ host: "cloud-0", want: 256, held: 256 }),
+      JSON.stringify(reserveOf(r)));
     assert(r.status.includes("accepted"), r.status);
+  },
+
+  // The cores stay with the batcher: a huge home is never chosen.
+  "never home, however large; and nothing at all while home is the only host": async () => {
+    const mods = await loadScripts();
+    let r = await pass(mods, { gift: giftApi(), hosts: { home: 2 ** 20, n00dles: 4 } });
+    assert(r.workers.length === 1 && r.workers[0].host === "n00dles" && r.workers[0].threads === 2,
+      `workers ${JSON.stringify(r.workers)}`);
+    r = await pass(mods, { gift: giftApi(), hosts: { home: 2 ** 20 } });
+    assert(r.workers.length === 0, "no worker on home");
+    assert((r.store["/data/stanek-reserve.txt"] ?? "") === "", "nothing reserved");
+    assert(r.status.includes("waiting"), r.status);
+  },
+
+  "the whole host up to 64 TB": async () => {
+    const mods = await loadScripts();
+    const r = await pass(mods, { gift: giftApi(), hosts: { home: 1024, "cloud-0": 131072 } });
+    assert(r.workers[0].threads === 32768, `threads ${r.workers[0].threads}`);
+    assert(reserveOf(r).want === 65536, JSON.stringify(reserveOf(r)));
+  },
+
+  // A bigger cloud server: the worker moves, once, and nothing is left behind.
+  "a much larger host appears: the worker moves to it": async () => {
+    const mods = await loadScripts();
+    const gift = giftApi();
+    const first = await pass(mods, { gift });
+    const w = first.workers[0];
+    const procs = [{ host: "cloud-0", threads: w.threads, args: w.args }];
+    let r = await pass(mods, { gift, store: { ...first.store }, hosts: { home: 1024, "cloud-0": 256, "cloud-1": 300 }, procs });
+    assert(r.workers.length === 1 && r.workers[0].host === "cloud-0", `a small gain moved it: ${JSON.stringify(r.workers)}`);
+    r = await pass(mods, { gift, store: { ...first.store }, hosts: { home: 1024, "cloud-0": 256, "cloud-1": 1024 }, procs });
+    assert(r.workers.length === 1 && r.workers[0].host === "cloud-1" && r.workers[0].threads === 512,
+      `workers ${JSON.stringify(r.workers)}`);
+    assert(reserveOf(r).host === "cloud-1", JSON.stringify(reserveOf(r)));
   },
 
   // acceptGift refuses once any aug but NeuroFlux is installed or queued, and
@@ -181,7 +244,7 @@ export const tests = {
   "an aug already owned: the gift is refused, nothing runs, nothing is reserved": async () => {
     const mods = await loadScripts();
     const gift = giftApi({ augs: true });
-    const r = await pass(mods, { gift, store: { "/data/stanek-reserve.txt": '{"want":256,"held":0}' } });
+    const r = await pass(mods, { gift, store: { "/data/stanek-reserve.txt": '{"host":"cloud-0","want":256,"held":0}' } });
     assert(r.workers.length === 0, "no worker without the gift");
     assert(r.store["/data/stanek-reserve.txt"] === "", "the reserve must be released");
     assert(r.status.includes("not accepted"), r.status);
@@ -194,9 +257,9 @@ export const tests = {
     const first = await pass(mods, { gift });
     gift.calls.length = 0;
     const w = first.workers[0];
-    const r = await pass(mods, { gift, store: first.store, procs: [{ file: "scripts/stanek/charge.js", threads: w.threads, args: w.args }] });
+    const r = await pass(mods, { gift, store: first.store, procs: [{ host: "cloud-0", threads: w.threads, args: w.args }] });
     assert(!gift.calls.includes("accept") && !gift.calls.includes("place"), `calls ${gift.calls}`);
-    assert(r.workers.length === 1 && r.workers[0].threads === 128, "the running worker is kept");
+    assert(r.workers.length === 1 && r.workers[0].pid === 1, "the running worker is kept, not restarted");
   },
 
   "a hand-placed board is never re-laid": async () => {
@@ -205,16 +268,6 @@ export const tests = {
     const r = await pass(mods, { gift });
     assert(!gift.calls.includes("place"), "must not place on a board that has fragments");
     assert(r.workers[0].args.map(String).join(",") === "2,2", `charges ${r.workers[0].args}`);
-  },
-
-  // Home was upgraded: the worker is restarted at the new size, once.
-  "home grew: the worker restarts at the new size": async () => {
-    const mods = await loadScripts();
-    const gift = giftApi();
-    const first = await pass(mods, { gift });
-    const w = first.workers[0];
-    const r = await pass(mods, { gift, store: first.store, home: 4096, procs: [{ file: "scripts/stanek/charge.js", threads: w.threads, args: w.args }] });
-    assert(r.workers.length === 1 && r.workers[0].threads === 512, `workers ${JSON.stringify(r.workers)}`);
   },
 
   // No terminal output - the sleeve pass's rule. boot carries the status.

@@ -8,11 +8,17 @@
 export const STANEK_SERVICE = "/scripts/stanek/stanek.js";
 
 /**
- * The charge worker: ONE process on home, never anywhere else. A charge adds
- * the CALLING script's `threads x coreBonus`, and the fragment's effect grows
- * with ln(highestCharge) - the most threads any single call brought - so the
+ * The charge worker: ONE process on ONE host. A charge adds the CALLING
+ * script's `threads x coreBonus`, and the fragment's effect grows with
+ * ln(highestCharge) - the most threads any single call brought - so the
  * worker's thread count is the whole bonus and splitting it across hosts would
- * throw most of it away. Home also has the cores.
+ * throw most of it away.
+ *
+ * NOT HOME, though home has the cores. Cores enter the charge inside the log:
+ * 8 cores (x1.4375) are worth ln(1.4375)/60 x 2 = +1.2 points on a Hacking
+ * fragment. The batcher gets the same x1.4375 LINEARLY on every grow and
+ * weaken thread it puts on home, so a GB reserved there costs it ~1.44 GB of
+ * 1-core RAM. The cores stay with the batcher.
  */
 export const CHARGE_WORKER = "/scripts/stanek/charge.js";
 
@@ -45,8 +51,15 @@ export const FRAGMENT_NAMES = {
 /** FragmentTypeEnum.Booster - never charged (the game throws) and not laid out. */
 export const BOOSTER_TYPE = 18;
 
-/** Default share of home's RAM the charge worker gets - the live stanek.fraction. */
-export const STANEK_FRACTION = 0.25;
+/**
+ * The most RAM the worker takes, default of the live stanek.maxGb: 64 TB. It
+ * takes the whole of the largest host up to this. Each DOUBLING of threads adds
+ * a flat ln2/60 x 2 x ~1.5 = +3.5 points per Hacking fragment, while the
+ * batcher's income is ~linear in RAM - so past a fixed size the bonus stops
+ * paying for the RAM (the user's call: 64 TB, about x2.4 hacking from the two
+ * Hacking fragments).
+ */
+export const STANEK_MAX_GB = 65536;
 
 /**
  * Relaunch the worker only once it could run this many times its threads. A

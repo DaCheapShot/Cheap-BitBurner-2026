@@ -100,8 +100,8 @@ cat /data/stocks.log.txt                # every trade with P/L, the 4S buy, warn
 run scripts/stocks/sellall.js           # close every position (sing runs it before an install)
 run scripts/set.js stocks.cash 1        # BN8: the whole net worth may sit in stocks (default 0.5)
 run scripts/set.js stocks.pushBonus 2   # BN8: rank stocks the batcher can push 2x ahead (default 1 = off)
-cat /data/stanek.txt                    # the gift: board, each fragment's effect, the charge worker's size
-run scripts/set.js stanek.fraction 0.5  # home RAM the Stanek charge worker gets (default 0.25), live
+cat /data/stanek.txt                    # the gift: board, each fragment's effect, the charge worker's host and size
+run scripts/set.js stanek.maxGb 131072  # most GB the Stanek charge worker takes (default 64 TB), live
 run scripts/last.js /data/sleeves.log.txt  # its last 10 lines in a tail window (any file; 2nd arg = count)
 run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
 run scripts/set.js sleeve.covenantCash 0.5  # BN10: fraction of cash a Covenant sleeve/memory buy may cost
@@ -374,10 +374,10 @@ editor's RAM panel when one moves.
 | `stocks/sellall.js` | closes every position; sing's SWEEP runs it before an install | 10.65 |
 | `hud.js` | paints income/s, stocks, worth, karma, share, RAM into the overview; boot runs it every `hud.tick` | 3.25 |
 | `stanek/config.js` | Stanek tunables, `FRAGMENT_ORDER`, paths | 0 |
-| `stanek/plan.js` | rotation (`fullAt` transcribed), board packer, worker sizing - pure | 0 |
-| `stanek/stanek.js` | entry: ONE pass then exits; boot runs it every tick before sing, BN13/SF13 only | 3.40 |
+| `stanek/plan.js` | rotation (`fullAt` transcribed), board packer, host pick, worker sizing - pure | 0 |
+| `stanek/stanek.js` | entry: ONE pass then exits; boot runs it every tick before sing, BN13/SF13 only | 5.55 |
 | ↳ three bodies | transients: accept 3.60, read 7.40, place 6.60 | 3.60–7.40 |
-| `stanek/charge.js` | the charge worker: one process on home, charges every fragment forever | 2.00 **per thread** |
+| `stanek/charge.js` | the charge worker: one process on the largest non-home host, charges every fragment forever | 2.00 **per thread** |
 
 `hud.js` writes into the overview's `overview-extra-hook-0/1` cells, which React never fills, so the
 rows outlive the transient - the user's rule was no new resident. Boot runs it every `hud.tick` (5 s)
@@ -1432,25 +1432,43 @@ pass never starts and a stale reserve is cleared.
 aug but NeuroFlux is installed or queued (`canAcceptStaneksGift`), and outside BN13 the first install
 without the gift BANS the Church for the node (`Prestige.ts`). An install with the gift rejoins it. The
 pass reads the board first and accepts only when the read throws "not installed", so an installed gift
-is never re-asked.
+is never re-asked. The pass is 5.55 GB, held for a few hundred ms a tick: the network walk, the host's
+RAM reads, and `scp`/`exec`/`kill` to place a worker off home.
 
-**One big worker on home, charging forever.** From `StaneksGift.ts` and `formulas/effect.ts`: a charge
+**One big worker, charging forever.** From `StaneksGift.ts` and `formulas/effect.ts`: a charge
 adds the CALLING script's `threads x coreBonus`, and the effect is
 `1 + ln(highestCharge+1)/60 x ((numCharge+1)/5)^0.07 x power x boost x StaneksGiftPowerMultiplier`
 (BN13: 2). `highestCharge` is the most threads one call brought, so the threads must be in ONE
-process, on home for the cores. `numCharge` keeps growing after that (x0.94 after one charge, x1.70
-after ten thousand), so the worker never stops. It imports nothing and is not in `WORKER_LIST`, so
-`killOrphanWorkers` spares it like share. It is restarted only when it could run `RELAUNCH_RATIO`
-(1.5) times its threads, or when it holds more than `stanek.fraction` now wants.
+process on ONE host. `numCharge` keeps growing after that (x0.94 after one charge, x1.70 after ten
+thousand), so the worker never stops. It imports nothing and is not in `WORKER_LIST`, so
+`killOrphanWorkers` spares it like share.
+
+**Never on home, and that is the cores' arithmetic.** Cores enter the charge INSIDE the log: 8 cores
+(x1.4375) add `ln(1.4375)/60 x 2` = +1.2 points on a Hacking fragment. The batcher gets the same
+x1.4375 LINEARLY on every grow and weaken thread on home, so a GB reserved there costs it ~1.44 GB of
+1-core RAM. `pickHost` takes the largest rooted host that is not home or hacknet. The worker stays
+where it is until another host would give `RELAUNCH_RATIO` (1.5) x its capped size. That is the same
+bar a restart needs, and it has to be: switch hosts on a smaller gain and the reserve drains a host
+the worker never moves to. Moving loses nothing earned, because both charges live in the game. While
+home is the only host the pass waits.
+
+**The whole host, up to `stanek.maxGb` (64 TB).** Each doubling of threads adds a flat
+`ln 2/60 x 2 x ~1.5` = +3.5 points per Hacking fragment, and the batcher's income is ~linear in RAM,
+so past a fixed size the bonus stops paying for the RAM. The user picked 64 TB: about x2.4 hacking
+from the two Hacking fragments. A 128 TB server gives the worker half of itself. The worker restarts
+when it could run 1.5 x its threads, or when it holds more than `stanek.maxGb` now allows.
 
 **The RAM comes through the manager, never from under it.** RAM taken from a planned timeline is "no
 room" for a dispatch, and the controller reads that as "back the steal off". The pass writes
-`STANEK_RESERVE_FILE` (`{want, held}` GB). Each rescan the manager sets home's `staticReserve` to
-`HOME_RESERVE_GB + (want - held)`, through `stanekReserveGb` in `scripts/config.js`. `held` is
-subtracted because the worker's RAM is already in `usedRam`. The worker starts small on the first
-pass, while the manager still holds home, and grows as the reserve drains in. It never takes from the
-`HOME_RESERVE_GB` that every other transient was promised. The manager stays at 11.55: `ns.read` is
-0 GB. Kill and run happen with no await between them, so the manager cannot dispatch into the gap.
+`STANEK_RESERVE_FILE` (`{host, want, held}` GB). Each rescan the manager resets every host's
+`staticReserve`, so a host the worker left gets its RAM back, and adds `want - held` on `host`, through
+`stanekReserve` in `scripts/config.js`. `held` is subtracted because the worker's RAM is already in
+`usedRam`. The worker starts small on the first pass, while the manager still has batches there, and
+grows as the reserve drains in. A move waits the same way: a worker on another host frees nothing on
+the new one. The manager stays at 11.55: `ns.read` is 0 GB. The pass scps the worker before every
+exec, since a bought server has no copy. Kill and exec happen with no await between them, so the
+manager cannot dispatch into the gap. Boot's off switch kills the worker on the host the file names:
+one `ps`, not a walk of the network.
 
 **An empty board is laid out; anything else is left alone.** A hand layout is never overwritten. An
 install keeps the board and clears the charges; a new BitNode clears both. `layout` packs the longest

@@ -1,8 +1,8 @@
 import { CHARGE_WORKER, CHARGE_GB, STATUS_FILE, FRAGMENT_ORDER, FRAGMENT_NAMES, BOOSTER_TYPE } from "./config.js";
-import { layout, chargePlan } from "./plan.js";
+import { layout, chargePlan, pickHost } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting } from "scripts/settings.js";
-import { HOME_RESERVE_GB, STANEK_RESERVE_FILE } from "scripts/config.js";
+import { HACKNET_HOST_PREFIX, STANEK_RESERVE_FILE } from "scripts/config.js";
 
 /**
  * Stanek's Gift: ONE pass, then exit. boot.js runs it every tick, and only
@@ -17,10 +17,11 @@ import { HOME_RESERVE_GB, STANEK_RESERVE_FILE } from "scripts/config.js";
  *   2. an EMPTY board is laid out (plan.js layout) and placed. A board with
  *      anything on it is left alone - a hand layout is never overwritten. An
  *      install keeps the board and clears the charges; a new BitNode clears both.
- *   3. the charge worker: one process on home, sized at stanek.fraction of home,
- *      restarted when it could run RELAUNCH_RATIO x its threads. Then
- *      STANEK_RESERVE_FILE tells the continuous manager how much of home to
- *      leave free for it next rescan.
+ *   3. the charge worker: one process on the largest host that is not home
+ *      (pickHost - the cores stay with the batcher, see config.js), taking the
+ *      whole of it up to stanek.maxGb, restarted when it could run
+ *      RELAUNCH_RATIO x its threads. Then STANEK_RESERVE_FILE tells the
+ *      continuous manager which host to leave free for it, and how much.
  *
  * NOTHING GOES TO THE TERMINAL. STATUS_FILE is overwritten every pass, and boot
  * copies it into its own log when it changes.
@@ -28,8 +29,9 @@ import { HOME_RESERVE_GB, STANEK_RESERVE_FILE } from "scripts/config.js";
  * Usage:  run scripts/stanek/stanek.js     (boot does this; --no-stanek opts out)
  *         cat /data/stanek.txt
  *
- * RAM: 1.60 base + run 1.00 + kill 0.50 + ps 0.20 + getServerMaxRam 0.05
- *      + getServerUsedRam 0.05 = 3.40 GB
+ * RAM: 1.60 base + run 1.00 (rpc) + exec 1.30 + scp 0.60 + kill 0.50 + ps 0.20
+ *      + scan 0.20 + hasRootAccess 0.05 + getServerMaxRam 0.05
+ *      + getServerUsedRam 0.05 = 5.55 GB
  */
 
 // ------------------------------------------------------------------ bodies ---
@@ -67,6 +69,27 @@ return n;
 
 const normPath = (p) => String(p).replace(/^\/+/, "");
 
+/**
+ * Every rooted host but home and the hacknet, with its RAM and any charge
+ * workers on it. The walk is boot's, copied for the same reason boot copies it:
+ * importing the pool's would bill names this file does not use.
+ */
+function survey(ns) {
+  const seen = new Set(["home"]);
+  const queue = ["home"];
+  for (let i = 0; i < queue.length; i++) {
+    for (const h of ns.scan(queue[i])) if (!seen.has(h)) { seen.add(h); queue.push(h); }
+  }
+  const hosts = [];
+  const workers = [];
+  for (const host of queue) {
+    for (const p of ns.ps(host)) if (normPath(p.filename) === normPath(CHARGE_WORKER)) workers.push({ ...p, host });
+    if (host === "home" || host.startsWith(HACKNET_HOST_PREFIX) || !ns.hasRootAccess(host)) continue;
+    hosts.push({ host, maxRam: ns.getServerMaxRam(host) });
+  }
+  return { hosts, workers };
+}
+
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
@@ -75,8 +98,8 @@ export async function main(ns) {
     for (const l of lines) ns.print(l);
     ns.write(STATUS_FILE, lines.join("\n") + "\n", "w");
   };
-  const reserve = (wantGb, heldGb) => {
-    const text = wantGb > 0 ? JSON.stringify({ want: wantGb, held: heldGb }) : "";
+  const reserve = (host, wantGb, heldGb) => {
+    const text = host && wantGb > 0 ? JSON.stringify({ host, want: wantGb, held: heldGb }) : "";
     if (ns.read(STANEK_RESERVE_FILE) !== text) ns.write(STANEK_RESERVE_FILE, text, "w");
   };
   const read = async () => {
@@ -89,7 +112,7 @@ export async function main(ns) {
     try { ok = await rpc(ns, ACCEPT); } catch (e) { lines.push(`WARN: accept failed - ${String(e?.message ?? e)}`); }
     if (!ok) {
       lines.push("gift not accepted - acceptGift refuses once any aug but NeuroFlux is installed or queued");
-      reserve(0, 0);
+      reserve(null, 0, 0);
       return finish();
     }
     lines.push("accepted Stanek's Gift - joined the Church of the Machine God");
@@ -118,34 +141,49 @@ export async function main(ns) {
   // Boosters cannot be charged - chargeFragment throws on one.
   const roots = board.placed.filter((f) => f.type !== BOOSTER_TYPE);
   const argv = roots.flatMap((f) => [f.x, f.y]);
-  const workers = ns.ps("home").filter((p) => normPath(p.filename) === normPath(CHARGE_WORKER));
+  const { hosts, workers } = survey(ns);
   const heldThreads = workers.reduce((n, p) => n + p.threads, 0);
+  const maxGb = setting(ns.read(SETTINGS_FILE), "stanek.maxGb");
+  const host = pickHost(hosts, workers.length === 1 ? workers[0].host : null, maxGb);
+  if (!host) {
+    lines.push("no rooted host but home to charge on yet - waiting");
+    reserve(null, 0, 0);
+    return finish();
+  }
+  const heldHere = workers.filter((p) => p.host === host).reduce((n, p) => n + p.threads, 0);
   // A board changed by hand, or a stray second copy: the worker charging the
   // wrong roots throws on the first missing one and dies anyway.
   const stale = workers.length > 1 ||
     (workers.length === 1 && workers[0].args.map(String).join(",") !== argv.map(String).join(","));
   const plan = chargePlan({
-    homeMax: ns.getServerMaxRam("home"), used: ns.getServerUsedRam("home"), heldThreads,
-    fraction: setting(ns.read(SETTINGS_FILE), "stanek.fraction"), keepGb: HOME_RESERVE_GB,
+    hostMax: ns.getServerMaxRam(host), hostUsed: ns.getServerUsedRam(host), heldHere, heldThreads, maxGb,
   });
 
-  let held = heldThreads;
+  let held = heldHere;
+  let where = workers.length === 1 ? workers[0].host : host;
   if (!roots.length || plan.act || stale) {
-    // Kill and run with NO await between: the manager is another script, and
+    // Kill and exec with NO await between: the manager is another script, and
     // it cannot be scheduled in the middle of a synchronous stretch, so the RAM
-    // the kill frees cannot be dispatched into before the run takes it.
+    // the kill frees cannot be dispatched into before the exec takes it. scp
+    // first, every time: a cloud server bought or a host rooted since has no copy.
     for (const p of workers) ns.kill(p.pid);
     held = 0;
+    where = host;
     if (roots.length && plan.threads > 0) {
-      if (ns.run(CHARGE_WORKER, plan.threads, ...argv)) held = plan.threads;
-      else lines.push(`WARN: could not start the charge worker at ${plan.threads} threads`);
+      ns.scp(CHARGE_WORKER, host, "home");
+      if (ns.exec(CHARGE_WORKER, host, plan.threads, ...argv)) held = plan.threads;
+      else lines.push(`WARN: could not start the charge worker on ${host} at ${plan.threads} threads`);
     }
+  } else if (where !== host) {
+    held = 0;
   }
-  reserve(plan.want * CHARGE_GB, held * CHARGE_GB);
+  reserve(host, plan.want * CHARGE_GB, held * CHARGE_GB);
 
   const gb = (t) => ns.format.ram(t * CHARGE_GB);
-  lines.push(`board ${board.w}x${board.h}, ${roots.length} fragment(s) charging; ` +
-    `worker (${held} of ${plan.want} threads, ${gb(held)} of ${gb(plan.want)})`);
+  const running = workers.length && !plan.act && !stale ? heldThreads : held;
+  lines.push(`board ${board.w}x${board.h}, ${roots.length} fragment(s) charging; worker on ${where}` +
+    (where !== host ? `, moving to ${host}` : "") +
+    ` (${running} threads, ${gb(running)}; wants ${plan.want}, ${gb(plan.want)})`);
   for (const f of board.placed) {
     const name = FRAGMENT_NAMES[f.id] ?? `#${f.id}`;
     lines.push(`  ${name} @${f.x},${f.y} (${f.type === BOOSTER_TYPE ? "booster" :

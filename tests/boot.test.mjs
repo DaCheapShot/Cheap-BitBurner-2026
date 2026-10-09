@@ -490,7 +490,7 @@ export const tests = {
   // like SF10, and a reserve left by an earlier node is released - otherwise the
   // manager would hold home RAM back for a worker that will never run.
   "no BN13/SF13: the stanek pass never runs, boot asks once, a stale reserve is cleared": async () => {
-    const r = await runBoot({ stanek: false, ticks: 4, files: { "/data/stanek-reserve.txt": '{"want":64,"held":0}' } });
+    const r = await runBoot({ stanek: false, ticks: 4, files: { "/data/stanek-reserve.txt": '{"host":"cloud-0","want":64,"held":0}' } });
     assert(!r.launched.includes("scripts/stanek/stanek.js"), `ran without BN13/SF13: ${r.launched}`);
     assert(r.stanekAsks === 1, `asked ${r.stanekAsks} times`);
     assert(r.store["/data/stanek-reserve.txt"] === "", "the stale reserve must be cleared");
@@ -507,10 +507,12 @@ export const tests = {
     assert(first >= 0 && sing >= 0 && first < sing, `stanek must start before sing: ${r.launched}`);
   },
 
-  "stanek.enabled off kills the charge worker and releases its home reserve": async () => {
+  // The worker lives on a cloud server, never home: boot finds it through the
+  // host the reserve file names, so switching off costs one ps, not a walk.
+  "stanek.enabled off kills the charge worker on its host and releases the reserve": async () => {
     const r = await runBoot({
-      stanek: true, ticks: 2, running: ["scripts/stanek/charge.js"],
-      files: { "/data/settings.txt": '{"stanek.enabled":0}', "/data/stanek-reserve.txt": '{"want":64,"held":64}' },
+      stanek: true, ticks: 2, workers: [{ filename: "scripts/stanek/charge.js", host: "cloud-0", threads: 512 }],
+      files: { "/data/settings.txt": '{"stanek.enabled":0}', "/data/stanek-reserve.txt": '{"host":"cloud-0","want":1024,"held":1024}' },
     });
     assert(r.killed.includes("scripts/stanek/charge.js"), `worker not killed: ${r.killed}`);
     assert(r.store["/data/stanek-reserve.txt"] === "", "the reserve must be released");
@@ -519,7 +521,11 @@ export const tests = {
 
   // Every --no-X only stops boot STARTING something; it never kills.
   "--no-stanek skips the pass and leaves a running worker alone": async () => {
-    const r = await runBoot({ stanek: true, ticks: 2, args: ["--no-stanek"], running: ["scripts/stanek/charge.js"] });
+    const r = await runBoot({
+      stanek: true, ticks: 2, args: ["--no-stanek"],
+      workers: [{ filename: "scripts/stanek/charge.js", host: "cloud-0", threads: 512 }],
+      files: { "/data/stanek-reserve.txt": '{"host":"cloud-0","want":1024,"held":1024}' },
+    });
     assert(!r.launched.includes("scripts/stanek/stanek.js"), `launched ${r.launched}`);
     assert(!r.killed.includes("scripts/stanek/charge.js"), "--no-stanek must not kill");
     assert(r.stanekAsks === 0, "nothing to ask when the pass is opted out");

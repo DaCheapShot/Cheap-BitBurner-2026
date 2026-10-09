@@ -49,8 +49,9 @@ Fill these in during a run - what broke, what had to be tuned, how long it took.
 - **BN13**: hacking level x0.25, hack exp x0.1, gift power x2, board 6x5.
   - Boot accepts the gift on its **first tick**, ahead of sing. **Do not buy or install an aug by hand
     before that.** `acceptGift` refuses once any aug but NeuroFlux is owned or queued.
-  - The charge worker gets `stanek.fraction` (default 0.25) of home. Raise it with
-    `run scripts/set.js stanek.fraction 0.5`; the manager hands the RAM over within a rescan.
+  - The charge worker takes the whole of the largest server that is not home, up to 64 TB
+    (`run scripts/set.js stanek.maxGb <GB>`). Home's cores stay with the batcher. It waits until a
+    rooted server besides home exists, then moves up as cloud buys bigger ones.
   - Check `cat /data/stanek.txt` for each fragment's effect. A live run should confirm the manager log
     shows no new "no room" back-offs once the reserve kicks in.
 

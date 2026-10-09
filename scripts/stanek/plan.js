@@ -130,20 +130,41 @@ export function layout(w, h, defs, order) {
 }
 
 /**
+ * The host for the charge worker: the largest (ties to the lower name), but the
+ * one already running it is kept until the largest would give RELAUNCH_RATIO
+ * times its capped size. That is the same bar chargePlan restarts on, and it
+ * has to be: switch on a smaller gain and the reserve drains a host the worker
+ * never moves to, for good. It also stops two 1 PB servers trading the worker.
+ * Moving costs nothing earned: highestCharge and numCharge live in the game.
+ *
+ * @param {{host: string, maxRam: number}[]} hosts rooted, home and hacknet already out
+ * @param {string|null} current where the worker runs now
+ * @returns {string|null}
+ */
+export function pickHost(hosts, current, maxGb) {
+  const fit = hosts.filter((h) => h.maxRam >= CHARGE_GB);
+  if (!fit.length) return null;
+  const best = fit.reduce((a, b) => (b.maxRam > a.maxRam || (b.maxRam === a.maxRam && b.host < a.host) ? b : a));
+  const capped = (h) => Math.min(h.maxRam, maxGb);
+  const here = fit.find((h) => h.host === current);
+  return here && capped(here) * RELAUNCH_RATIO > capped(best) ? here.host : best.host;
+}
+
+/**
  * How many threads the charge worker should run, and whether to (re)start it.
  *
- * `want` is fraction x home. What can actually START is less until the manager
- * has drained home down to its reserve: home's free RAM, plus what the running
- * worker would hand back on kill, minus `keepGb` (HOME_RESERVE_GB - the room
- * every other transient on home was promised).
+ * `want` is the whole host up to `maxGb`. What can actually START is less until
+ * the manager has drained the host down to the reserve: its free RAM, plus what
+ * a worker already ON it would hand back on kill. A worker elsewhere frees
+ * nothing here, so a move waits until the new host has room for more.
  *
  * Restart when there is none and one fits, when it could run RELAUNCH_RATIO
- * times its threads, or when it holds more than is wanted now (stanek.fraction
+ * times its threads, or when it holds more than is wanted now (stanek.maxGb
  * lowered). `threads` 0 with `act` means kill and start nothing.
  */
-export function chargePlan({ homeMax, used, heldThreads, fraction, keepGb }) {
-  const want = Math.max(0, Math.floor((homeMax * fraction) / CHARGE_GB));
-  const room = homeMax - used - keepGb + heldThreads * CHARGE_GB;
+export function chargePlan({ hostMax, hostUsed, heldHere, heldThreads, maxGb }) {
+  const want = Math.max(0, Math.floor(Math.min(hostMax, maxGb) / CHARGE_GB));
+  const room = hostMax - hostUsed + heldHere * CHARGE_GB;
   const threads = Math.max(0, Math.min(want, Math.floor(room / CHARGE_GB)));
   const act = heldThreads > want ||
     (heldThreads === 0 ? threads > 0 : threads >= RELAUNCH_RATIO * heldThreads);
