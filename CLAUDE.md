@@ -1084,7 +1084,7 @@ adds it again. READ carries `canGraft` (`currentNode === 10 || ownedSF.has(10)`,
 The user's policy, all in `plan.js`: **Congruity first**, the moment entropy is above 0 and cash
 covers it. Then any other graft, **ahead of all rep work**, for an aug that is net positive -
 `graftGain`, its product over `PRIORITY_MULTS` times 0.98 on each of those eight, must beat
-the live `sing.graftMin` (default 1.5, the aug's product beating 1.765; break-even is 1) - and that **no joined faction sells** (their augs come from rep
+the live `sing.graftMin` (default 2, the aug's product beating 2.35; break-even is 1 - raised from 1.5 because that bar grafted augs too weak for their entropy) - and that **no joined faction sells** (their augs come from rep
 work and the batch, at no entropy). Cash is the throttle: at most `sing.graftCash` (0.5) of it.
 `sing.graft` switches it off. It first waited behind tier-1 work, which never runs out - ten 400k
 company grinds - so it would never have run. The pool is `getGraftableAugmentations` (GRAFTABLE,
