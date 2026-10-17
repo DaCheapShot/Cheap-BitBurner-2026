@@ -754,8 +754,8 @@ export const tests = {
     const { graftCandidates } = (await loadScripts())["sing/plan"];
     const base = {
       mults: {
-        Big: { hacking: 2 }, Mid: { hacking: 1.9 }, Weak: { hacking: 1.05 }, Owned: { hacking: 2 },
-        NeedsPre: { hacking: 3 }, Buyable: { hacking: 4 }, Donatable: { hacking: 4 },
+        Big: { hacking: 3 }, Mid: { hacking: 2.8 }, Weak: { hacking: 1.05 }, Owned: { hacking: 2 },
+        NeedsPre: { hacking: 3.5 }, Buyable: { hacking: 4 }, Donatable: { hacking: 4 },
         "violet Congruity Implant": {},
       },
       owned: ["Owned"], prereqs: { NeedsPre: ["Missing"] },
@@ -765,10 +765,10 @@ export const tests = {
       factions: ["CyberSec", "NiteSec"],
     };
     const got = graftCandidates(base).map((c) => c.aug);
-    // Net positive is not enough: 1.6 nets 1.36, under GRAFT_MIN_GAIN's 1.5.
-    const low = graftCandidates({ ...base, mults: { Low: { hacking: 1.6 } }, augsOf: {} });
+    // Net positive is not enough: 2.2 nets 1.87, under GRAFT_MIN_GAIN's 2.
+    const low = graftCandidates({ ...base, mults: { Low: { hacking: 2.2 } }, augsOf: {} });
     assert(!low.length, `under the bar: ${JSON.stringify(low)}`);
-    assert(graftCandidates({ ...base, mults: { Low: { hacking: 1.6 } }, augsOf: {}, minGain: 1 }).length === 1,
+    assert(graftCandidates({ ...base, mults: { Low: { hacking: 2.2 } }, augsOf: {}, minGain: 1 }).length === 1,
       "sing.graftMin 1 lets it through");
     assert(JSON.stringify(got) === JSON.stringify(["Big", "Mid"]), `got ${got}`);
     const withPre = graftCandidates({ ...base, owned: ["Owned", "Missing"] }).map((c) => c.aug);
@@ -810,7 +810,7 @@ export const tests = {
       // Under Sector-12's $15m invite, so no travel stop competes for the player.
       p: player({ money: 10e6 }),
       augs: { BitRunners: [{ name: "Neural Accelerator", rep: 1e5, price: 1,
-        stats: { hacking: 1.3, hacking_exp: 1.15, hacking_money: 1.2 } }] },
+        stats: { hacking: 1.5, hacking_exp: 1.3, hacking_money: 1.3 } }] },
       api: { getCurrentWork: () => cur },
       extra: {
         grafting: {
@@ -841,7 +841,7 @@ export const tests = {
       p: player({ money: 1e9, city: "Sector-12" }),
       // Sector-12 selling something is what makes its invite a stop at all.
       augs: { BitRunners: [{ name: "Neural Accelerator", rep: 1e5, price: 1,
-        stats: { hacking: 1.3, hacking_exp: 1.15, hacking_money: 1.2 } }],
+        stats: { hacking: 1.5, hacking_exp: 1.3, hacking_money: 1.3 } }],
         "Sector-12": [{ name: "CashRoot Starter Kit", rep: 1e12, price: 1 }] },
       api: { getCurrentWork: () => cur },
       extra: {
@@ -900,7 +900,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
   "grafts.js lists Congruity first, then sing's order, and says what it cut": async () => {
     const mods = await loadScripts();
     const stats = {
-      Big: { hacking: 2 }, Mid: { hacking: 1.9 }, Weak: { hacking: 1.05 }, Buyable: { hacking: 4 },
+      Big: { hacking: 3 }, Mid: { hacking: 2.8 }, Weak: { hacking: 1.05 }, Buyable: { hacking: 4 },
       NeedsPre: { hacking: 3 }, "violet Congruity Implant": {},
     };
     const ns = makeNs({
@@ -927,7 +927,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     assert(!out.includes("Weak") && !out.includes("Buyable ") && !out.includes(". NeedsPre"), out);
     // Big is 60% of cash - over sing.graftCash's 50%; Mid fits.
     assert(/Big.*over budget/.test(out) && /Mid.*affordable/.test(out), out);
-    assert(out.includes("4 over the x1.5 bar (sing.graftMin) - of those, 1 wait on a prerequisite and 1 are sold by a joined faction"), out);
+    assert(out.includes("4 over the x2 bar (sing.graftMin) - of those, 1 wait on a prerequisite and 1 are sold by a joined faction"), out);
   },
 
   "no Source-File 10: no graft call at all": async () => {

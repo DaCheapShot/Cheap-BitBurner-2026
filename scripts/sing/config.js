@@ -423,7 +423,9 @@ export const ENTROPY = 0.98;
  * Default of the live `sing.graftMin`: the least graftGain (net of the
  * graft's own entropy) worth a graft - the user's call. 1 was break-even on the tier-1 multipliers, and every graft's
  * entropy also taxes each LATER graft and every non-tier-1 multiplier, so a
- * marginal one is a loss. 1.5 net is an aug product of 1.5 / 0.98^8 = 1.765.
+ * marginal one is a loss. 2 net is an aug product of 2 / 0.98^8 = 2.35. It was
+ * 1.5 (product 1.765) until the user raised it: that bar grafted augs too weak
+ * to be worth their entropy.
  */
 export const GRAFT_MIN_GAIN = 2;
 /**
