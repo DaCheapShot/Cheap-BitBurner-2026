@@ -1,6 +1,6 @@
 import { CHARGE_WORKER, CHARGE_GB, STATUS_FILE, FRAGMENT_ORDER, FILL_ORDER, FRAGMENT_NAMES, BOOSTER_TYPE,
-         BOOST_WEIGHTS, BOOST_MIN_TOUCH, BOOST_SEARCH_NODES } from "./config.js";
-import { layout, fill, chargePlan, pickHost } from "./plan.js";
+         BOOST_WEIGHTS, BOOST_MIN_TOUCH, BOOST_SEARCH_NODES, LAYOUT_FILE } from "./config.js";
+import { bestBoard, scoreBoard, fill, chargePlan, pickHost } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting } from "scripts/settings.js";
 import { HACKNET_HOST_PREFIX, STANEK_RESERVE_FILE } from "scripts/config.js";
@@ -15,12 +15,12 @@ import { HACKNET_HOST_PREFIX, STANEK_RESERVE_FILE } from "scripts/config.js";
  *      win the race with sing's first aug batch - boot runs it before sing. And
  *      outside BN13 the first install without the gift BANS the Church for the
  *      node (Prestige.ts), so there is no second chance there either.
- *   2. an EMPTY board is laid out (plan.js layout: FRAGMENT_ORDER, then boosters
- *      where they touch 2+ of those pieces) and placed; then free cells
- *      take the first FILL_ORDER fragment that fits (plan.js fill) - on any
- *      board, hand layouts included. Add-only: nothing placed is ever moved or
- *      removed. An install keeps the board and clears the charges; a new
- *      BitNode clears both.
+ *   2. the board (plan.js bestBoard: FRAGMENT_ORDER, boosters where they touch
+ *      2+ of those pieces, then the first FILL_ORDER piece that fits). An EMPTY
+ *      board gets it. A laid-out one is REPLACED when it scores higher
+ *      (scoreBoard), while stanek.relayout is on; a gain in fillers alone is
+ *      added without a clear. Judged once per board change (LAYOUT_FILE). An
+ *      install keeps the board and clears the charges; a new BitNode clears both.
  *   3. the charge worker: one process on the largest host that is not home
  *      (pickHost - the cores stay with the batcher, see config.js), taking the
  *      whole of it up to stanek.maxGb, restarted when it could run
@@ -60,8 +60,12 @@ const placed = ns.stanek.activeFragments().map((f) => ({
 return { w: ns.stanek.giftWidth(), h: ns.stanek.giftHeight(), defs, placed };
 `;
 
-/** [[x, y, rotation, id], ...] -> how many the game accepted. */
+/**
+ * [[x, y, rotation, id], ...] -> how many the game accepted. args[1] truthy
+ * clears the board first (clearGift, 0 GB) - a relayout.
+ */
 const PLACE = `
+if (args[1]) ns.stanek.clearGift();
 let n = 0;
 for (const [x, y, r, id] of JSON.parse(args[0])) {
   try { if (ns.stanek.placeFragment(x, y, r, id)) n++; } catch (e) {}
@@ -72,6 +76,9 @@ return n;
 // -------------------------------------------------------------------- main ---
 
 const normPath = (p) => String(p).replace(/^\/+/, "");
+
+/** plan.js scoreBoard's number, read back: core pieces, booster score, fillers. */
+const scoreText = (s) => `core ${Math.floor(s / 1e6)}, boost ${Math.floor((s % 1e6) / 1e3)}, fillers ${s % 1e3}`;
 
 /**
  * Every rooted host but home and the hacknet, with its RAM and any charge
@@ -129,22 +136,53 @@ export async function main(ns) {
     return finish();
   }
 
-  // An empty board is laid out whole; then any free cells take the first of
-  // FILL_ORDER (or a missing FRAGMENT_ORDER piece) that fits. Add-only: a
-  // fragment already on the board is never moved.
-  const base = board.placed.length ? [] : layout(board.w, board.h, board.defs, FRAGMENT_ORDER,
-    { weights: BOOST_WEIGHTS, minTouch: BOOST_MIN_TOUCH, nodes: BOOST_SEARCH_NODES });
-  const want = [...base, ...fill(board.w, board.h, board.defs, [...board.placed, ...base], [...FRAGMENT_ORDER, ...FILL_ORDER])];
+  // The board. Empty: lay out the best one. Otherwise, with stanek.relayout on,
+  // REPLACE it when the best layout scores higher - removing a fragment costs
+  // little: re-placed it starts at highestCharge 0, but the worker's first
+  // charge sets that straight back (it is the biggest single call's threads),
+  // and only numCharge restarts, inside a ^0.07 factor. A gain in fillers alone
+  // is ADDED (fill) rather than paid for with a clear. Off: a non-empty board is
+  // the user's, and nothing touches it.
+  const settings = ns.read(SETTINGS_FILE);
+  const boost = { weights: BOOST_WEIGHTS, minTouch: BOOST_MIN_TOUCH, nodes: BOOST_SEARCH_NODES };
+  const score = (placed) => scoreBoard(board.w, board.h, board.defs, placed, FRAGMENT_ORDER, BOOST_WEIGHTS);
+  const signature = (b) => JSON.stringify([b.w, b.h,
+    b.placed.map((p) => [p.id, p.x, p.y, p.rotation]).sort((a, c) => a[0] - c[0] || a[1] - c[1] || a[2] - c[2])]);
+  let want = [];
+  let clear = false;
+  // The 50k-step search must not run every tick: a board already judged best
+  // is remembered by its signature until it changes.
+  const judged = !board.placed.length || ns.read(LAYOUT_FILE) === signature(board);
+  if (!board.placed.length) {
+    want = bestBoard(board.w, board.h, board.defs, FRAGMENT_ORDER, FILL_ORDER, boost);
+  } else if (setting(settings, "stanek.relayout") && !judged) {
+    const best = bestBoard(board.w, board.h, board.defs, FRAGMENT_ORDER, FILL_ORDER, boost);
+    const [now, then] = [score(board.placed), score(best)];
+    if (Math.floor(then / 1e3) > Math.floor(now / 1e3)) {
+      want = best;
+      clear = true;
+      lines.push(`relaying the ${board.w}x${board.h} board: ${scoreText(now)} -> ${scoreText(then)} ` +
+        `(highestCharge comes back on the worker's first charge; numCharge restarts)`);
+    } else if (then > now) {
+      want = fill(board.w, board.h, board.defs, board.placed, [...FRAGMENT_ORDER, ...FILL_ORDER]);
+    }
+  }
   if (want.length) {
     let n = 0;
-    try { n = await rpc(ns, PLACE, JSON.stringify(want.map((p) => [p.x, p.y, p.rotation, p.id]))); }
+    try { n = await rpc(ns, PLACE, JSON.stringify(want.map((p) => [p.x, p.y, p.rotation, p.id])), clear ? 1 : 0); }
     catch (e) { lines.push(`WARN: place failed - ${String(e?.message ?? e)}`); }
-    lines.push(`placed ${n} of ${want.length} fragments on the ${board.placed.length ? "" : "empty "}${board.w}x${board.h} board`);
+    const was = board.placed.length;
     board = await read();
     if (board.error) {
       lines.push(`WARN: could not re-read the gift - ${board.error}`);
       return finish();
     }
+    if (n < want.length) lines.push(`WARN: placed ${n} of ${want.length} fragments - retrying next pass`);
+    else lines.push(`placed ${n} fragments on the ${clear ? "cleared " : was ? "" : "empty "}${board.w}x${board.h} board`);
+    // Judged only when it all landed: a short place is retried next pass.
+    if (n === want.length) ns.write(LAYOUT_FILE, signature(board), "w");
+  } else if (board.placed.length && !judged && setting(settings, "stanek.relayout")) {
+    ns.write(LAYOUT_FILE, signature(board), "w");
   }
 
   // Boosters cannot be charged - chargeFragment throws on one.

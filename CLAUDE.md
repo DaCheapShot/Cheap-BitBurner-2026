@@ -102,6 +102,7 @@ run scripts/set.js stocks.cash 1        # BN8: the whole net worth may sit in st
 run scripts/set.js stocks.pushBonus 2   # BN8: rank stocks the batcher can push 2x ahead (default 1 = off)
 cat /data/stanek.txt                    # the gift: board, each fragment's effect, the charge worker's host and size
 run scripts/set.js stanek.maxGb 131072  # most GB the Stanek charge worker takes (default 64 TB), live
+run scripts/set.js stanek.relayout off  # keep a hand-laid Stanek board (default on: relay when better)
 run scripts/last.js /data/sleeves.log.txt  # its last 10 lines in a tail window (any file; 2nd arg = count)
 run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
 run scripts/set.js sleeve.covenantCash 0.5  # BN10: fraction of cash a Covenant sleeve/memory buy may cost
@@ -1472,8 +1473,19 @@ exec, since a bought server has no copy. Kill and exec happen with no await betw
 manager cannot dispatch into the gap. Boot's off switch kills the worker on the host the file names:
 one `ps`, not a walk of the network.
 
-**An empty board is laid out; anything else is only ADDED to.** Nothing placed is ever moved or
-removed, a hand layout included. An install keeps the board and clears the charges; a new BitNode clears
+**The board is REPLACED whenever a better layout scores higher** - the user's rule, after testing
+that a removed and re-placed fragment comes back at its old power. The source agrees in practice: `place`
+makes a fresh `ActiveFragment` (highestCharge and numCharge 0), but the effect's main term is
+`ln(highestCharge+1)` and highestCharge is the threads of the biggest single charge, which the worker's
+first call restores. Only numCharge restarts, inside a `^0.07` factor (~0.94 at 1, ~1.45 at 1000) - a
+temporary dip. `scoreBoard` ranks boards: every `FRAGMENT_ORDER` piece first, then the booster score
+(weight x distinct boosters touching, as the game pays), then fillers. `bestBoard` is what an empty
+board gets; a laid-out board is cleared (PLACE's `clearGift`, 0 GB) and relaid on any strict gain in
+the first two, and a gain in fillers alone is ADDED by `fill` instead of paying for a clear. The search
+is 50k steps, so it runs once per board change: `LAYOUT_FILE` holds the signature of the board last
+judged best. `stanek.relayout` off (live) leaves a non-empty board untouched - a hand layout; an empty
+one is still laid out. The worker needs nothing new: its argv no longer matches the roots, so the same
+pass kills and re-execs it. An install keeps the board and clears the charges; a new BitNode clears
 both. `layout` packs the longest prefix of `FRAGMENT_ORDER` (the user's hacking-first order: Hacking S
 and Z, HackingSpeed, HackingMoney, HackingGrow, Rep) with a depth-first search over cells. The empties
 are capped at the spare area, and BN13.1's 6x5 board takes all six. Every non-booster fragment is a
@@ -1485,7 +1497,7 @@ first that fits wins, and a bigger board takes more of them. Shapes come from `f
 way, by turning the matrix. **ponytail:** a short board drops from the end of the order rather than
 searching subsets.
 
-**Boosters go on a fresh board only, and only once all of `FRAGMENT_ORDER` fits** - the user's rule.
+**Boosters come only with a whole layout, and only once all of `FRAGMENT_ORDER` fits** - the user's rule.
 A booster (ids 100-107, 5 cells, limit 99) multiplies the power of each DISTINCT non-booster it
 touches by 1.1 (`StaneksGift.effect`), so its spot is its whole value. `layout` enumerates core
 packings for `BOOST_SEARCH_NODES` (50k) steps and adds boosters greedily to each: the spot whose
@@ -1495,7 +1507,7 @@ score wins. Measured on the real shapes: 6x5 takes one booster, 6x6 two, 7x6 thr
 within ~10% of 1M's score and under half a second on 7x7, where 1M froze the game 7.5 s. The board
 grows a step per SF13 level (`baseSize` = 9 + `StaneksGiftExtraSize` + SF13, w = floor(s/2+1),
 h = floor(s/2+0.6)), and a new BitNode clears it, so every level is laid out afresh. `fill` never
-places a booster, so a board already laid out never gets one.
+places a booster; a board gains one only by being relaid.
 
 READ is 7.40 GB, over sing's 6.60 ceiling: `activeFragments` alone is 5.00, and splitting off the two
 size reads would cost a round trip. Boot awaits each transient one at a time, so it never stacks with

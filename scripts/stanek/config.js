@@ -29,6 +29,13 @@ export const CHARGE_GB = 2.0;
 export const STATUS_FILE = "/data/stanek.txt";
 
 /**
+ * The signature of the last board the pass judged best (w, h, every fragment's
+ * id and root and rotation), so the layout search runs once per board change and
+ * not every tick. Any edit - by hand, an install's new node - misses it.
+ */
+export const LAYOUT_FILE = "/data/stanek-layout.txt";
+
+/**
  * Fragments to place, by id, most wanted first - the user's order, hacking
  * first: BN13 runs hacking at x0.25 and w0r1d_d43m0n at x3 difficulty.
  * Ids rather than types because Hacking has TWO fragments (0, the S, and 1, the

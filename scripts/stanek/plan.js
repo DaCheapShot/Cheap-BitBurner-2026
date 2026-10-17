@@ -193,11 +193,7 @@ function boosterSpots(w, h, defs) {
  * @returns {{score: number, list: {x, y, rotation, id}[]}}
  */
 function boostersFor(w, h, defs, core, spots, weights, minTouch) {
-  const byId = new Map(defs.map((d) => [d.id, d]));
-  const owner = new Array(w * h).fill(-1);
-  core.forEach((p, k) => {
-    for (const [cx, cy] of cells(byId.get(p.id).shape, p.rotation)) owner[(p.y + cy) * w + p.x + cx] = k;
-  });
+  const owner = ownerMap(w, h, defs, core);
   const list = [];
   let score = 0;
   for (;;) {
@@ -216,6 +212,61 @@ function boostersFor(w, h, defs, core, spots, weights, minTouch) {
     list.push({ x: best.s.x, y: best.s.y, rotation: best.s.rotation, id: best.s.id });
     score += best.gain;
   }
+}
+
+/** Board index -> index into `placed` of the piece covering it, -1 for none. Unknown ids cover nothing. */
+function ownerMap(w, h, defs, placed) {
+  const byId = new Map(defs.map((d) => [d.id, d]));
+  const owner = new Array(w * h).fill(-1);
+  placed.forEach((p, k) => {
+    const d = byId.get(p.id);
+    if (!d) return;
+    for (const [cx, cy] of cells(d.shape, p.rotation)) {
+      const [x, y] = [p.x + cx, p.y + cy];
+      if (x >= 0 && y >= 0 && x < w && y < h) owner[y * w + x] = k;
+    }
+  });
+  return owner;
+}
+
+/**
+ * One number to compare boards by, in the user's priority: every FRAGMENT_ORDER
+ * piece present first, then the booster score, then any other piece (fillers).
+ * The booster score is what the game pays - each weighted piece's weight times
+ * the DISTINCT boosters touching it - with no minTouch filter: that rule is for
+ * PLACING a booster, while a board is worth whatever it actually boosts.
+ *
+ * @param {{id, x, y, rotation}[]} placed
+ */
+export function scoreBoard(w, h, defs, placed, order, weights) {
+  const types = new Map(defs.map((d) => [d.id, d.type]));
+  const owner = ownerMap(w, h, defs, placed);
+  const touching = placed.map(() => new Set());
+  owner.forEach((k, i) => {
+    if (k < 0 || types.get(placed[k].id) !== BOOSTER_TYPE) return;
+    const [x, y] = [i % w, Math.floor(i / w)];
+    for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      const n = owner[ny * w + nx];
+      if (n >= 0 && types.get(placed[n].id) !== BOOSTER_TYPE) touching[n].add(k);
+    }
+  });
+  let core = 0;
+  let boosted = 0;
+  let others = 0;
+  placed.forEach((p, k) => {
+    if (!types.has(p.id) || types.get(p.id) === BOOSTER_TYPE) return;
+    if (order.includes(p.id)) core++;
+    else others++;
+    boosted += (weights[p.id] ?? 0) * touching[k].size;
+  });
+  return core * 1e6 + boosted * 1e3 + others;
+}
+
+/** The board this pass would lay on an empty gift: `layout` with boosters, then `fill`. */
+export function bestBoard(w, h, defs, order, fillOrder, boost) {
+  const base = layout(w, h, defs, order, boost);
+  return [...base, ...fill(w, h, defs, base, [...order, ...fillOrder])];
 }
 
 function piecesOf(defs, ids) {

@@ -75,6 +75,7 @@ function giftApi({ installed = false, augs = false, w = 6, h = 5, placed = [] } 
       const d = DEFS.find((f) => f.id === p.id);
       return { ...p, type: d.type, chargedEffect: 1 + Math.log(p.highestCharge + 1) / 60 };
     })),
+    clearGift: () => { need(); state.calls.push("clear"); state.placed = []; },
     placeFragment: (x, y, rotation, id) => {
       need();
       state.calls.push("place");
@@ -285,15 +286,50 @@ export const tests = {
     assert(r.workers.length === 1 && r.workers[0].pid === 1, "the running worker is kept, not restarted");
   },
 
-  "a hand-placed board is never re-laid, only added to": async () => {
+  "stanek.relayout off: a hand board is not touched at all": async () => {
     const mods = await loadScripts();
     const gift = giftApi({ installed: true, placed: [{ x: 2, y: 2, rotation: 1, id: 12 }] });
-    const r = await pass(mods, { gift });
-    const hand = gift.placed.find((p) => p.id === 12);
-    assert(hand && hand.x === 2 && hand.y === 2 && hand.rotation === 1, "the hand piece must stay where it was");
-    const all = covered(gift.placed);
-    assert(new Set(all.map(String)).size === all.length, "an added piece overlaps");
-    assert(r.workers[0].args.slice(0, 2).map(String).join(",") === "2,2", `charges ${r.workers[0].args}`);
+    const r = await pass(mods, { gift, store: { "/data/settings.txt": '{"stanek.relayout":0}' } });
+    assert(!gift.calls.includes("place") && !gift.calls.includes("clear"), `calls ${gift.calls}`);
+    assert(r.workers[0].args.map(String).join(",") === "2,2", `charges ${r.workers[0].args}`);
+  },
+
+  // The live BN13.1 board before boosters: six core + the hacknet filler. A
+  // booster on the Hacking pieces scores higher, so the board is replaced.
+  "a laid-out board that scores lower is cleared and relaid, once": async () => {
+    const mods = await loadScripts();
+    const { layout, fill } = mods["stanek/plan"];
+    const { FRAGMENT_ORDER, FILL_ORDER } = mods["stanek/config"];
+    const old = layout(6, 5, DEFS, FRAGMENT_ORDER);
+    const placed = [...old, ...fill(6, 5, DEFS, old, FILL_ORDER)];
+    assert(placed.length === 7, `fixture: ${JSON.stringify(placed)}`);
+    const gift = giftApi({ installed: true, placed });
+    const first = await pass(mods, { gift });
+    assert(gift.calls.includes("clear"), `calls ${gift.calls}`);
+    const ids = gift.placed.map((p) => p.id);
+    assert(FRAGMENT_ORDER.every((id) => ids.includes(id)) && ids.some((id) => id >= 100), `relaid: ${ids}`);
+    const roots = gift.placed.filter((p) => p.id < 100).flatMap((p) => [p.x, p.y]).map(String).join(",");
+    assert(first.workers.length === 1 && first.workers[0].args.map(String).join(",") === roots,
+      `worker ${JSON.stringify(first.workers)}`);
+    assert(first.status.includes("relaying"), first.status);
+    // Next tick: the board is the best one and remembered - no search, no place.
+    gift.calls.length = 0;
+    const w = first.workers[0];
+    await pass(mods, { gift, store: { ...first.store }, procs: [{ host: w.host, threads: w.threads, args: w.args }] });
+    assert(!gift.calls.includes("place") && !gift.calls.includes("clear"), `second pass: ${gift.calls}`);
+  },
+
+  "scoreBoard: all core first, then booster weight touched, then fillers": async () => {
+    const mods = await loadScripts();
+    const { scoreBoard, layout, fill } = mods["stanek/plan"];
+    const { FRAGMENT_ORDER, FILL_ORDER, BOOST_WEIGHTS, BOOST_MIN_TOUCH } = mods["stanek/config"];
+    const s = (p) => scoreBoard(6, 5, DEFS, p, FRAGMENT_ORDER, BOOST_WEIGHTS);
+    const plain = layout(6, 5, DEFS, FRAGMENT_ORDER);
+    const filled = [...plain, ...fill(6, 5, DEFS, plain, FILL_ORDER)];
+    const boosted = layout(6, 5, DEFS, FRAGMENT_ORDER, { weights: BOOST_WEIGHTS, minTouch: BOOST_MIN_TOUCH, nodes: 5e4 });
+    assert(s(boosted) > s(filled) && s(filled) > s(plain), `${s(boosted)} ${s(filled)} ${s(plain)}`);
+    assert(s(plain.slice(1)) < s(plain), "a missing core piece must cost more than any booster");
+    assert(s(boosted) % 1e6 >= 13e3, `booster score ${s(boosted)}`);
   },
 
   // Six tetrominoes leave 6 cells on BN13.1's 6x5 and 12 on BN13.2's 6x6:

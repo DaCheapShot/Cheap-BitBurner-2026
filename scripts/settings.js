@@ -104,6 +104,9 @@ export const KNOBS = {
   // worker and clears the reserve.
   "stanek.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "Stanek's Gift pass + charge worker (BN13/SF13 only)" },
   "stanek.maxGb": { def: STANEK_MAX_GB, min: 2, max: 2 ** 30, doc: "GB the Stanek charge worker takes at most - the whole largest non-home host up to this" },
+  // Read by stanek.js each pass. Off leaves a non-empty board alone entirely -
+  // a hand layout; an empty board is still laid out.
+  "stanek.relayout": { def: 1, min: 0, max: 1, bool: true, doc: "replace the Stanek board when a better layout scores higher; off leaves a hand layout alone" },
 
   "contracts.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },
   "hud.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "overview stats (hud.js)" },
