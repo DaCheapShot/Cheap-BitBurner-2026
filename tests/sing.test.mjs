@@ -985,11 +985,11 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const mods = await loadScripts();
     const { UPGRADE_EVERY, JOIN_EVERY } = mods["sing/config"];
     const { ns } = await driveSing(mods, { ticks: 4 });
-    const lines = (tag) => ns._log.filter((l) => l.includes(`  ${tag}: `));
+    const lines = (tag) => ns._log.filter((l) => l.startsWith(`${tag}: `));
     assert(lines("upgrade").length === Math.ceil(4 / UPGRADE_EVERY), `upgrade ran ${lines("upgrade").length}`);
     assert(lines("join").length === Math.ceil(4 / JOIN_EVERY), `join ran ${lines("join").length}`);
     assert(lines("work").length === 4, `work should report every tick: ${lines("work").length}`);
-    const at = (tag) => ns._log.findIndex((l) => l.includes(`  ${tag}: `));
+    const at = (tag) => ns._log.findIndex((l) => l.startsWith(`${tag}: `));
     assert(at("upgrade") < at("tor") && at("tor") < at("progs") && at("progs") < at("join") &&
       at("join") < at("work"), `dispatch order wrong: ${ns._log.join(" | ")}`);
     assert(!ns._log.some((l) => l.includes("WARN")), `a body failed: ${ns._log.filter((l) => l.includes("WARN"))}`);
@@ -1125,7 +1125,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
         },
       },
     });
-    const cityLines = r.ns._log.filter((l) => l.includes("  cities: "));
+    const cityLines = r.ns._log.filter((l) => l.startsWith("cities: "));
     assert(cityLines.length === 1, `the group must be chosen once and locked, not re-flipped: ${cityLines}`);
     assert(cityLines[0].includes("Chongqing"), `expected the east group to win and stick: ${cityLines}`);
   },
@@ -1156,7 +1156,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
         },
       },
     });
-    const cityLines = r.ns._log.filter((l) => l.includes("  cities: "));
+    const cityLines = r.ns._log.filter((l) => l.startsWith("cities: "));
     assert(cityLines.length > 0, `the group must eventually be decided: ${cityLines}`);
     assert(cityLines.at(-1).includes("cities: Chongqing"),
       `east has two priority augs against Sector-12's one - it must win once real data lands: ${cityLines}`);
@@ -1186,7 +1186,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
         },
       },
     });
-    const cityLines = r.ns._log.filter((l) => l.includes("  cities: "));
+    const cityLines = r.ns._log.filter((l) => l.startsWith("cities: "));
     assert(cityLines.length >= 2, `settling on west, then Chongqing being joined, must reopen the choice: ${cityLines}`);
     assert(cityLines.at(-1).includes("cities: Chongqing"),
       `Chongqing is joined - its group must win regardless of the earlier settle: ${cityLines}`);
@@ -1509,7 +1509,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const { SHARE_HOLD_MARKER } = mods["config"];
     const idle = await driveSing(mods, { ticks: 4 });
     assert(idle.ns._files[SHARE_HOLD_MARKER] === "hold", "no work must hold share");
-    assert(idle.ns._log.filter((l) => l.includes("  share: ")).length === 1, "said once, not per tick");
+    assert(idle.ns._log.filter((l) => l.startsWith("share: ")).length === 1, "said once, not per tick");
 
     const faction = await driveSing(mods, {
       ticks: 2, p: player({ factions: ["CyberSec"] }), files: { [SHARE_HOLD_MARKER]: "hold" }, augs: SELLS,

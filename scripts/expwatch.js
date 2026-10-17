@@ -22,7 +22,7 @@ export async function main(ns) {
     const p = ns.getPlayer();
     const rate = (p.exp.hacking - last) / seconds;
     last = p.exp.hacking;
-    ns.print(`${new Date().toLocaleTimeString()}  ${ns.format.number(rate, 2)} exp/s  ` +
+    ns.print(`${ns.format.number(rate, 2)} exp/s  ` +
       `(level ${p.skills.hacking})`);
   }
 }

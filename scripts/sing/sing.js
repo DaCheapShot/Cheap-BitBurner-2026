@@ -655,7 +655,7 @@ const NO_ACCESS = "requires Source-File 4";
 export async function main(ns) {
   ns.disableLog("ALL");
 
-  const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
+  const log = (s) => ns.print(s);
 
   /**
    * One body, and a failure that says so ONCE. "no free RAM on home" is the

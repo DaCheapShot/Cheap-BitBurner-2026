@@ -415,7 +415,7 @@ export async function main(ns) {
   const tickMsFrom = (cfgText) => pinnedTickMs ?? setting(cfgText, "boot.tick") * 1000;
   const tickMs = tickMsFrom(ns.read(SETTINGS_FILE));
 
-  const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
+  const log = (s) => ns.print(s);
 
   ns.print(
     `boot: tick${Math.round(tickMs / 1000)}s, manager target ` +

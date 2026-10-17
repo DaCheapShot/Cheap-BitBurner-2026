@@ -261,7 +261,7 @@ function equipLine(ns, e, state) {
 export async function main(ns) {
   ns.disableLog("ALL");
 
-  const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
+  const log = (s) => ns.print(s);
 
   /**
    * One body, and a failure that says so. Not fatal: early in a BitNode home
