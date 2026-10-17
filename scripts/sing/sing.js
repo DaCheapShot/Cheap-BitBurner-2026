@@ -3,7 +3,7 @@ import {
   CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
-  STUDY_MARKER, REP_WANT_MARKER, GRAFT_CITY, CONGRUITY,
+  STUDY_MARKER, REP_WANT_MARKER, GRAFT_CITY, CONGRUITY, augPriceMult,
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTargets, planAugBuys,
@@ -251,6 +251,8 @@ return {
   // Player.canAccessGrafting: canAccessBitNodeFeature(10). Every ns.grafting
   // call throws without it, so nothing graft-related runs unless this is true.
   canGraft: reset.currentNode === 10 || reset.ownedSF.has(10),
+  // Player.activeSourceFileLvl(11): it lowers the aug price ladder.
+  sf11: reset.ownedSF.get(11) ?? 0,
   inGang: ns.gang.inGang(),
   grindKarma: setting(ns.read(SETTINGS_FILE), "gang.enabled") === 1,
   idleStudy: setting(ns.read(SETTINGS_FILE), "sing.idleStudy") === 1,
@@ -923,7 +925,7 @@ export async function main(ns) {
     const force = crossesFavorBar(r, owned) || banked.length > 0;
     const planFor = (c) => planAugBuys({
       augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash: c, donate, priority, force,
-      minBatch,
+      minBatch, priceMult: augPriceMult(r.sf11),
     });
     let plan = planFor(cash);
     // The user's rule: no aug is bought while a graft runs. A batch bought now

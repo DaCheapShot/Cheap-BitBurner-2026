@@ -523,6 +523,22 @@ export const tests = {
     assert(four.buys.length === 0, "minBatch 5: four is not");
   },
 
+  // getBaseAugmentationPriceMultiplier: 1.9 x [1, 0.96, 0.94, 0.93][SF11].
+  // At SF11.3 a flat 1.9 priced the tenth aug 1.92x too dear.
+  "SF11 lowers the planned price ladder": async () => {
+    const m = await loadScripts();
+    const { planAugBuys } = m["sing/plan"];
+    const { augPriceMult } = m["sing/config"];
+    assert(augPriceMult(0) === 1.9 && Math.abs(augPriceMult(3) - 1.767) < 1e-12, "ladder by level");
+    const names = Array.from({ length: 10 }, (_, i) => `a${i}`);
+    const info = Object.fromEntries(names.map((n) => [n, { rep: 1, price: 1e6 }]));
+    const k = augPriceMult(3);
+    const full = 1e6 * (k ** 10 - 1) / (k - 1);
+    const base = { augsOf: { F: names }, owned: [], queued: 0, info, prereqs: {}, rep: { F: 1e9 }, cash: full * 1.001 };
+    assert(planAugBuys({ ...base, priceMult: k }).buys.length === 10, "SF11.3: ten fit at 1.767");
+    assert(planAugBuys(base).buys.length === 0, "flat 1.9: the same cash is short");
+  },
+
   "NeuroFlux fills the batch, each level dearer in money and rep": async () => {
     const { planAugBuys } = (await loadScripts())["sing/plan"];
     const NFG = "NeuroFlux Governor";
@@ -975,8 +991,8 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
   "READ never returns ownedSF raw": () => {
     const body = bodies().READ;
     const uses = body.match(/ownedSF[\w.]*/g) ?? [];
-    assert(uses.length > 0 && uses.every((u) => u === "ownedSF.has"),
-      `ownedSF may only be read through .has() inside the body, got ${uses}`);
+    assert(uses.length > 0 && uses.every((u) => u === "ownedSF.has" || u === "ownedSF.get"),
+      `ownedSF may only be read through .has() or .get() (a number) inside the body, got ${uses}`);
   },
 
   // ------------------------------------------------------------ the loop ----

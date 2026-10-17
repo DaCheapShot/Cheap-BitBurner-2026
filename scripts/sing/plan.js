@@ -97,12 +97,13 @@ export function repTargets(augsOf, owned, info, priority = null) {
  * @param o.priority {aug: bool} - priority augs are planned first (tier 1), each class dearest first
  * @param o.force    buy what fits even under MIN_AUG_BATCH
  * @param o.minBatch the live `sing.minAugBatch`; MIN_AUG_BATCH when omitted
+ * @param o.priceMult each queued aug's price ladder step (augPriceMult); AUG_PRICE_MULT when omitted
  * @returns {{ buys: {faction, name, cost}[], donations: {faction, amount, rep}[],
  *             batch: number, total: number, eligible: number,
  *             nfg: {faction, levels, why: "rep"|"cash", ...}|null }}
  */
 export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, donate = null, priority = null, force = false,
-  minBatch = MIN_AUG_BATCH }) {
+  minBatch = MIN_AUG_BATCH, priceMult = AUG_PRICE_MULT }) {
   // Who sells each aug, among joined factions we may buy from.
   const sellers = {};
   for (const [faction, augs] of Object.entries(augsOf)) {
@@ -144,7 +145,7 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, d
     if (!(prereqs[c.name] ?? []).every((p) => have.has(p))) continue;
     const f = cheapest(c);
     const d = lift(f, c.need);
-    const cost = c.price * AUG_PRICE_MULT ** buys.length;
+    const cost = c.price * priceMult ** buys.length;
     if (total + cost + d > cash) continue;
     if (d) {
       donated[f] = (donated[f] ?? 0) + d;
@@ -158,13 +159,13 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, d
   // Why the fill stopped, for the log. NeuroFlux looks cheap in the shop and
   // is the batch's only unlimited filler, so "best batch is 9 of 10" reads as
   // a money problem whatever actually stopped it - and it is usually rep, or
-  // the AUG_PRICE_MULT compounding that makes level k cost 1.14 x 1.9 = 2.17
+  // the priceMult compounding that makes level k cost 1.14 x 1.9 = 2.17
   // times level k-1. Naming the wrong cause is worse than naming none.
   let nfg = null;
   if (sellers[NFG] && info[NFG]) {
     const f = best(sellers[NFG]);
     for (let level = 0; ; level++) {
-      const cost = info[NFG].price * NFG_LEVEL_MULT ** level * AUG_PRICE_MULT ** buys.length;
+      const cost = info[NFG].price * NFG_LEVEL_MULT ** level * priceMult ** buys.length;
       const need = info[NFG].rep * NFG_LEVEL_MULT ** level;
       if (reach[f] < need) { nfg = { faction: f, levels: level, why: "rep", need, have: reach[f] }; break; }
       if (total + cost > cash) { nfg = { faction: f, levels: level, why: "cash", cost, left: cash - total }; break; }
