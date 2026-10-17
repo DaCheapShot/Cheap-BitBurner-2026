@@ -61,6 +61,7 @@ run scripts/boot.js --no-hacknet        # do not buy hacknet nodes or spend hash
 run scripts/boot.js --no-sleeve         # do not assign sleeve tasks
 run scripts/boot.js --no-stocks         # do not run the stock trader
 run scripts/boot.js --no-hud            # do not paint stats into the overview sidebar
+run scripts/boot.js --no-stanek         # do not run the Stanek's Gift pass (BN13/SF13 only anyway)
 ```
 
 **There is one batcher**, `scripts/continuous/`. A second, the volley-firing "shotgun"
@@ -99,6 +100,9 @@ cat /data/stocks.log.txt                # every trade with P/L, the 4S buy, warn
 run scripts/stocks/sellall.js           # close every position (sing runs it before an install)
 run scripts/set.js stocks.cash 1        # BN8: the whole net worth may sit in stocks (default 0.5)
 run scripts/set.js stocks.pushBonus 2   # BN8: rank stocks the batcher can push 2x ahead (default 1 = off)
+cat /data/stanek.txt                    # the gift: board, each fragment's effect, the charge worker's host and size
+run scripts/set.js stanek.maxGb 131072  # most GB the Stanek charge worker takes (default 64 TB), live
+run scripts/set.js stanek.relayout off  # keep a hand-laid Stanek board (default on: relay when better)
 run scripts/last.js /data/sleeves.log.txt  # its last 10 lines in a tail window (any file; 2nd arg = count)
 run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
 run scripts/set.js sleeve.covenantCash 0.5  # BN10: fraction of cash a Covenant sleeve/memory buy may cost
@@ -370,6 +374,11 @@ editor's RAM panel when one moves.
 | ↳ four bodies | transients: init, terms, read (every tick), trade | 6.60–13.60 |
 | `stocks/sellall.js` | closes every position; sing's SWEEP runs it before an install | 10.65 |
 | `hud.js` | paints income/s, stocks, worth, karma, share, RAM into the overview; boot runs it every `hud.tick` | 3.25 |
+| `stanek/config.js` | Stanek tunables, `FRAGMENT_ORDER`, paths | 0 |
+| `stanek/plan.js` | rotation (`fullAt` transcribed), board packer, host pick, worker sizing - pure | 0 |
+| `stanek/stanek.js` | entry: ONE pass then exits; boot runs it every tick before sing, BN13/SF13 only | 5.55 |
+| ↳ three bodies | transients: accept 3.60, read 7.40, place 6.60 | 3.60–7.40 |
+| `stanek/charge.js` | the charge worker: one process on the largest non-home host, charges every fragment forever | 2.00 **per thread** |
 
 `hud.js` writes into the overview's `overview-extra-hook-0/1` cells, which React never fills, so the
 rows outlive the transient - the user's rule was no new resident. Boot runs it every `hud.tick` (5 s)
@@ -1411,6 +1420,98 @@ the constants rpc at startup):
   ticks every 25 ms and the grow lands ≥ 100 ms later, and if the grow is already in nothing is
   read. `batchVerdict` takes `moneyMax − min(left)` as the take only when every return was 0;
   a full server is still a miss. Elsewhere the return is exact and wins.
+
+### Stanek's Gift (`scripts/stanek/`)
+
+Prep for BitNode 13, untested live. Self-contained like `sleeve/`: it imports `scripts/rpc.js`,
+`scripts/settings.js` and two 0 GB names from `scripts/config.js`, and boot reads three paths out of
+`stanek/config.js`. **It never runs where the gift cannot exist**: boot asks `HAS_STANEK`
+(`currentNode === 13 || ownedSF.has(13)`, 2.60) once, the `HAS_SLEEVES` shape, and without either the
+pass never starts and a stale reserve is cleared.
+
+**Accepting is a race, and boot runs the pass BEFORE sing so it wins.** `acceptGift` refuses once any
+aug but NeuroFlux is installed or queued (`canAcceptStaneksGift`), and outside BN13 the first install
+without the gift BANS the Church for the node (`Prestige.ts`). An install with the gift rejoins it. The
+pass reads the board first and accepts only when the read throws "not installed", so an installed gift
+is never re-asked. The pass is 5.55 GB, held for a few hundred ms a tick: the network walk, the host's
+RAM reads, and `scp`/`exec`/`kill` to place a worker off home.
+
+**One big worker, charging forever.** From `StaneksGift.ts` and `formulas/effect.ts`: a charge
+adds the CALLING script's `threads x coreBonus`, and the effect is
+`1 + ln(highestCharge+1)/60 x ((numCharge+1)/5)^0.07 x power x boost x StaneksGiftPowerMultiplier`
+(BN13: 2). `highestCharge` is the most threads one call brought, so the threads must be in ONE
+process on ONE host. `numCharge` keeps growing after that (x0.94 after one charge, x1.70 after ten
+thousand), so the worker never stops. It imports nothing and is not in `WORKER_LIST`, so
+`killOrphanWorkers` spares it like share.
+
+**Never on home, and that is the cores' arithmetic.** Cores enter the charge INSIDE the log: 8 cores
+(x1.4375) add `ln(1.4375)/60 x 2` = +1.2 points on a Hacking fragment. The batcher gets the same
+x1.4375 LINEARLY on every grow and weaken thread on home, so a GB reserved there costs it ~1.44 GB of
+1-core RAM. `pickHost` takes the largest rooted host that is not home or hacknet. The worker stays
+where it is until another host would give `RELAUNCH_RATIO` (1.5) x its capped size. That is the same
+bar a restart needs, and it has to be: switch hosts on a smaller gain and the reserve drains a host
+the worker never moves to. Moving loses nothing earned, because both charges live in the game. While
+home is the only host the pass waits.
+
+**The whole host, up to `stanek.maxGb` (64 TB).** Each doubling of threads adds a flat
+`ln 2/60 x 2 x ~1.5` = +3.5 points per Hacking fragment, and the batcher's income is ~linear in RAM,
+so past a fixed size the bonus stops paying for the RAM. The user picked 64 TB: about x2.4 hacking
+from the two Hacking fragments. A 128 TB server gives the worker half of itself. The worker restarts
+when it could run 1.5 x its threads, or when it holds more than `stanek.maxGb` now allows.
+
+**The RAM comes through the manager, never from under it.** RAM taken from a planned timeline is "no
+room" for a dispatch, and the controller reads that as "back the steal off". The pass writes
+`STANEK_RESERVE_FILE` (`{host, want, held}` GB). Every `PUSH_MS` (2 s) and every rescan the manager
+resets every host's `staticReserve`, so a host the worker left gets its RAM back, and adds `want - held`
+on `host`, through `stanekReserve` in `scripts/config.js`. At rescan alone (60 s) a live BN13 start had
+the worker sit at 0 on foodnstuff while the manager kept dispatching there; the status now says
+`waiting for the manager to drain <host>` while it does. `held` is subtracted because the worker's RAM is already in
+`usedRam`. The worker starts small on the first pass, while the manager still has batches there, and
+grows as the reserve drains in. A move waits the same way: a worker on another host frees nothing on
+the new one. The manager stays at 11.55: `ns.read` is 0 GB. The pass scps the worker before every
+exec, since a bought server has no copy. Kill and exec happen with no await between them, so the
+manager cannot dispatch into the gap. Boot's off switch kills the worker on the host the file names:
+one `ps`, not a walk of the network.
+
+**The board is REPLACED whenever a better layout scores higher** - the user's rule, after testing
+that a removed and re-placed fragment comes back at its old power. The source agrees in practice: `place`
+makes a fresh `ActiveFragment` (highestCharge and numCharge 0), but the effect's main term is
+`ln(highestCharge+1)` and highestCharge is the threads of the biggest single charge, which the worker's
+first call restores. Only numCharge restarts, inside a `^0.07` factor (~0.94 at 1, ~1.45 at 1000) - a
+temporary dip. `scoreBoard` ranks boards: every `FRAGMENT_ORDER` piece first, then the booster score
+(weight x distinct boosters touching, as the game pays), then fillers. `bestBoard` is what an empty
+board gets; a laid-out board is cleared (PLACE's `clearGift`, 0 GB) and relaid on any strict gain in
+the first two, and a gain in fillers alone is ADDED by `fill` instead of paying for a clear. The search
+is 50k steps, so it runs once per board change: `LAYOUT_FILE` holds the signature of the board last
+judged best. `stanek.relayout` off (live) leaves a non-empty board untouched - a hand layout; an empty
+one is still laid out. The worker needs nothing new: its argv no longer matches the roots, so the same
+pass kills and re-execs it. An install keeps the board and clears the charges; a new BitNode clears
+both. `layout` packs the longest prefix of `FRAGMENT_ORDER` (the user's hacking-first order: Hacking S
+and Z, HackingSpeed, HackingMoney, HackingGrow, Rep) with a depth-first search over cells. The empties
+are capped at the spare area, and BN13.1's 6x5 board takes all six. Every non-booster fragment is a
+tetromino, so six leave 6 cells: room for one more, never two. A live board left them black, so `fill`
+then puts each missing `FRAGMENT_ORDER` id and each `FILL_ORDER` id (Hacknet production I, Crime L,
+WorkMoney J - the user's order) into the free cells where it fits, one at a time, every pass - the
+first that fits wins, and a bigger board takes more of them. Shapes come from `fragmentDefinitions()` (0 GB). Rotation is
+`Fragment.fullAt` transcribed: rotation k is k quarter-turns clockwise. The test derives that a second
+way, by turning the matrix. **ponytail:** a short board drops from the end of the order rather than
+searching subsets.
+
+**Boosters come only with a whole layout, and only once all of `FRAGMENT_ORDER` fits** - the user's rule.
+A booster (ids 100-107, 5 cells, limit 99) multiplies the power of each DISTINCT non-booster it
+touches by 1.1 (`StaneksGift.effect`), so its spot is its whole value. `layout` enumerates core
+packings for `BOOST_SEARCH_NODES` (50k) steps and adds boosters greedily to each: the spot whose
+touched pieces weigh most (`BOOST_WEIGHTS`: Hacking 3, speed/money/grow 2, rep 1), only if it touches
+`BOOST_MIN_TOUCH` (2) of them - one piece is 10% of one bonus, less than a filler's whole one. Best
+score wins. Measured on the real shapes: 6x5 takes one booster, 6x6 two, 7x6 three, 7x7 four; 50k is
+within ~10% of 1M's score and under half a second on 7x7, where 1M froze the game 7.5 s. The board
+grows a step per SF13 level (`baseSize` = 9 + `StaneksGiftExtraSize` + SF13, w = floor(s/2+1),
+h = floor(s/2+0.6)), and a new BitNode clears it, so every level is laid out afresh. `fill` never
+places a booster; a board gains one only by being relaid.
+
+READ is 7.40 GB, over sing's 6.60 ceiling: `activeFragments` alone is 5.00, and splitting off the two
+size reads would cost a round trip. Boot awaits each transient one at a time, so it never stacks with
+another of the subsystem's own.
 
 ### The hacknet subsystem (`scripts/hacknet/`)
 

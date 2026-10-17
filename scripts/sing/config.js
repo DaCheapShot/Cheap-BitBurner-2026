@@ -425,7 +425,7 @@ export const ENTROPY = 0.98;
  * entropy also taxes each LATER graft and every non-tier-1 multiplier, so a
  * marginal one is a loss. 1.5 net is an aug product of 1.5 / 0.98^8 = 1.765.
  */
-export const GRAFT_MIN_GAIN = 1.5;
+export const GRAFT_MIN_GAIN = 2;
 /**
  * Graft-only (factions: []), $150t. applyAugmentation sets entropy to 0 and
  * GraftingWork.finish never adds it again - grafted the moment entropy is above

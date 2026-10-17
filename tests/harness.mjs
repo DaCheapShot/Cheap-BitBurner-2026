@@ -62,6 +62,12 @@ const NESTED = [
   "stocks/math.js",
   "stocks/stocks.js",
   "stocks/sellall.js",
+  // Stanek's Gift. plan.js is pure and holds the layout and sizing; stanek.js
+  // and the charge worker hold ns calls only inside main().
+  "stanek/config.js",
+  "stanek/plan.js",
+  "stanek/stanek.js",
+  "stanek/charge.js",
 ];
 
 /** Every .js under scripts/, as posix paths relative to it. */

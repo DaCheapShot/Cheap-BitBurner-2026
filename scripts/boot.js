@@ -1,7 +1,7 @@
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS, CLOUD_STATUS_FILE,
          WORKER_LIST,
          DEPLOY_LIST, DEPLOY_MANIFEST, SHARE_HOLD_MARKER, TARGETS_MARKER,
-         REP_WANT_MARKER, SLEEVE_FACTION_MARKER } from "./config.js";
+         REP_WANT_MARKER, SLEEVE_FACTION_MARKER, STANEK_RESERVE_FILE, stanekReserve } from "./config.js";
 // The gang supervisor's path. Same kind of import as the line above - that file
 // is constants only, no ns call anywhere in it, so this is 0 GB.
 import { GANG_SERVICE } from "./gang/config.js";
@@ -10,6 +10,7 @@ import { SING_SERVICE, GANG_KARMA_TARGET } from "./sing/config.js";
 import { SLEEVE_SERVICE, STATUS_FILE as SLEEVE_STATUS_FILE } from "./sleeve/config.js";
 import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE } from "./hacknet/config.js";
 import { STOCKS_SERVICE } from "./stocks/config.js";
+import { STANEK_SERVICE, CHARGE_WORKER, STATUS_FILE as STANEK_STATUS_FILE } from "./stanek/config.js";
 import { SETTINGS_FILE, setting, settingsLog, BOOT_TICK_S } from "./settings.js";
 import { rpc } from "./rpc.js";
 
@@ -29,6 +30,10 @@ import { rpc } from "./rpc.js";
  *                     ns.gang.inGang() and ns.heart.break() are 0 GB, so the check costs nothing on
  *                     every BitNode that will never have one. The gang
  *                     supervisor holds no gang API itself; it runs transients.
+ *   6b. stanek      - a transient, one pass per tick, BN13/SF13 only, and
+ *                     BEFORE sing: it must accept the gift before any aug is
+ *                     bought. It keeps the charge worker running on the
+ *                     largest host that is not home.
  *   7. sing         - kept alive as a service, ALWAYS. Singularity has no 0 GB
  *                     availability check, so sing.js gates itself: without
  *                     Source-File 4 it parks rather than exits.
@@ -61,6 +66,7 @@ import { rpc } from "./rpc.js";
  *         run scripts/boot.js --no-sing           (don't run the singularity supervisor)
  *         run scripts/boot.js --no-hacknet        (do not buy hacknet nodes or spend hashes)
  *         run scripts/boot.js --no-stocks         (don't run the stock trader)
+ *         run scripts/boot.js --no-stanek         (don't run the Stanek's Gift pass)
  *         run scripts/boot.js --no-hud            (don't paint stats into the overview, every hud.tick)
  *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
  *         run scripts/boot.js --targets 5         (cap the manager's target count)
@@ -307,6 +313,16 @@ return r.currentNode === 10 || r.ownedSF.has(10);
 `;
 
 /**
+ * Can Stanek's Gift exist here - BitNode 13, or Source-File 13? Asked once,
+ * like HAS_SLEEVES and for the same reasons: getResetInfo is 1.00 GB, and
+ * Source-Files only change when a BitNode ends, which restarts boot.
+ */
+const HAS_STANEK = `
+const r = ns.getResetInfo();
+return r.currentNode === 13 || r.ownedSF.has(13);
+`;
+
+/**
  * Run a script and wait for it to exit.
  *
  * Polls ns.ps rather than ns.isRunning purely to avoid paying for a second API
@@ -356,6 +372,7 @@ export async function main(ns) {
   const noSleeve = args.includes("--no-sleeve");
   const noStocks = args.includes("--no-stocks");
   const noHud = args.includes("--no-hud");
+  const noStanek = args.includes("--no-stanek");
   // sing.js holds share off whenever the player is not doing faction work, and
   // publishes the rep work sleeves take on. With sing opted out nothing would
   // ever release that hold or refresh that list, so clear both here.
@@ -370,6 +387,10 @@ export async function main(ns) {
   let hasSleeves = null;
   // The sleeve status last copied into this log, shock/sync figures stripped.
   let lastSleeveGist = null;
+  // Whether Stanek's Gift can exist here; null until asked (see the stanek step).
+  let hasStanek = null;
+  // The stanek status last copied into this log, charge figures stripped.
+  let lastStanekGist = null;
   // The cloud status last copied into this log, $ figures stripped.
   let lastCloudGist = null;
   const noManager = args.includes("--no-manager");
@@ -547,6 +568,40 @@ export async function main(ns) {
     } else if (!noGang && (ns.gang.inGang() || ns.heart.break() <= GANG_KARMA_TARGET)) {
       killDuplicates(ns, GANG_SERVICE, log);
       ensureService(ns, GANG_SERVICE, [], log);
+    }
+    // Stanek's Gift, one pass per tick - a TRANSIENT, the sleeve shape; what it
+    // leaves running is the charge worker, on the host the reserve file names. BEFORE SING, and that is the
+    // point of its position: acceptGift refuses once any aug but NeuroFlux is
+    // installed or queued, so on a fresh node it must win the race with sing's
+    // first aug batch. Gated on BN13/SF13, asked once - without either it never
+    // runs. Switched off, the worker is killed and its home reserve released;
+    // --no-stanek only stops the pass starting, as every --no-X does.
+    const stanekOn = !noStanek && live("stanek");
+    if (stanekOn && hasStanek === null) {
+      hasStanek = await rpc(ns, HAS_STANEK).catch(() => null);
+      if (hasStanek !== null) log(hasStanek ? "stanek: BN13/SF13 - running the gift every tick" : "stanek: no BN13/SF13 - not running");
+    }
+    if (!live("stanek") || hasStanek === false) {
+      // The file names the worker's host, so off costs one ps there - not a walk
+      // of the network every tick it stays off. Cleared once, so this is once.
+      const text = ns.read(STANEK_RESERVE_FILE);
+      if (text !== "") {
+        const { host } = stanekReserve(text);
+        for (const p of host ? ns.ps(host) : []) {
+          if (normPath(p.filename) === normPath(CHARGE_WORKER) && ns.kill(p.pid)) log(`stopped the Stanek charge worker on ${host}`);
+        }
+        ns.write(STANEK_RESERVE_FILE, "", "w");
+      }
+    } else if (stanekOn && hasStanek && !isUp(ns, STANEK_SERVICE)) {
+      await runToCompletion(ns, STANEK_SERVICE, [], log);
+      // Only on a change, and the charge figures - everything in parentheses -
+      // ignored: they move every pass.
+      const status = ns.read(STANEK_STATUS_FILE).trim();
+      const gist = status.replace(/\([^)]*\)/g, "");
+      if (gist !== lastStanekGist) {
+        lastStanekGist = gist;
+        for (const l of status.split("\n")) if (l) log(`stanek: ${l}`);
+      }
     }
     // The singularity supervisor. NOT gated like the gang: there is no 0 GB
     // way to ask whether singularity is available (getResetInfo is 1.00, and

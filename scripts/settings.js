@@ -3,6 +3,7 @@ import { HACKNET_CASH_FRACTION, PAYBACK_SECONDS, HACKNET_EVERY, STUDY_LEVELS } f
 import { EQUIP_BUDGET_FRACTION, TICK_EVERY, WAR_EVERY, ASCEND_EVERY, EQUIP_EVERY } from "./gang/config.js";
 import { SLEEVE_AUG_CASH, SLEEVE_AUG_MIN, SLEEVE_COVENANT_CASH } from "./sleeve/config.js";
 import { STOCKS_CASH, PUSH_BONUS } from "./stocks/config.js";
+import { STANEK_MAX_GB } from "./stanek/config.js";
 import {
   HOME_RAM_BUDGET_FRACTION, HOME_CORES_BUDGET_FRACTION, PROG_BUDGET_FRACTION, SING_TICK_MS,
   AUTO_INSTALL, MIN_AUG_BATCH, IDLE_STUDY, GRAFT, GRAFT_CASH, GRAFT_MIN_GAIN,
@@ -33,7 +34,7 @@ export const SETTINGS_FILE = "/data/settings.txt";
 /**
  * Keys are `<script>.<knob>`, and each script's knobs stay TOGETHER here:
  * set.js lists them in this order, a group per script, and a test holds every
- * prefix contiguous. Order: gang, cloud, share, hacknet, sing, sleeve, stocks, contracts, boot.
+ * prefix contiguous. Order: gang, cloud, share, hacknet, sing, sleeve, stocks, stanek, contracts, boot.
  *
  * `<script>.enabled` is the live switch, read by boot.js every tick. Off STOPS
  * a running resident (gang, sing, stocks) and skips a transient (cloud, hacknet,
@@ -97,6 +98,15 @@ export const KNOBS = {
   "stocks.pushBonus": { def: PUSH_BONUS, min: 1, max: 100, doc: "rank multiplier on stocks the batcher can push (1 = off)" },
   "stocks.buyTix": { def: 1, min: 0, max: 1, bool: true, doc: "sing buys the TIX API (no SF8.1, not BN8) once cash is 4x its price" },
   "stocks.buy4S": { def: 1, min: 0, max: 1, bool: true, doc: "sing buys the 4S TIX API once net worth is twice its price" },
+
+  // Read by stanek.js each pass, which sizes the charge worker and publishes the
+  // reserve the manager withholds on its host next rescan. Off: boot kills the
+  // worker and clears the reserve.
+  "stanek.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "Stanek's Gift pass + charge worker (BN13/SF13 only)" },
+  "stanek.maxGb": { def: STANEK_MAX_GB, min: 2, max: 2 ** 30, doc: "GB the Stanek charge worker takes at most - the whole largest non-home host up to this" },
+  // Read by stanek.js each pass. Off leaves a non-empty board alone entirely -
+  // a hand layout; an empty board is still laid out.
+  "stanek.relayout": { def: 1, min: 0, max: 1, bool: true, doc: "replace the Stanek board when a better layout scores higher; off leaves a hand layout alone" },
 
   "contracts.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },
   "hud.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "overview stats (hud.js)" },

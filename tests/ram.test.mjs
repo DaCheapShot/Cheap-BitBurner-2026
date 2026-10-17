@@ -126,6 +126,11 @@ const COST = {
   purchase4SMarketDataTixApi: 2.5, purchaseWseAccount: 2.5, purchaseTixApi: 2.5,
   // Not functions. RamCalculations.ts resolves a ref named `window` or
   // `document` to RamCostConstants.Dom and adds it, whatever the ref really is.
+  // ns.stanek (RamCostConstants.Stanek*). The leaves are billed by bare name
+  // like everything else, so a local named `placeFragment` would cost 5.00.
+  giftWidth: 0.4, giftHeight: 0.4, chargeFragment: 0.4, fragmentDefinitions: 0,
+  activeFragments: 5, clearGift: 0, canPlaceFragment: 0.5, placeFragment: 5,
+  getFragment: 2, removeFragment: 0.15, acceptGift: 2,
   window: 25, document: 25,
 };
 const BASE = 1.6;
@@ -576,10 +581,43 @@ export const tests = {
   // boot's one body: the SF10 check, asked once per boot. getResetInfo (1.00)
   // there rather than in boot, which is pinned at 3.55 - and importing rpc.js
   // costs boot nothing, since it already pays ns.run for runToCompletion.
-  "boot's SF10 check is its only body, at 2.60": () => {
+  // HAS_STANEK is the same shape for BN13/SF13.
+  "boot's SF10 and SF13 checks are its only bodies, at 2.60 each": () => {
     const got = bodiesOf("boot");
-    assert(JSON.stringify(Object.keys(got)) === JSON.stringify(["HAS_SLEEVES"]), `boot bodies: ${Object.keys(got)}`);
-    assert(Math.abs(got.HAS_SLEEVES - 2.60) < 0.011, `HAS_SLEEVES: ${got.HAS_SLEEVES.toFixed(2)}`);
+    assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(["HAS_SLEEVES", "HAS_STANEK"]),
+      `boot bodies: ${Object.keys(got)}`);
+    for (const [name, gb] of Object.entries(got)) assert(Math.abs(gb - 2.60) < 0.011, `${name}: ${gb.toFixed(2)}`);
+  },
+
+  // Stanek's Gift. The worker is paid PER THREAD and imports nothing, like the
+  // batch workers. The pass holds only what placing the worker needs - the
+  // network walk, the host's two RAM reads, scp/exec/kill to put it on a host
+  // that is not home - and every gift call is a body. A transient, so the
+  // 5.55 is held for a few hundred ms a tick.
+  "stanek: the charge worker is 2.00 GB a thread and imports nothing": () => {
+    const ram = ramOf("stanek/charge");
+    assert(Math.abs(ram - 2.00) < 0.011, `expected 2.00 GB, got ${ram.toFixed(2)}`);
+    assert(!/\bimport\b/.test(codeOnly(readScript("stanek/charge"))), "charge.js must import nothing");
+  },
+  "stanek: the pass is 5.55 GB and its shared modules are free": () => {
+    const ram = ramOf("stanek/stanek");
+    assert(Math.abs(ram - 5.55) < 0.011, `expected 5.55 GB, got ${ram.toFixed(2)}`);
+    for (const mod of ["stanek/config", "stanek/plan"]) {
+      const r = ramOf(mod);
+      assert(Math.abs(r - BASE) < 0.011, `${mod}.js costs ${(r - BASE).toFixed(2)} GB to import; it must be 0`);
+    }
+  },
+  // READ sits over sing's 6.60 ceiling: activeFragments alone is 5.00, and the
+  // two size reads would cost a second round trip to split off. It runs inside
+  // HOME_RESERVE_GB beside nothing of its own, since boot awaits each transient.
+  "every stanek body is priced": () => {
+    const want = { ACCEPT: 3.60, READ: 7.40, PLACE: 6.60 };
+    const got = bodiesOf("stanek/stanek");
+    assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),
+      `stanek.js bodies ${Object.keys(got)} - every body must be pinned here`);
+    for (const [name, gb] of Object.entries(want)) {
+      assert(Math.abs(got[name] - gb) < 0.011, `${name} body: expected ${gb.toFixed(2)} GB, got ${got[name].toFixed(2)}`);
+    }
   },
 
   // Vanilla's formatters. Neither exists in this fork - formatting is an
@@ -618,7 +656,7 @@ export const tests = {
                          "root", "connectme",
                          "continuous/manager", "continuous/servers",
                          "gang/gang", "contracts/contracts", "sing/sing", "sleeve/sleeve",
-                         "stocks/stocks", "stocks/sellall", "hud"]) {
+                         "stocks/stocks", "stocks/sellall", "hud", "stanek/stanek"]) {
       for (const mod of closure(entry)) seen.add(mod);
     }
 
@@ -656,7 +694,7 @@ export const tests = {
                      "continuous/manager", "continuous/servers",
                      "gang/gang", "contracts/contracts", "sing/sing",
                      "hacknet/hacknet", "hacknet/hashes", "sleeve/sleeve",
-                     "stocks/stocks", "stocks/sellall", "hud"]) {
+                     "stocks/stocks", "stocks/sellall", "hud", "stanek/stanek"]) {
       for (const mod of closure(e)) entries.add(mod);
     }
 

@@ -38,6 +38,8 @@ import {
   RESCAN_MS,
   SHARE_RAM_FALLBACK,
   SHARE_WORKER,
+  STANEK_RESERVE_FILE,
+  stanekReserve,
   STEAL_FRACTION,
   STREAM_TICK_MS,
   TARGET_RAM_BUDGET,
@@ -647,6 +649,11 @@ export async function supervise(ns, math, opts) {
       nextPush = now + PUSH_MS;
       push.reload();
       for (const s of streams) s.stockDir = push.dirFor(s.host);
+      // Here as well as in rescan: at rescan alone the manager kept dispatching
+      // onto a freshly reserved host for up to RESCAN_MS, and a live BN13 start
+      // had the charge worker wait that out on top of the weaken window it
+      // already has to wait for the batches there to land.
+      applyStanekReserve(ns, pool);
     }
 
     for (const s of streams) {
@@ -699,6 +706,21 @@ export async function supervise(ns, math, opts) {
 }
 
 /**
+ * Stanek's charge worker gets its host's RAM by the manager leaving it free,
+ * never by taking it: RAM taken from under a planned timeline is "no room"
+ * for a dispatch, which the controller reads as "back the steal off". Every
+ * host is reset each call, so a worker that moved hands its old host back;
+ * freeRam reads staticReserve live, so setting it is the whole change.
+ * ns.read is 0 GB, so calling this every PUSH_MS costs nothing.
+ */
+function applyStanekReserve(ns, pool) {
+  const stanek = stanekReserve(ns.read(STANEK_RESERVE_FILE));
+  for (const s of pool.servers) {
+    s.staticReserve = (s.hostname === "home" ? HOME_RESERVE_GB : 0) + (s.hostname === stanek.host ? stanek.gb : 0);
+  }
+}
+
+/**
  * Re-decide which targets should be streaming, and start prepping the ones that
  * should be but are not ready.
  *
@@ -747,6 +769,9 @@ export function rescan(ns, math, opts) {
   if (grown.grewGb > 1) {
     log(`  pool grew ${(grown.grewGb / 1024).toFixed(2)}TB since the last rescan`);
   }
+
+  // After sync: a host sync just added is built with no reserve of its own.
+  applyStanekReserve(ns, pool);
 
   // Share BEFORE the budget, and the order is not cosmetic. Share workers exec
   // outside the reservation system and are never released, so a budget measured

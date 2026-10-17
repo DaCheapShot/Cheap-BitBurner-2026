@@ -34,7 +34,7 @@ cheaper; nodes that need a new subsystem written come after, one subsystem at a 
 | 4 | **BN12.1** The Recursion | yes - plain hacking node | Repeatable, harder each level. Vanilla SF12 starts each node with NeuroFlux levels - verify the fork's effect before farming it. |
 | 5 | **BN6.1** Like Tears in Rain | **no** - needs a Bladeburner subsystem | Bladeburner access + combat stat mults. Destroyable by hacking too, but slowly. Build `scripts/bladeburner/` first. |
 | 6 | **BN7.1** Bladeburners 2079 | reuses #5 | Bladeburner API outside BN7; 7.3 gives Blade's Simulacrum (bladeburner while working). Then take 6 and 7 to level 3. |
-| 7 | **BN13.1** They're lunatics | **no** - needs a Stanek charge script | Stanek's Gift in other nodes. Note SF7.3: Gift must be accepted BEFORE joining Bladeburner. |
+| 7 | **BN13.1** They're lunatics | yes - `stanek/`, untested live | Stanek's Gift in other nodes. Note SF7.3: Gift must be accepted BEFORE joining Bladeburner. |
 | 8 | **BN15.1** Secrets of the Dark Net | **no** - fork-specific darknet, needs new scripts | TOR + DarkscapeNavigator at start everywhere; 15.2/15.3 make charisma boost rep. The Red Pill is not in Daedalus here - sing's `RED_PILL` path will not work as-is. |
 | 9 | **BN3.1** Corporatocracy | **no** - corporation automation is a large project | Corp API everywhere; a running corp is the biggest money engine in the game. Highest payoff, highest build cost. |
 | 10 | **BN14.1** IPvGO Subnet Takeover | **no** - needs a Go player | Node Power stat mults, favor from win streaks. Lowest priority. |
@@ -45,6 +45,15 @@ to 3, then more BN12 levels.
 ## Per-node notes
 
 Fill these in during a run - what broke, what had to be tuned, how long it took.
+
+- **BN13**: hacking level x0.25, hack exp x0.1, gift power x2, board 6x5.
+  - Boot accepts the gift on its **first tick**, ahead of sing. **Do not buy or install an aug by hand
+    before that.** `acceptGift` refuses once any aug but NeuroFlux is owned or queued.
+  - The charge worker takes the whole of the largest server that is not home, up to 64 TB
+    (`run scripts/set.js stanek.maxGb <GB>`). Home's cores stay with the batcher. It waits until a
+    rooted server besides home exists, then moves up as cloud buys bigger ones.
+  - Check `cat /data/stanek.txt` for each fragment's effect. A live run should confirm the manager log
+    shows no new "no room" back-offs once the reserve kicks in.
 
 - **BN8**: hacking pays $0 (`ScriptHackMoneyGain` 0); stocks are the only income, the batcher runs
   for EXP. Starts with $250m, WSE, TIX. `run scripts/set.js stocks.cash 1` lets the whole net
