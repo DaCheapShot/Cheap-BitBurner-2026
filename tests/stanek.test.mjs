@@ -16,12 +16,19 @@ const SHAPES = {
   I: [[X, X, X, X]], J: [[X, _, _], [X, X, X]], L: [[_, _, X], [X, X, X]],
   B100: [[_, X, X], [X, X, _], [_, X, _]],
 };
+// Fragment.ts ids 101-107, the other boosters: 5 cells, limit 99, type 18.
+const BOOSTERS = [
+  [[X, X, X, X], [X, _, _, _]], [[_, X, X, X], [X, X, _, _]], [[X, X, X, _], [_, _, X, X]],
+  [[_, X, X], [_, X, _], [X, X, _]], [[_, _, X], [_, X, X], [X, X, _]],
+  [[X, _, _], [X, X, X], [X, _, _]], [[_, X, _], [X, X, X], [_, X, _]],
+].map((shape, k) => ({ id: 101 + k, shape, type: 18 }));
 const DEFS = [
   { id: 0, shape: SHAPES.S, type: 6 }, { id: 1, shape: SHAPES.Z, type: 6 },
   { id: 5, shape: SHAPES.T, type: 3 }, { id: 6, shape: SHAPES.I, type: 4 },
   { id: 7, shape: SHAPES.J, type: 5 }, { id: 25, shape: SHAPES.J, type: 14 },
   { id: 12, shape: SHAPES.L, type: 8 }, { id: 100, shape: SHAPES.B100, type: 18 },
   { id: 20, shape: SHAPES.I, type: 10 }, { id: 27, shape: SHAPES.J, type: 16 }, { id: 28, shape: SHAPES.L, type: 17 },
+  ...BOOSTERS,
 ];
 
 /**
@@ -71,7 +78,8 @@ function giftApi({ installed = false, augs = false, w = 6, h = 5, placed = [] } 
     placeFragment: (x, y, rotation, id) => {
       need();
       state.calls.push("place");
-      if (state.placed.some((p) => p.id === id)) return false;
+      // Fragment.limit: 1, boosters 99.
+      if (DEFS.find((f) => f.id === id)?.type !== 18 && state.placed.some((p) => p.id === id)) return false;
       const p = { x, y, rotation, id };
       const busy = occupied();
       const cellsOf = covered([p]);
@@ -202,7 +210,8 @@ export const tests = {
     assert(gift.placed.length === 7, `placed ${gift.placed.length}`);
     assert(r.workers.length === 1 && r.workers[0].host === "cloud-0" && r.workers[0].threads === 128,
       `workers ${JSON.stringify(r.workers)}`);
-    const roots = gift.placed.flatMap((p) => [p.x, p.y]).map(String).join(",");
+    // Boosters cannot be charged - the game throws on one.
+    const roots = gift.placed.filter((p) => p.id < 100).flatMap((p) => [p.x, p.y]).map(String).join(",");
     assert(r.workers[0].args.map(String).join(",") === roots, "the worker must charge every placed root");
     assert(JSON.stringify(reserveOf(r)) === JSON.stringify({ host: "cloud-0", want: 256, held: 256 }),
       JSON.stringify(reserveOf(r)));
@@ -287,16 +296,42 @@ export const tests = {
     assert(r.workers[0].args.slice(0, 2).map(String).join(",") === "2,2", `charges ${r.workers[0].args}`);
   },
 
-  // The live BN13.1 board: six hacking-first pieces leave 6 cells, room for one more.
-  "a fresh board takes the six, then the first FILL_ORDER piece that fits": async () => {
+  // Six tetrominoes leave 6 cells on BN13.1's 6x5 and 12 on BN13.2's 6x6:
+  // one booster, then two, each touching 2+ of the six - the user's rule.
+  "a fresh board: all six, then boosters that touch 2+ of them": async () => {
     const mods = await loadScripts();
-    const { FRAGMENT_ORDER, FILL_ORDER } = mods["stanek/config"];
-    const gift = giftApi();
-    await pass(mods, { gift });
-    const ids = gift.placed.map((p) => p.id);
-    assert(gift.placed.length === 7, `placed ${ids}`);
-    assert(FRAGMENT_ORDER.every((id) => ids.includes(id)), `core missing: ${ids}`);
-    assert(FILL_ORDER.filter((id) => ids.includes(id)).length === 1, `fill: ${ids}`);
+    const { FRAGMENT_ORDER } = mods["stanek/config"];
+    for (const [w, h, n] of [[6, 5, 1], [6, 6, 2]]) {
+      const gift = giftApi({ w, h });
+      await pass(mods, { gift });
+      const ids = gift.placed.map((p) => p.id);
+      assert(FRAGMENT_ORDER.every((id) => ids.includes(id)), `${w}x${h} core missing: ${ids}`);
+      const boosters = gift.placed.filter((p) => p.id >= 100);
+      assert(boosters.length === n, `${w}x${h} boosters: ${ids}`);
+      const all = covered(gift.placed);
+      assert(new Set(all.map(String)).size === all.length, `${w}x${h} overlap`);
+      const core = gift.placed.filter((p) => FRAGMENT_ORDER.includes(p.id));
+      for (const b of boosters) {
+        const mine = covered([b]);
+        const touched = core.filter((c) => covered([c]).some(([x, y]) =>
+          mine.some(([bx, by]) => Math.abs(bx - x) + Math.abs(by - y) === 1)));
+        assert(touched.length >= 2, `${w}x${h} booster ${JSON.stringify(b)} touches ${touched.length}`);
+      }
+    }
+  },
+
+  // One core piece can never give a booster its second neighbour.
+  "layout: no booster that touches fewer than BOOST_MIN_TOUCH pieces": async () => {
+    const mods = await loadScripts();
+    const { layout } = mods["stanek/plan"];
+    const boost = { weights: { 6: 2 }, minTouch: 2, nodes: 1e4 };
+    const got = layout(4, 4, DEFS, [6], boost);
+    assert(got.length === 1 && got[0].id === 6, `got ${JSON.stringify(got)}`);
+  },
+
+  "fill never places a booster": async () => {
+    const { fill } = (await loadScripts())["stanek/plan"];
+    assert(fill(6, 6, DEFS, [], [100, 101]).length === 0, "booster from fill");
   },
 
   // The steady state again: a full board places nothing on the next pass.

@@ -1,4 +1,5 @@
-import { CHARGE_WORKER, CHARGE_GB, STATUS_FILE, FRAGMENT_ORDER, FILL_ORDER, FRAGMENT_NAMES, BOOSTER_TYPE } from "./config.js";
+import { CHARGE_WORKER, CHARGE_GB, STATUS_FILE, FRAGMENT_ORDER, FILL_ORDER, FRAGMENT_NAMES, BOOSTER_TYPE,
+         BOOST_WEIGHTS, BOOST_MIN_TOUCH, BOOST_SEARCH_NODES } from "./config.js";
 import { layout, fill, chargePlan, pickHost } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting } from "scripts/settings.js";
@@ -14,7 +15,8 @@ import { HACKNET_HOST_PREFIX, STANEK_RESERVE_FILE } from "scripts/config.js";
  *      win the race with sing's first aug batch - boot runs it before sing. And
  *      outside BN13 the first install without the gift BANS the Church for the
  *      node (Prestige.ts), so there is no second chance there either.
- *   2. an EMPTY board is laid out (plan.js layout) and placed; then free cells
+ *   2. an EMPTY board is laid out (plan.js layout: FRAGMENT_ORDER, then boosters
+ *      where they touch 2+ of those pieces) and placed; then free cells
  *      take the first FILL_ORDER fragment that fits (plan.js fill) - on any
  *      board, hand layouts included. Add-only: nothing placed is ever moved or
  *      removed. An install keeps the board and clears the charges; a new
@@ -130,7 +132,8 @@ export async function main(ns) {
   // An empty board is laid out whole; then any free cells take the first of
   // FILL_ORDER (or a missing FRAGMENT_ORDER piece) that fits. Add-only: a
   // fragment already on the board is never moved.
-  const base = board.placed.length ? [] : layout(board.w, board.h, board.defs, FRAGMENT_ORDER);
+  const base = board.placed.length ? [] : layout(board.w, board.h, board.defs, FRAGMENT_ORDER,
+    { weights: BOOST_WEIGHTS, minTouch: BOOST_MIN_TOUCH, nodes: BOOST_SEARCH_NODES });
   const want = [...base, ...fill(board.w, board.h, board.defs, [...board.placed, ...base], [...FRAGMENT_ORDER, ...FILL_ORDER])];
   if (want.length) {
     let n = 0;

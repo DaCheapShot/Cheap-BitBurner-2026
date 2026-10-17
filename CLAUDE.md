@@ -1482,8 +1482,20 @@ then puts each missing `FRAGMENT_ORDER` id and each `FILL_ORDER` id (Hacknet pro
 WorkMoney J - the user's order) into the free cells where it fits, one at a time, every pass - the
 first that fits wins, and a bigger board takes more of them. Shapes come from `fragmentDefinitions()` (0 GB). Rotation is
 `Fragment.fullAt` transcribed: rotation k is k quarter-turns clockwise. The test derives that a second
-way, by turning the matrix. **ponytail:** no boosters, and a short board drops from the end of the
-order rather than searching subsets.
+way, by turning the matrix. **ponytail:** a short board drops from the end of the order rather than
+searching subsets.
+
+**Boosters go on a fresh board only, and only once all of `FRAGMENT_ORDER` fits** - the user's rule.
+A booster (ids 100-107, 5 cells, limit 99) multiplies the power of each DISTINCT non-booster it
+touches by 1.1 (`StaneksGift.effect`), so its spot is its whole value. `layout` enumerates core
+packings for `BOOST_SEARCH_NODES` (50k) steps and adds boosters greedily to each: the spot whose
+touched pieces weigh most (`BOOST_WEIGHTS`: Hacking 3, speed/money/grow 2, rep 1), only if it touches
+`BOOST_MIN_TOUCH` (2) of them - one piece is 10% of one bonus, less than a filler's whole one. Best
+score wins. Measured on the real shapes: 6x5 takes one booster, 6x6 two, 7x6 three, 7x7 four; 50k is
+within ~10% of 1M's score and under half a second on 7x7, where 1M froze the game 7.5 s. The board
+grows a step per SF13 level (`baseSize` = 9 + `StaneksGiftExtraSize` + SF13, w = floor(s/2+1),
+h = floor(s/2+0.6)), and a new BitNode clears it, so every level is laid out afresh. `fill` never
+places a booster, so a board already laid out never gets one.
 
 READ is 7.40 GB, over sing's 6.60 ceiling: `activeFragments` alone is 5.00, and splitting off the two
 size reads would cost a round trip. Boot awaits each transient one at a time, so it never stacks with

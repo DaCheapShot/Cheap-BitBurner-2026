@@ -56,6 +56,25 @@ export const FRAGMENT_ORDER = [0, 1, 5, 6, 7, 25];
  */
 export const FILL_ORDER = [20, 28, 27];
 
+/**
+ * Boosters (ids 100-107, 5 cells) go on a FRESH board only, and only once every
+ * FRAGMENT_ORDER piece is on it. Each multiplies the power of every distinct
+ * non-booster it touches by 1.1 (StaneksGift.effect), so where it sits is the
+ * whole value. A spot scores the summed weights of the pieces it touches - the
+ * user's: Hacking 3, speed/money/grow 2, rep 1 - and must touch at least
+ * BOOST_MIN_TOUCH of them: a booster on one piece is 10% of one bonus, less
+ * than a FILL_ORDER piece's whole one.
+ */
+export const BOOST_WEIGHTS = { 0: 3, 1: 3, 5: 2, 6: 2, 7: 2, 25: 1 };
+export const BOOST_MIN_TOUCH = 2;
+
+/**
+ * Search steps for the booster layout, which runs once per BitNode. Measured
+ * on the real shapes: 50k is within ~10% of 1M's best score on 6x6 to 7x7 and
+ * under half a second on 7x7 (1M took 7.5 s - the game freezes while it runs).
+ */
+export const BOOST_SEARCH_NODES = 50000;
+
 /** Names for the status lines, by id. A hand-placed fragment shows as #id. */
 export const FRAGMENT_NAMES = {
   0: "hacking", 1: "hacking", 5: "hack speed", 6: "hack money", 7: "grow power", 25: "rep",

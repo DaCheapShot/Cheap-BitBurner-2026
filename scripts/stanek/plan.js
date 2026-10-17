@@ -65,16 +65,22 @@ function orientations(shape) {
  * reading order: the first empty cell is either the first cell of some unplaced
  * piece, or left empty - and empties are capped at the board's spare area, which
  * is what keeps the search small (30 cells, 6 pieces, 6 spare in BN13.1).
+ *
+ * With `each`, it ENUMERATES instead: every packing goes to each(packing) and
+ * the search goes on, until `nodes` search steps are spent or each() returns
+ * true. The return value is then meaningless.
  */
-function pack(w, h, pieces, busy = new Array(w * h).fill(false)) {
+function pack(w, h, pieces, busy = new Array(w * h).fill(false), each = null, nodes = Infinity) {
   const taken = [...busy];
   const spare = taken.filter((t) => !t).length - pieces.reduce((n, p) => n + p.size, 0);
   if (spare < 0) return null;
   const used = new Array(pieces.length).fill(false);
   const out = [];
+  let steps = 0;
 
   const dfs = (pos, left, placed) => {
-    if (placed === pieces.length) return true;
+    if (++steps > nodes) return true;
+    if (placed === pieces.length) return each ? each(out.slice()) === true : true;
     while (pos < w * h && taken[pos]) pos++;
     if (pos >= w * h) return false;
     const x = pos % w;
@@ -108,21 +114,108 @@ function pack(w, h, pieces, busy = new Array(w * h).fill(false)) {
  * the longest prefix of `order` that fits. Boosters and ids the game does not
  * define are skipped.
  *
- * ponytail: no boosters, and drops from the END of the order rather than
- * searching subsets - add both when a board has room to spare.
+ * BOOSTERS, only when the WHOLE order fits (the user's rule: never a booster
+ * at the price of an important piece). Each packing the search finds - up to
+ * `boost.nodes` steps - gets boosters greedily (`boostersFor`), and the best
+ * score wins; ties keep fewer boosters, then the first found.
+ *
+ * ponytail: budgeted enumeration + greedy boosters, not a joint optimum; a
+ * short board drops from the END of the order rather than searching subsets.
+ * Upgrade path: boosters inside the DFS.
  *
  * @param {number} w gift width
  * @param {number} h gift height
  * @param {{id: number, shape: boolean[][], type: number}[]} defs fragmentDefinitions()
  * @param {number[]} order fragment ids, most wanted first
+ * @param {{weights: object, minTouch: number, nodes: number}} [boost] omitted: no boosters
  */
-export function layout(w, h, defs, order) {
+export function layout(w, h, defs, order, boost = null) {
   const pieces = piecesOf(defs, order);
+  if (boost && pieces.length) {
+    const spots = boosterSpots(w, h, defs);
+    let best = null;
+    pack(w, h, pieces, undefined, (core) => {
+      const got = boostersFor(w, h, defs, core, spots, boost.weights, boost.minTouch);
+      if (!best || got.score > best.score || (got.score === best.score && got.list.length < best.list.length)) {
+        best = { score: got.score, list: [...core, ...got.list] };
+      }
+    }, boost.nodes);
+    if (best) return best.list;
+  }
   for (let k = pieces.length; k > 0; k--) {
     const got = pack(w, h, pieces.slice(0, k));
     if (got) return got;
   }
   return [];
+}
+
+/**
+ * Every in-bounds placement of every booster shape, priced once per layout:
+ * its cells and the cells edge-adjacent to it, as board indices.
+ */
+function boosterSpots(w, h, defs) {
+  const spots = [];
+  for (const d of defs) {
+    if (d.type !== BOOSTER_TYPE) continue;
+    const seen = new Set();
+    for (let rotation = 0; rotation < 4; rotation++) {
+      const c = cells(d.shape, rotation);
+      const key = JSON.stringify(c);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      for (let y = 0; y + boxH(d.shape, rotation) <= h; y++) {
+        for (let x = 0; x + boxW(d.shape, rotation) <= w; x++) {
+          const own = c.map(([cx, cy]) => (y + cy) * w + x + cx);
+          const mine = new Set(own);
+          const near = new Set();
+          for (const i of own) {
+            const [ix, iy] = [i % w, Math.floor(i / w)];
+            for (const [nx, ny] of [[ix - 1, iy], [ix + 1, iy], [ix, iy - 1], [ix, iy + 1]]) {
+              const n = ny * w + nx;
+              if (nx >= 0 && ny >= 0 && nx < w && ny < h && !mine.has(n)) near.add(n);
+            }
+          }
+          spots.push({ x, y, rotation, id: d.id, own, near: [...near] });
+        }
+      }
+    }
+  }
+  return spots;
+}
+
+/**
+ * Boosters for one packing, greedily: the spot whose touched pieces weigh the
+ * most, among spots touching at least `minTouch` weighted pieces, until none
+ * qualifies. A booster multiplies the power of each DISTINCT non-booster it
+ * touches by 1.1 (StaneksGift.effect), so a piece touched by two counts twice.
+ * Fewer than minTouch and the cells are worth more to a FILL_ORDER piece.
+ *
+ * @returns {{score: number, list: {x, y, rotation, id}[]}}
+ */
+function boostersFor(w, h, defs, core, spots, weights, minTouch) {
+  const byId = new Map(defs.map((d) => [d.id, d]));
+  const owner = new Array(w * h).fill(-1);
+  core.forEach((p, k) => {
+    for (const [cx, cy] of cells(byId.get(p.id).shape, p.rotation)) owner[(p.y + cy) * w + p.x + cx] = k;
+  });
+  const list = [];
+  let score = 0;
+  for (;;) {
+    let best = null;
+    for (const s of spots) {
+      if (s.own.some((i) => owner[i] !== -1)) continue;
+      const touched = new Set();
+      for (const n of s.near) if (owner[n] >= 0 && (weights[core[owner[n]].id] ?? 0) > 0) touched.add(owner[n]);
+      if (touched.size < minTouch) continue;
+      let gain = 0;
+      for (const k of touched) gain += weights[core[k].id];
+      if (!best || gain > best.gain) best = { s, gain };
+    }
+    if (!best) return { score, list };
+    for (const i of best.s.own) owner[i] = -2;
+    list.push({ x: best.s.x, y: best.s.y, rotation: best.s.rotation, id: best.s.id });
+    score += best.gain;
+  }
 }
 
 function piecesOf(defs, ids) {
