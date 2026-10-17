@@ -1,5 +1,5 @@
-import { CHARGE_WORKER, CHARGE_GB, STATUS_FILE, FRAGMENT_ORDER, FRAGMENT_NAMES, BOOSTER_TYPE } from "./config.js";
-import { layout, chargePlan, pickHost } from "./plan.js";
+import { CHARGE_WORKER, CHARGE_GB, STATUS_FILE, FRAGMENT_ORDER, FILL_ORDER, FRAGMENT_NAMES, BOOSTER_TYPE } from "./config.js";
+import { layout, fill, chargePlan, pickHost } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting } from "scripts/settings.js";
 import { HACKNET_HOST_PREFIX, STANEK_RESERVE_FILE } from "scripts/config.js";
@@ -14,9 +14,11 @@ import { HACKNET_HOST_PREFIX, STANEK_RESERVE_FILE } from "scripts/config.js";
  *      win the race with sing's first aug batch - boot runs it before sing. And
  *      outside BN13 the first install without the gift BANS the Church for the
  *      node (Prestige.ts), so there is no second chance there either.
- *   2. an EMPTY board is laid out (plan.js layout) and placed. A board with
- *      anything on it is left alone - a hand layout is never overwritten. An
- *      install keeps the board and clears the charges; a new BitNode clears both.
+ *   2. an EMPTY board is laid out (plan.js layout) and placed; then free cells
+ *      take the first FILL_ORDER fragment that fits (plan.js fill) - on any
+ *      board, hand layouts included. Add-only: nothing placed is ever moved or
+ *      removed. An install keeps the board and clears the charges; a new
+ *      BitNode clears both.
  *   3. the charge worker: one process on the largest host that is not home
  *      (pickHost - the cores stay with the batcher, see config.js), taking the
  *      whole of it up to stanek.maxGb, restarted when it could run
@@ -50,7 +52,7 @@ const ACCEPT = `return ns.stanek.acceptGift();`;
 const READ = `
 const defs = ns.stanek.fragmentDefinitions().map((d) => ({ id: d.id, shape: d.shape, type: d.type }));
 const placed = ns.stanek.activeFragments().map((f) => ({
-  id: f.id, x: f.x, y: f.y, type: f.type,
+  id: f.id, x: f.x, y: f.y, rotation: f.rotation, type: f.type,
   highestCharge: f.highestCharge, numCharge: f.numCharge, effect: f.chargedEffect,
 }));
 return { w: ns.stanek.giftWidth(), h: ns.stanek.giftHeight(), defs, placed };
@@ -125,12 +127,16 @@ export async function main(ns) {
     return finish();
   }
 
-  if (!board.placed.length) {
-    const want = layout(board.w, board.h, board.defs, FRAGMENT_ORDER);
+  // An empty board is laid out whole; then any free cells take the first of
+  // FILL_ORDER (or a missing FRAGMENT_ORDER piece) that fits. Add-only: a
+  // fragment already on the board is never moved.
+  const base = board.placed.length ? [] : layout(board.w, board.h, board.defs, FRAGMENT_ORDER);
+  const want = [...base, ...fill(board.w, board.h, board.defs, [...board.placed, ...base], [...FRAGMENT_ORDER, ...FILL_ORDER])];
+  if (want.length) {
     let n = 0;
     try { n = await rpc(ns, PLACE, JSON.stringify(want.map((p) => [p.x, p.y, p.rotation, p.id]))); }
     catch (e) { lines.push(`WARN: place failed - ${String(e?.message ?? e)}`); }
-    lines.push(`placed ${n} of ${want.length} fragments on the empty ${board.w}x${board.h} board`);
+    lines.push(`placed ${n} of ${want.length} fragments on the ${board.placed.length ? "" : "empty "}${board.w}x${board.h} board`);
     board = await read();
     if (board.error) {
       lines.push(`WARN: could not re-read the gift - ${board.error}`);

@@ -43,9 +43,23 @@ export const STATUS_FILE = "/data/stanek.txt";
  */
 export const FRAGMENT_ORDER = [0, 1, 5, 6, 7, 25];
 
+/**
+ * The cells FRAGMENT_ORDER leaves free: every fragment but the boosters is a
+ * tetromino, so BN13.1's 6x5 board holds six with 6 cells spare - room for one
+ * more, never two. The FIRST of these that fits what is left goes in (plan.js
+ * fill), on a fresh board and on one already laid out, hand layouts included.
+ * Never moves anything placed. The user's order:
+ *
+ *   20  HacknetMoney   hacknet production (I)
+ *   28  Crime          crime success (L) - sing's money crimes, sleeve karma
+ *   27  WorkMoney      work money (J)
+ */
+export const FILL_ORDER = [20, 28, 27];
+
 /** Names for the status lines, by id. A hand-placed fragment shows as #id. */
 export const FRAGMENT_NAMES = {
   0: "hacking", 1: "hacking", 5: "hack speed", 6: "hack money", 7: "grow power", 25: "rep",
+  20: "hacknet", 27: "work money", 28: "crime",
 };
 
 /** FragmentTypeEnum.Booster - never charged (the game throws) and not laid out. */

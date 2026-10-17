@@ -21,6 +21,7 @@ const DEFS = [
   { id: 5, shape: SHAPES.T, type: 3 }, { id: 6, shape: SHAPES.I, type: 4 },
   { id: 7, shape: SHAPES.J, type: 5 }, { id: 25, shape: SHAPES.J, type: 14 },
   { id: 12, shape: SHAPES.L, type: 8 }, { id: 100, shape: SHAPES.B100, type: 18 },
+  { id: 20, shape: SHAPES.I, type: 10 }, { id: 27, shape: SHAPES.J, type: 16 }, { id: 28, shape: SHAPES.L, type: 17 },
 ];
 
 /**
@@ -198,7 +199,7 @@ export const tests = {
     const gift = giftApi();
     const r = await pass(mods, { gift });
     assert(gift.installed, "the gift must be accepted");
-    assert(gift.placed.length === 6, `placed ${gift.placed.length}`);
+    assert(gift.placed.length === 7, `placed ${gift.placed.length}`);
     assert(r.workers.length === 1 && r.workers[0].host === "cloud-0" && r.workers[0].threads === 128,
       `workers ${JSON.stringify(r.workers)}`);
     const roots = gift.placed.flatMap((p) => [p.x, p.y]).map(String).join(",");
@@ -275,12 +276,50 @@ export const tests = {
     assert(r.workers.length === 1 && r.workers[0].pid === 1, "the running worker is kept, not restarted");
   },
 
-  "a hand-placed board is never re-laid": async () => {
+  "a hand-placed board is never re-laid, only added to": async () => {
     const mods = await loadScripts();
     const gift = giftApi({ installed: true, placed: [{ x: 2, y: 2, rotation: 1, id: 12 }] });
     const r = await pass(mods, { gift });
-    assert(!gift.calls.includes("place"), "must not place on a board that has fragments");
-    assert(r.workers[0].args.map(String).join(",") === "2,2", `charges ${r.workers[0].args}`);
+    const hand = gift.placed.find((p) => p.id === 12);
+    assert(hand && hand.x === 2 && hand.y === 2 && hand.rotation === 1, "the hand piece must stay where it was");
+    const all = covered(gift.placed);
+    assert(new Set(all.map(String)).size === all.length, "an added piece overlaps");
+    assert(r.workers[0].args.slice(0, 2).map(String).join(",") === "2,2", `charges ${r.workers[0].args}`);
+  },
+
+  // The live BN13.1 board: six hacking-first pieces leave 6 cells, room for one more.
+  "a fresh board takes the six, then the first FILL_ORDER piece that fits": async () => {
+    const mods = await loadScripts();
+    const { FRAGMENT_ORDER, FILL_ORDER } = mods["stanek/config"];
+    const gift = giftApi();
+    await pass(mods, { gift });
+    const ids = gift.placed.map((p) => p.id);
+    assert(gift.placed.length === 7, `placed ${ids}`);
+    assert(FRAGMENT_ORDER.every((id) => ids.includes(id)), `core missing: ${ids}`);
+    assert(FILL_ORDER.filter((id) => ids.includes(id)).length === 1, `fill: ${ids}`);
+  },
+
+  // The steady state again: a full board places nothing on the next pass.
+  "a full board: no place call": async () => {
+    const mods = await loadScripts();
+    const gift = giftApi();
+    const first = await pass(mods, { gift });
+    gift.calls.length = 0;
+    await pass(mods, { gift, store: { ...first.store } });
+    assert(!gift.calls.includes("place"), `calls ${gift.calls}`);
+  },
+
+  "fill: first that fits, skips what is on the board, never two in one spot": async () => {
+    const { fill } = (await loadScripts())["stanek/plan"];
+    // 3x2: an I fits in no rotation, the L does.
+    let got = fill(3, 2, DEFS, [], [20, 28, 27]);
+    assert(got.length === 1 && got[0].id === 28, `got ${JSON.stringify(got)}`);
+    // 4x2, id 20 already along the top: 20 is skipped, the L cannot fit the 4x1
+    // row left, and the other I (6) can.
+    got = fill(4, 2, DEFS, [{ id: 20, x: 0, y: 0, rotation: 0 }], [20, 28, 6]);
+    assert(got.length === 1 && got[0].id === 6 && got[0].y === 1, `got ${JSON.stringify(got)}`);
+    const all = covered([{ id: 20, x: 0, y: 0, rotation: 0 }, ...got]);
+    assert(new Set(all.map(String)).size === all.length, "overlap");
   },
 
   // No terminal output - the sleeve pass's rule. boot carries the status.

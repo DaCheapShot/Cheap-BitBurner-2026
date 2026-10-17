@@ -1472,11 +1472,15 @@ exec, since a bought server has no copy. Kill and exec happen with no await betw
 manager cannot dispatch into the gap. Boot's off switch kills the worker on the host the file names:
 one `ps`, not a walk of the network.
 
-**An empty board is laid out; anything else is left alone.** A hand layout is never overwritten. An
-install keeps the board and clears the charges; a new BitNode clears both. `layout` packs the longest
-prefix of `FRAGMENT_ORDER` (the user's hacking-first order: Hacking S and Z, HackingSpeed, HackingMoney,
-HackingGrow, Rep) with a depth-first search over cells. The empties are capped at the spare area, and
-BN13.1's 6x5 board takes all six. Shapes come from `fragmentDefinitions()` (0 GB). Rotation is
+**An empty board is laid out; anything else is only ADDED to.** Nothing placed is ever moved or
+removed, a hand layout included. An install keeps the board and clears the charges; a new BitNode clears
+both. `layout` packs the longest prefix of `FRAGMENT_ORDER` (the user's hacking-first order: Hacking S
+and Z, HackingSpeed, HackingMoney, HackingGrow, Rep) with a depth-first search over cells. The empties
+are capped at the spare area, and BN13.1's 6x5 board takes all six. Every non-booster fragment is a
+tetromino, so six leave 6 cells: room for one more, never two. A live board left them black, so `fill`
+then puts each missing `FRAGMENT_ORDER` id and each `FILL_ORDER` id (Hacknet production I, Crime L,
+WorkMoney J - the user's order) into the free cells where it fits, one at a time, every pass - the
+first that fits wins, and a bigger board takes more of them. Shapes come from `fragmentDefinitions()` (0 GB). Rotation is
 `Fragment.fullAt` transcribed: rotation k is k quarter-turns clockwise. The test derives that a second
 way, by turning the matrix. **ponytail:** no boosters, and a short board drops from the end of the
 order rather than searching subsets.

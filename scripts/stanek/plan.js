@@ -66,10 +66,10 @@ function orientations(shape) {
  * piece, or left empty - and empties are capped at the board's spare area, which
  * is what keeps the search small (30 cells, 6 pieces, 6 spare in BN13.1).
  */
-function pack(w, h, pieces) {
-  const spare = w * h - pieces.reduce((n, p) => n + p.size, 0);
+function pack(w, h, pieces, busy = new Array(w * h).fill(false)) {
+  const taken = [...busy];
+  const spare = taken.filter((t) => !t).length - pieces.reduce((n, p) => n + p.size, 0);
   if (spare < 0) return null;
-  const taken = new Array(w * h).fill(false);
   const used = new Array(pieces.length).fill(false);
   const out = [];
 
@@ -117,16 +117,56 @@ function pack(w, h, pieces) {
  * @param {number[]} order fragment ids, most wanted first
  */
 export function layout(w, h, defs, order) {
-  const byId = new Map(defs.map((d) => [d.id, d]));
-  const pieces = order
-    .map((id) => byId.get(id))
-    .filter((d) => d && d.type !== BOOSTER_TYPE)
-    .map((d) => ({ id: d.id, size: cells(d.shape, 0).length, orients: orientations(d.shape) }));
+  const pieces = piecesOf(defs, order);
   for (let k = pieces.length; k > 0; k--) {
     const got = pack(w, h, pieces.slice(0, k));
     if (got) return got;
   }
   return [];
+}
+
+function piecesOf(defs, ids) {
+  const byId = new Map(defs.map((d) => [d.id, d]));
+  return ids
+    .map((id) => byId.get(id))
+    .filter((d) => d && d.type !== BOOSTER_TYPE)
+    .map((d) => ({ id: d.id, size: cells(d.shape, 0).length, orients: orientations(d.shape) }));
+}
+
+/**
+ * More fragments for a board that already has some: each id of `ids` not on it
+ * yet, in order, goes into the free cells if it fits there, and is skipped if
+ * not - so the order reads "first that fits". Add-only: nothing placed is
+ * moved, which is what lets this run on a hand layout too.
+ *
+ * ponytail: greedy, one piece at a time against the cells left - a repack of
+ * the whole board could fit a piece this misses. Add when a board shows it.
+ *
+ * @param {{id: number, x: number, y: number, rotation: number}[]} placed on the board now
+ * @returns {{x, y, rotation, id}[]} the new pieces only
+ */
+export function fill(w, h, defs, placed, ids) {
+  const byId = new Map(defs.map((d) => [d.id, d]));
+  const busy = new Array(w * h).fill(false);
+  const mark = (p) => {
+    for (const [cx, cy] of cells(byId.get(p.id).shape, p.rotation)) {
+      const x = p.x + cx;
+      const y = p.y + cy;
+      if (x >= 0 && y >= 0 && x < w && y < h) busy[y * w + x] = true;
+    }
+  };
+  // A hand-placed id this fork does not define is skipped, not guessed at:
+  // its cells stay "free" here and the game refuses an overlapping place.
+  for (const p of placed) if (byId.has(p.id)) mark(p);
+  const have = new Set(placed.map((p) => p.id));
+  const out = [];
+  for (const piece of piecesOf(defs, ids.filter((id) => !have.has(id)))) {
+    const got = pack(w, h, [piece], busy);
+    if (!got) continue;
+    out.push(got[0]);
+    mark(got[0]);
+  }
+  return out;
 }
 
 /**
