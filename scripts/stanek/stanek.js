@@ -155,9 +155,9 @@ export async function main(ns) {
   // wrong roots throws on the first missing one and dies anyway.
   const stale = workers.length > 1 ||
     (workers.length === 1 && workers[0].args.map(String).join(",") !== argv.map(String).join(","));
-  const plan = chargePlan({
-    hostMax: ns.getServerMaxRam(host), hostUsed: ns.getServerUsedRam(host), heldHere, heldThreads, maxGb,
-  });
+  const hostMax = ns.getServerMaxRam(host);
+  const hostUsed = ns.getServerUsedRam(host);
+  const plan = chargePlan({ hostMax, hostUsed, heldHere, heldThreads, maxGb });
 
   let held = heldHere;
   let where = workers.length === 1 ? workers[0].host : host;
@@ -184,6 +184,12 @@ export async function main(ns) {
   lines.push(`board ${board.w}x${board.h}, ${roots.length} fragment(s) charging; worker on ${where}` +
     (where !== host ? `, moving to ${host}` : "") +
     ` (${running} threads, ${gb(running)}; wants ${plan.want}, ${gb(plan.want)})`);
+  // The worker starts only in RAM the manager has let go of, and its batches on
+  // the host still have to land first - a full host is the normal first minutes.
+  if (running === 0 && plan.want > 0 && roots.length) {
+    lines.push(`  waiting for the manager to drain ${host}: ` +
+      `${ns.format.ram(Math.max(0, hostMax - hostUsed))} free of ${ns.format.ram(hostMax)}`);
+  }
   for (const f of board.placed) {
     const name = FRAGMENT_NAMES[f.id] ?? `#${f.id}`;
     lines.push(`  ${name} @${f.x},${f.y} (${f.type === BOOSTER_TYPE ? "booster" :

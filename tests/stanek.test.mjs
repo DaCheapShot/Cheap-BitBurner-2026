@@ -87,8 +87,11 @@ function giftApi({ installed = false, augs = false, w = 6, h = 5, placed = [] } 
  * ticks do. `workers` lists every charge worker on the network afterwards, with
  * its host.
  */
-async function pass(mods, { gift, store = {}, hosts = { home: 1024, "cloud-0": 256 }, procs = [] } = {}) {
+async function pass(mods, { gift, store = {}, hosts = { home: 1024, "cloud-0": 256 }, procs = [], used = {} } = {}) {
   const ns = makeNs({ files: store, hosts, extra: { stanek: gift.api } });
+  // The mock's exec does not charge RAM; `used` stands in for the manager's batches.
+  const usedRam = ns.getServerUsedRam;
+  ns.getServerUsedRam = (h) => used[h] ?? usedRam(h);
   for (const p of procs) ns.exec("scripts/stanek/charge.js", p.host, p.threads, ...p.args);
   await mods["stanek/stanek"].main(ns);
   const workers = Object.keys(hosts).flatMap((h) => ns.ps(h)).filter((p) => p.filename === "scripts/stanek/charge.js");
@@ -215,6 +218,16 @@ export const tests = {
     assert(r.workers.length === 0, "no worker on home");
     assert((r.store["/data/stanek-reserve.txt"] ?? "") === "", "nothing reserved");
     assert(r.status.includes("waiting"), r.status);
+  },
+
+  // The live BN13 start: foodnstuff full of batches, the worker silently at 0.
+  "a host the manager still fills: no worker, the whole host reserved, and the status says why": async () => {
+    const mods = await loadScripts();
+    const r = await pass(mods, { gift: giftApi(), used: { "cloud-0": 255 } });
+    assert(r.workers.length === 0, `workers ${JSON.stringify(r.workers)}`);
+    assert(JSON.stringify(reserveOf(r)) === JSON.stringify({ host: "cloud-0", want: 256, held: 0 }),
+      JSON.stringify(reserveOf(r)));
+    assert(r.status.includes("waiting for the manager to drain cloud-0"), r.status);
   },
 
   "the whole host up to 64 TB": async () => {

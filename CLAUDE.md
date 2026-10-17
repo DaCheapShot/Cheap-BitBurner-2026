@@ -1460,9 +1460,11 @@ when it could run 1.5 x its threads, or when it holds more than `stanek.maxGb` n
 
 **The RAM comes through the manager, never from under it.** RAM taken from a planned timeline is "no
 room" for a dispatch, and the controller reads that as "back the steal off". The pass writes
-`STANEK_RESERVE_FILE` (`{host, want, held}` GB). Each rescan the manager resets every host's
-`staticReserve`, so a host the worker left gets its RAM back, and adds `want - held` on `host`, through
-`stanekReserve` in `scripts/config.js`. `held` is subtracted because the worker's RAM is already in
+`STANEK_RESERVE_FILE` (`{host, want, held}` GB). Every `PUSH_MS` (2 s) and every rescan the manager
+resets every host's `staticReserve`, so a host the worker left gets its RAM back, and adds `want - held`
+on `host`, through `stanekReserve` in `scripts/config.js`. At rescan alone (60 s) a live BN13 start had
+the worker sit at 0 on foodnstuff while the manager kept dispatching there; the status now says
+`waiting for the manager to drain <host>` while it does. `held` is subtracted because the worker's RAM is already in
 `usedRam`. The worker starts small on the first pass, while the manager still has batches there, and
 grows as the reserve drains in. A move waits the same way: a worker on another host frees nothing on
 the new one. The manager stays at 11.55: `ns.read` is 0 GB. The pass scps the worker before every
