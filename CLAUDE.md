@@ -1000,7 +1000,11 @@ the invite needs employment there plus `CorpFactionRepRequirement` = 400k compan
 is skipped below hacking 225 (intern `reqdHacking` 1 + Bachman's `jobStatReqOffset` 224) rather
 than applied for every tick. Promotion is re-applying: `applyForJob` hands out the highest
 position the player qualifies for and touches only `Player.jobs`, so APPLY runs every
-`PROMOTE_EVERY` ticks mid-shift and is not an action body. Neither `applyToCompany` nor
+`PROMOTE_EVERY` ticks mid-shift and is not an action body. **APPLY covers every company
+step, not only the player's** (`jobsToApply`, one batched body): `repWant` hands a sleeve
+a company only where the player holds the job, and with only the player's own job held,
+late-node sleeves sat on money crime beside megacorp steps nobody could work. The fork has
+no job limit and an install clears them all. Neither `applyToCompany` nor
 `workForCompany` checks the city, so Bachman being in Aevum does not matter. After Bachman the
 hacking factions run HIGHEST first (Daedalus, BitRunners, The Black Hand, NiteSec, CyberSec): the
 higher shops largely cover the lower ones' augs, and each lower target drops as those are bought.

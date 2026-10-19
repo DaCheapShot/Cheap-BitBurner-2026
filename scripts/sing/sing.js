@@ -7,7 +7,7 @@ import {
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTargets, planAugBuys,
-  canDonate, bankedFavor, installForFavor, donationPerRep, bestCrime, chooseCityGroup, studyAction, repWant,
+  canDonate, bankedFavor, installForFavor, donationPerRep, bestCrime, chooseCityGroup, studyAction, repWant, jobsToApply,
   graftCandidates, chooseGraft,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
@@ -299,9 +299,14 @@ return out;
 /**
  * Hire or promote: applyForJob hands out the highest position the player
  * qualifies for, and touches nothing but Player.jobs - so it is safe mid-shift
- * and is not an action body. Returns the new job title, or null for "no".
+ * and is not an action body. One call for every job jobsToApply names:
+ * args[0] is JSON [[company, field], ...]; returns {company: new title | null}.
  */
-const APPLY = `return ns.singularity.applyToCompany(args[0], args[1]);`;
+const APPLY = `
+const out = {};
+for (const [c, f] of JSON.parse(args[0])) out[c] = ns.singularity.applyToCompany(c, f);
+return out;
+`;
 
 /**
  * Flies toward Tian Di Hui's invite or the chosen city group's - chooseTravel
@@ -1134,7 +1139,22 @@ export async function main(ns) {
       }
     }
 
-    if (r) publishWant(r);
+    // Hire at every company step, promote every PROMOTE_EVERY ticks - each rung
+    // raises the rep rate for the player AND a sleeve working there. Hires go
+    // into r.player.jobs so the want list and the player's action see them now.
+    if (r) {
+      const jobs = jobsToApply(r.player, { ...r, targets, priorityTargets, favor, favorNeed, favorGain })
+        .filter((j) => !j.employed || tick % PROMOTE_EVERY === 0);
+      const got = jobs.length ? await call("apply", APPLY, JSON.stringify(jobs.map((j) => [j.company, j.field]))) : null;
+      if (got) {
+        const hired = jobs.filter((j) => got[j.company] && !j.employed).map((j) => j.company);
+        const promoted = jobs.filter((j) => got[j.company] && j.employed).map((j) => `${j.company} (${got[j.company]})`);
+        for (const j of jobs) if (got[j.company]) r.player.jobs = { ...r.player.jobs, [j.company]: got[j.company] };
+        const parts = [hired.length && `hired at ${hired.join(", ")}`, promoted.length && `promoted at ${promoted.join(", ")}`];
+        if (parts.some(Boolean)) log(`apply: ${parts.filter(Boolean).join("; ")}`);
+      }
+      publishWant(r);
+    }
 
     // Every tick. The action body runs only on a DIFFERENCE: restarting a crime
     // resets its progress, and one longer than the tick would never complete.
@@ -1178,14 +1198,9 @@ export async function main(ns) {
         if (crime) action = { kind: "crime", crime, money: true };
       }
       const what = describe(ns, action, st);
-      // Hired first, promoted every PROMOTE_EVERY ticks after - each rung raises
-      // the company rep rate. Not hired means nothing to work at yet.
-      let hired = action.kind !== "company" || action.employed;
-      if (action.kind === "company" && (!action.employed || tick % PROMOTE_EVERY === 0)) {
-        const job = await call("apply", APPLY, action.company, action.field);
-        if (job) hired = true;
-        log(`apply: ${job ? `now ${job} at ${action.company}` : action.employed ? "no promotion yet" : `not hired at ${action.company}`}`);
-      }
+      // The apply pass above hired at every company step, this one included, and
+      // wrote it into r.player.jobs. Not hired means nothing to work at yet.
+      const hired = action.kind !== "company" || action.employed;
       // graftAugmentation throws anywhere but GRAFT_CITY: fly this tick, graft
       // the next. The current work carries on meanwhile; graftNext above keeps
       // chooseTravel from flying the player back out in between.

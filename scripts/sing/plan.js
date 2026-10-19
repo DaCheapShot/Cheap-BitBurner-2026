@@ -363,6 +363,29 @@ export function repWant(player, state) {
 }
 
 /**
+ * Every company step worth holding a job at: the companies chooseAction could
+ * work, tier 1 first, each once - hired or not. sing applies to all of them, not
+ * only the player's own, because repWant hands a sleeve a company only where the
+ * player holds the job, and late in a node the player works one company while
+ * the other megacorp steps sat with no job and so no sleeve. The game has no
+ * job limit (applyForJob just sets Player.jobs[company]) and an install clears
+ * them all. candidates() already drops a step that is done or below its hacking
+ * bar, so nothing here is applied for every tick only to be refused.
+ */
+export function jobsToApply(player, state) {
+  const tiers = state.priorityTargets ? [state.priorityTargets, state.targets] : [state.targets];
+  const out = [];
+  for (const targets of tiers) {
+    for (const { action: a } of candidates(player, state, targets)) {
+      if (a.kind === "company" && !out.some((j) => j.company === a.company)) {
+        out.push({ company: a.company, field: a.field, employed: a.employed });
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * What the player should be doing, in priority order.
  *
  * @param player  the round-tripped ns.getPlayer() object
