@@ -235,6 +235,7 @@ return joined;
  * player does not - the user's rule: the player's hours buy more as rep than
  * as ~15 h of forced Homicide. sleeve.enabled off hands it back to the player,
  * or nobody would. boot's --no-sleeve is a flag this body cannot see.
+ * sing.karma on forces the player's grind anyway, for a node where it pays.
  */
 const READ = `
 import { WORK_ORDER } from "/scripts/sing/config.js";
@@ -242,7 +243,8 @@ import { SETTINGS_FILE, setting } from "/scripts/settings.js";
 const p = ns.getPlayer();
 const reset = ns.getResetInfo();
 const sleeves = (reset.currentNode === 10 || reset.ownedSF.has(10)) &&
-  setting(ns.read(SETTINGS_FILE), "sleeve.enabled") === 1;
+  setting(ns.read(SETTINGS_FILE), "sleeve.enabled") === 1 &&
+  setting(ns.read(SETTINGS_FILE), "sing.karma") !== 1;
 const rep = {};
 const workTypes = {};
 for (const f of p.factions) {

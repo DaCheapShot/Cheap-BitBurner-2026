@@ -1700,6 +1700,8 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
       [4, new Map([[10, 1]]), "{}", false],
       [10, new Map(), "{}", false],
       [4, new Map([[10, 1]]), '{"sleeve.enabled":0}', true],
+      [10, new Map(), '{"sing.karma":1}', true],
+      [10, new Map(), '{"sing.karma":1,"gang.enabled":0}', false],
       [4, new Map(), "{}", true],
     ]) {
       const ns = makeNs({

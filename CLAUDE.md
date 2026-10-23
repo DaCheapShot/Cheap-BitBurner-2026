@@ -117,6 +117,7 @@ run scripts/set.js gang.enabled off     # live switch: boot stops gang.js next t
 run scripts/set.js hud.tick 5           # overview repaint seconds (inside boot's sleep)
 run scripts/set.js boot.tick 30         # cadences: boot.tick, sing.tick, hacknet.every, gang.*Every
 run scripts/set.js sing.autoInstall off # sing: autoInstall, idleStudy, minAugBatch, graft, graftCash, graftMin
+run scripts/set.js sing.karma on       # player grinds gang karma even with sleeves (default off)
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -990,7 +991,8 @@ combat stats serve here. There is no sing knob of its own: karma buys nothing bu
 could only disagree with the gang switch (the sleeves follow the same one). **With sleeves (BN10 /
 SF10) and `sleeve.enabled` on, the player does not grind at all** - the user's rule: the sleeves'
 karma rung does it and the player's hours go to rep. `sleeve.enabled` off hands it back; boot's
-`--no-sleeve` is a flag READ cannot see, so with it nobody grinds. It is read inside the
+`--no-sleeve` is a flag READ cannot see, so with it nobody grinds. `sing.karma` on (default off)
+forces the player's grind beside the sleeves, for a node where they alone are too slow. It is read inside the
 READ body, not by `plan.js`, so `set.js gang.enabled off` takes effect next tick, while anything the resident process imports (the cadences,
 `WORK_ORDER`) is frozen until sing restarts. The tick is 20 s and every cadence is counted in
 ticks, sized so upgrade and join run each minute and programs and promotions every two - change
