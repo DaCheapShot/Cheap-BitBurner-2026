@@ -987,7 +987,10 @@ covers the rare tick where it lands on a gang equip and a sing CRIME.
 homicides, ~15 hours even at 100% success, ahead of all rep work, while SF2 is owned and no gang
 exists. The gym goes with it - Homicide's success and the crime factions' combat bars are all the
 combat stats serve here. There is no sing knob of its own: karma buys nothing but a gang, so one
-could only disagree with the gang switch (the sleeves follow the same one). It is read inside the
+could only disagree with the gang switch (the sleeves follow the same one). **With sleeves (BN10 /
+SF10) and `sleeve.enabled` on, the player does not grind at all** - the user's rule: the sleeves'
+karma rung does it and the player's hours go to rep. `sleeve.enabled` off hands it back; boot's
+`--no-sleeve` is a flag READ cannot see, so with it nobody grinds. It is read inside the
 READ body, not by `plan.js`, so `set.js gang.enabled off` takes effect next tick, while anything the resident process imports (the cadences,
 `WORK_ORDER`) is frozen until sing restarts. The tick is 20 s and every cadence is counted in
 ticks, sized so upgrade and join run each minute and programs and promotions every two - change

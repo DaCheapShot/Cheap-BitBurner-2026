@@ -1690,4 +1690,29 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     assert(r.grindKarma === false, `grindKarma should follow gang.enabled, got ${r.grindKarma}`);
     assert(await mods["rpc"].rpc(ns, SWEEP) === -1, "autoInstall off must stop the sweep before any install");
   },
+
+  // The user's rule: with sleeves, they grind karma and the player does rep.
+  // sleeve.enabled off hands the grind back, or nobody would do it.
+  "READ hands the karma grind to sleeves when SF10 is owned and sleeves run": async () => {
+    const mods = await loadScripts();
+    const { READ } = bodies();
+    for (const [node, owned, settings, want] of [
+      [4, new Map([[10, 1]]), "{}", false],
+      [10, new Map(), "{}", false],
+      [4, new Map([[10, 1]]), '{"sleeve.enabled":0}', true],
+      [4, new Map(), "{}", true],
+    ]) {
+      const ns = makeNs({
+        files: { "/data/settings.txt": settings },
+        extra: {
+          getPlayer: () => player(),
+          getResetInfo: () => ({ currentNode: node, ownedSF: owned }),
+          gang: { inGang: () => false },
+          singularity: { getCurrentWork: () => null, getCompanyRep: () => 0 },
+        },
+      });
+      const r = await mods["rpc"].rpc(ns, READ);
+      assert(r.grindKarma === want, `BN${node} SF ${JSON.stringify([...owned])} ${settings} -> grindKarma ${r.grindKarma}`);
+    }
+  },
 };

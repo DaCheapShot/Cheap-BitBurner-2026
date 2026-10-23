@@ -230,12 +230,19 @@ return joined;
  * gang.enabled off` and the next tick stops grinding. Read resident, it would
  * be frozen until sing restarted. Karma buys nothing but a gang, so a sing
  * knob of its own could only disagree with the gang switch.
+ *
+ * With sleeves (BN10 / SF10) and their pass on, the SLEEVES grind it and the
+ * player does not - the user's rule: the player's hours buy more as rep than
+ * as ~15 h of forced Homicide. sleeve.enabled off hands it back to the player,
+ * or nobody would. boot's --no-sleeve is a flag this body cannot see.
  */
 const READ = `
 import { WORK_ORDER } from "/scripts/sing/config.js";
 import { SETTINGS_FILE, setting } from "/scripts/settings.js";
 const p = ns.getPlayer();
 const reset = ns.getResetInfo();
+const sleeves = (reset.currentNode === 10 || reset.ownedSF.has(10)) &&
+  setting(ns.read(SETTINGS_FILE), "sleeve.enabled") === 1;
 const rep = {};
 const workTypes = {};
 for (const f of p.factions) {
@@ -254,7 +261,7 @@ return {
   // Player.activeSourceFileLvl(11): it lowers the aug price ladder.
   sf11: reset.ownedSF.get(11) ?? 0,
   inGang: ns.gang.inGang(),
-  grindKarma: setting(ns.read(SETTINGS_FILE), "gang.enabled") === 1,
+  grindKarma: setting(ns.read(SETTINGS_FILE), "gang.enabled") === 1 && !sleeves,
   idleStudy: setting(ns.read(SETTINGS_FILE), "sing.idleStudy") === 1,
   rep, workTypes, companyRep,
 };
