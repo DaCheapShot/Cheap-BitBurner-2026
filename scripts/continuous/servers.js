@@ -127,12 +127,7 @@ function render(ns, ram, push) {
   const rows = buildRows(math, candidates(ns).map((h) => math.snapshot(ns, h)), ram, slice, push);
 
   ns.print("");
-  // Stamped so a window left open is visibly stale when the script has died -
-  // a frozen table and a live one look identical otherwise.
-  ns.print(
-    `=== TARGETS (${rows.length} hackable) ${new Date().toLocaleTimeString()} ` +
-      "=".repeat(18),
-  );
+  ns.print(`=== TARGETS (${rows.length} hackable) ` + "=".repeat(18));
   ns.print(
     `pool ${fmtRam(pool.totalRam)}, placeable ${fmtRam(pool.placeableRam(ram.grow))}, ` +
       `free ${fmtRam(pool.freeRam)}  =>  slice ${fmtRam(slice)} ` +

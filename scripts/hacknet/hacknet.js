@@ -36,7 +36,7 @@ import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-  const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
+  const log = (s) => ns.print(s);
   const dry = ns.args.map(String).includes("--dry-run");
 
   // Infinity for nodes, 20 for servers, straight off hasHacknetServers(). The

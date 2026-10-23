@@ -168,7 +168,7 @@ function readRefused(ns) {
 export async function main(ns) {
   ns.disableLog("ALL");
 
-  const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
+  const log = (s) => ns.print(s);
 
   /**
    * One body, and a failure that says so - in the log only. Not fatal: early in

@@ -3,11 +3,11 @@ import {
   CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
-  STUDY_MARKER, REP_WANT_MARKER, GRAFT_CITY, CONGRUITY,
+  STUDY_MARKER, REP_WANT_MARKER, GRAFT_CITY, CONGRUITY, augPriceMult,
 } from "./config.js";
 import {
   chooseAction, chooseTravel, sameAsCurrent, repTargets, planAugBuys,
-  canDonate, bankedFavor, installForFavor, donationPerRep, bestCrime, chooseCityGroup, studyAction, repWant,
+  canDonate, bankedFavor, installForFavor, donationPerRep, bestCrime, chooseCityGroup, studyAction, repWant, jobsToApply,
   graftCandidates, chooseGraft,
 } from "./plan.js";
 import { rpc } from "scripts/rpc.js";
@@ -230,12 +230,21 @@ return joined;
  * gang.enabled off` and the next tick stops grinding. Read resident, it would
  * be frozen until sing restarted. Karma buys nothing but a gang, so a sing
  * knob of its own could only disagree with the gang switch.
+ *
+ * With sleeves (BN10 / SF10) and their pass on, the SLEEVES grind it and the
+ * player does not - the user's rule: the player's hours buy more as rep than
+ * as ~15 h of forced Homicide. sleeve.enabled off hands it back to the player,
+ * or nobody would. boot's --no-sleeve is a flag this body cannot see.
+ * sing.karma on forces the player's grind anyway, for a node where it pays.
  */
 const READ = `
 import { WORK_ORDER } from "/scripts/sing/config.js";
 import { SETTINGS_FILE, setting } from "/scripts/settings.js";
 const p = ns.getPlayer();
 const reset = ns.getResetInfo();
+const sleeves = (reset.currentNode === 10 || reset.ownedSF.has(10)) &&
+  setting(ns.read(SETTINGS_FILE), "sleeve.enabled") === 1 &&
+  setting(ns.read(SETTINGS_FILE), "sing.karma") !== 1;
 const rep = {};
 const workTypes = {};
 for (const f of p.factions) {
@@ -251,8 +260,10 @@ return {
   // Player.canAccessGrafting: canAccessBitNodeFeature(10). Every ns.grafting
   // call throws without it, so nothing graft-related runs unless this is true.
   canGraft: reset.currentNode === 10 || reset.ownedSF.has(10),
+  // Player.activeSourceFileLvl(11): it lowers the aug price ladder.
+  sf11: reset.ownedSF.get(11) ?? 0,
   inGang: ns.gang.inGang(),
-  grindKarma: setting(ns.read(SETTINGS_FILE), "gang.enabled") === 1,
+  grindKarma: setting(ns.read(SETTINGS_FILE), "gang.enabled") === 1 && !sleeves,
   idleStudy: setting(ns.read(SETTINGS_FILE), "sing.idleStudy") === 1,
   rep, workTypes, companyRep,
 };
@@ -297,9 +308,14 @@ return out;
 /**
  * Hire or promote: applyForJob hands out the highest position the player
  * qualifies for, and touches nothing but Player.jobs - so it is safe mid-shift
- * and is not an action body. Returns the new job title, or null for "no".
+ * and is not an action body. One call for every job jobsToApply names:
+ * args[0] is JSON [[company, field], ...]; returns {company: new title | null}.
  */
-const APPLY = `return ns.singularity.applyToCompany(args[0], args[1]);`;
+const APPLY = `
+const out = {};
+for (const [c, f] of JSON.parse(args[0])) out[c] = ns.singularity.applyToCompany(c, f);
+return out;
+`;
 
 /**
  * Flies toward Tian Di Hui's invite or the chosen city group's - chooseTravel
@@ -655,7 +671,7 @@ const NO_ACCESS = "requires Source-File 4";
 export async function main(ns) {
   ns.disableLog("ALL");
 
-  const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
+  const log = (s) => ns.print(s);
 
   /**
    * One body, and a failure that says so ONCE. "no free RAM on home" is the
@@ -923,7 +939,7 @@ export async function main(ns) {
     const force = crossesFavorBar(r, owned) || banked.length > 0;
     const planFor = (c) => planAugBuys({
       augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash: c, donate, priority, force,
-      minBatch,
+      minBatch, priceMult: augPriceMult(r.sf11),
     });
     let plan = planFor(cash);
     // The user's rule: no aug is bought while a graft runs. A batch bought now
@@ -1132,7 +1148,22 @@ export async function main(ns) {
       }
     }
 
-    if (r) publishWant(r);
+    // Hire at every company step, promote every PROMOTE_EVERY ticks - each rung
+    // raises the rep rate for the player AND a sleeve working there. Hires go
+    // into r.player.jobs so the want list and the player's action see them now.
+    if (r) {
+      const jobs = jobsToApply(r.player, { ...r, targets, priorityTargets, favor, favorNeed, favorGain })
+        .filter((j) => !j.employed || tick % PROMOTE_EVERY === 0);
+      const got = jobs.length ? await call("apply", APPLY, JSON.stringify(jobs.map((j) => [j.company, j.field]))) : null;
+      if (got) {
+        const hired = jobs.filter((j) => got[j.company] && !j.employed).map((j) => j.company);
+        const promoted = jobs.filter((j) => got[j.company] && j.employed).map((j) => `${j.company} (${got[j.company]})`);
+        for (const j of jobs) if (got[j.company]) r.player.jobs = { ...r.player.jobs, [j.company]: got[j.company] };
+        const parts = [hired.length && `hired at ${hired.join(", ")}`, promoted.length && `promoted at ${promoted.join(", ")}`];
+        if (parts.some(Boolean)) log(`apply: ${parts.filter(Boolean).join("; ")}`);
+      }
+      publishWant(r);
+    }
 
     // Every tick. The action body runs only on a DIFFERENCE: restarting a crime
     // resets its progress, and one longer than the tick would never complete.
@@ -1176,14 +1207,9 @@ export async function main(ns) {
         if (crime) action = { kind: "crime", crime, money: true };
       }
       const what = describe(ns, action, st);
-      // Hired first, promoted every PROMOTE_EVERY ticks after - each rung raises
-      // the company rep rate. Not hired means nothing to work at yet.
-      let hired = action.kind !== "company" || action.employed;
-      if (action.kind === "company" && (!action.employed || tick % PROMOTE_EVERY === 0)) {
-        const job = await call("apply", APPLY, action.company, action.field);
-        if (job) hired = true;
-        log(`apply: ${job ? `now ${job} at ${action.company}` : action.employed ? "no promotion yet" : `not hired at ${action.company}`}`);
-      }
+      // The apply pass above hired at every company step, this one included, and
+      // wrote it into r.player.jobs. Not hired means nothing to work at yet.
+      const hired = action.kind !== "company" || action.employed;
       // graftAugmentation throws anywhere but GRAFT_CITY: fly this tick, graft
       // the next. The current work carries on meanwhile; graftNext above keeps
       // chooseTravel from flying the player back out in between.

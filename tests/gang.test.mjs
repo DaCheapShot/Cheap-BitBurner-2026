@@ -544,7 +544,7 @@ export const tests = {
     const cfg = mods["gang/config"];
     const { ns } = await driveGang(mods, { updates: 30 });
 
-    const count = (tag) => ns._log.filter((l) => l.includes(`  ${tag}: `)).length;
+    const count = (tag) => ns._log.filter((l) => l.startsWith(`${tag}: `)).length;
     assert(count("tick") === Math.floor(30 / cfg.TICK_EVERY), `tick ran ${count("tick")} times: ${ns._log}`);
     assert(count("war") === Math.floor(30 / cfg.WAR_EVERY), "war cadence");
     assert(count("ascend") === Math.floor(30 / cfg.ASCEND_EVERY), "ascend cadence");
@@ -552,8 +552,8 @@ export const tests = {
 
     // tick produces the state ascend and equip decide from, so on a pass where
     // they coincide it must go first - and none of them may find it missing.
-    const firstAscend = ns._log.findIndex((l) => l.includes("  ascend: "));
-    assert(ns._log.slice(0, firstAscend).some((l) => l.includes("  tick: ")),
+    const firstAscend = ns._log.findIndex((l) => l.startsWith("ascend: "));
+    assert(ns._log.slice(0, firstAscend).some((l) => l.startsWith("tick: ")),
       "tick must run before the bodies that read its state");
     assert(!ns._log.some((l) => l.includes("no tick yet")), `a body ran without state: ${ns._log}`);
     assert(!ns._log.some((l) => l.includes("WARN")), `a body failed: ${ns._log.filter((l) => l.includes("WARN"))}`);
@@ -568,7 +568,7 @@ export const tests = {
     const { ns } = await driveGang(mods, { updates: 20, throwIn: "getAllGangInformation" });
     assert(ns._log.some((l) => l.includes("WARN: war failed") && l.includes("getAllGangInformation exploded")),
       `the throw should be named, got ${ns._log}`);
-    const lastTick = ns._log.map((l) => l.includes("  tick: ")).lastIndexOf(true);
+    const lastTick = ns._log.map((l) => l.startsWith("tick: ")).lastIndexOf(true);
     const firstWarn = ns._log.findIndex((l) => l.includes("WARN: war failed"));
     assert(lastTick > firstWarn, "tick should keep running after war failed");
   },
@@ -606,7 +606,7 @@ export const tests = {
       updates: 5, inGang: false, args: ["--create", "Slum Snakes"],
     });
     assert(calls.includes("createGang:Slum Snakes"), `createGang should get the faction: ${calls}`);
-    assert(ns._log.some((l) => l.includes("  tick: ")), "the supervisor should run once the gang exists");
+    assert(ns._log.some((l) => l.startsWith("tick: ")), "the supervisor should run once the gang exists");
   },
 
   // What boot relies on: started with no args once karma is at the bar, it
@@ -617,7 +617,7 @@ export const tests = {
       updates: 5, inGang: false, factions: ["CyberSec", "NiteSec", "Tetrads", "Slum Snakes"],
     });
     assert(calls.includes("createGang:Slum Snakes"), `should found with Slum Snakes: ${calls}`);
-    assert(ns._log.some((l) => l.includes("  tick: ")), "the supervisor should run once the gang exists");
+    assert(ns._log.some((l) => l.startsWith("tick: ")), "the supervisor should run once the gang exists");
   },
 
   "without a joined gang faction it creates nothing and exits": async () => {

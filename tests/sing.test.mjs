@@ -523,6 +523,22 @@ export const tests = {
     assert(four.buys.length === 0, "minBatch 5: four is not");
   },
 
+  // getBaseAugmentationPriceMultiplier: 1.9 x [1, 0.96, 0.94, 0.93][SF11].
+  // At SF11.3 a flat 1.9 priced the tenth aug 1.92x too dear.
+  "SF11 lowers the planned price ladder": async () => {
+    const m = await loadScripts();
+    const { planAugBuys } = m["sing/plan"];
+    const { augPriceMult } = m["sing/config"];
+    assert(augPriceMult(0) === 1.9 && Math.abs(augPriceMult(3) - 1.767) < 1e-12, "ladder by level");
+    const names = Array.from({ length: 10 }, (_, i) => `a${i}`);
+    const info = Object.fromEntries(names.map((n) => [n, { rep: 1, price: 1e6 }]));
+    const k = augPriceMult(3);
+    const full = 1e6 * (k ** 10 - 1) / (k - 1);
+    const base = { augsOf: { F: names }, owned: [], queued: 0, info, prereqs: {}, rep: { F: 1e9 }, cash: full * 1.001 };
+    assert(planAugBuys({ ...base, priceMult: k }).buys.length === 10, "SF11.3: ten fit at 1.767");
+    assert(planAugBuys(base).buys.length === 0, "flat 1.9: the same cash is short");
+  },
+
   "NeuroFlux fills the batch, each level dearer in money and rep": async () => {
     const { planAugBuys } = (await loadScripts())["sing/plan"];
     const NFG = "NeuroFlux Governor";
@@ -975,8 +991,8 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
   "READ never returns ownedSF raw": () => {
     const body = bodies().READ;
     const uses = body.match(/ownedSF[\w.]*/g) ?? [];
-    assert(uses.length > 0 && uses.every((u) => u === "ownedSF.has"),
-      `ownedSF may only be read through .has() inside the body, got ${uses}`);
+    assert(uses.length > 0 && uses.every((u) => u === "ownedSF.has" || u === "ownedSF.get"),
+      `ownedSF may only be read through .has() or .get() (a number) inside the body, got ${uses}`);
   },
 
   // ------------------------------------------------------------ the loop ----
@@ -985,11 +1001,11 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const mods = await loadScripts();
     const { UPGRADE_EVERY, JOIN_EVERY } = mods["sing/config"];
     const { ns } = await driveSing(mods, { ticks: 4 });
-    const lines = (tag) => ns._log.filter((l) => l.includes(`  ${tag}: `));
+    const lines = (tag) => ns._log.filter((l) => l.startsWith(`${tag}: `));
     assert(lines("upgrade").length === Math.ceil(4 / UPGRADE_EVERY), `upgrade ran ${lines("upgrade").length}`);
     assert(lines("join").length === Math.ceil(4 / JOIN_EVERY), `join ran ${lines("join").length}`);
     assert(lines("work").length === 4, `work should report every tick: ${lines("work").length}`);
-    const at = (tag) => ns._log.findIndex((l) => l.includes(`  ${tag}: `));
+    const at = (tag) => ns._log.findIndex((l) => l.startsWith(`${tag}: `));
     assert(at("upgrade") < at("tor") && at("tor") < at("progs") && at("progs") < at("join") &&
       at("join") < at("work"), `dispatch order wrong: ${ns._log.join(" | ")}`);
     assert(!ns._log.some((l) => l.includes("WARN")), `a body failed: ${ns._log.filter((l) => l.includes("WARN"))}`);
@@ -1125,7 +1141,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
         },
       },
     });
-    const cityLines = r.ns._log.filter((l) => l.includes("  cities: "));
+    const cityLines = r.ns._log.filter((l) => l.startsWith("cities: "));
     assert(cityLines.length === 1, `the group must be chosen once and locked, not re-flipped: ${cityLines}`);
     assert(cityLines[0].includes("Chongqing"), `expected the east group to win and stick: ${cityLines}`);
   },
@@ -1156,7 +1172,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
         },
       },
     });
-    const cityLines = r.ns._log.filter((l) => l.includes("  cities: "));
+    const cityLines = r.ns._log.filter((l) => l.startsWith("cities: "));
     assert(cityLines.length > 0, `the group must eventually be decided: ${cityLines}`);
     assert(cityLines.at(-1).includes("cities: Chongqing"),
       `east has two priority augs against Sector-12's one - it must win once real data lands: ${cityLines}`);
@@ -1186,7 +1202,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
         },
       },
     });
-    const cityLines = r.ns._log.filter((l) => l.includes("  cities: "));
+    const cityLines = r.ns._log.filter((l) => l.startsWith("cities: "));
     assert(cityLines.length >= 2, `settling on west, then Chongqing being joined, must reopen the choice: ${cityLines}`);
     assert(cityLines.at(-1).includes("cities: Chongqing"),
       `Chongqing is joined - its group must win regardless of the earlier settle: ${cityLines}`);
@@ -1509,7 +1525,7 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const { SHARE_HOLD_MARKER } = mods["config"];
     const idle = await driveSing(mods, { ticks: 4 });
     assert(idle.ns._files[SHARE_HOLD_MARKER] === "hold", "no work must hold share");
-    assert(idle.ns._log.filter((l) => l.includes("  share: ")).length === 1, "said once, not per tick");
+    assert(idle.ns._log.filter((l) => l.startsWith("share: ")).length === 1, "said once, not per tick");
 
     const faction = await driveSing(mods, {
       ticks: 2, p: player({ factions: ["CyberSec"] }), files: { [SHARE_HOLD_MARKER]: "hold" }, augs: SELLS,
@@ -1673,5 +1689,32 @@ ${r.calls.filter((c) => c.startsWith("travel")).join(" ")}`);
     const r = await mods["rpc"].rpc(ns, READ);
     assert(r.grindKarma === false, `grindKarma should follow gang.enabled, got ${r.grindKarma}`);
     assert(await mods["rpc"].rpc(ns, SWEEP) === -1, "autoInstall off must stop the sweep before any install");
+  },
+
+  // The user's rule: with sleeves, they grind karma and the player does rep.
+  // sleeve.enabled off hands the grind back, or nobody would do it.
+  "READ hands the karma grind to sleeves when SF10 is owned and sleeves run": async () => {
+    const mods = await loadScripts();
+    const { READ } = bodies();
+    for (const [node, owned, settings, want] of [
+      [4, new Map([[10, 1]]), "{}", false],
+      [10, new Map(), "{}", false],
+      [4, new Map([[10, 1]]), '{"sleeve.enabled":0}', true],
+      [10, new Map(), '{"sing.karma":1}', true],
+      [10, new Map(), '{"sing.karma":1,"gang.enabled":0}', false],
+      [4, new Map(), "{}", true],
+    ]) {
+      const ns = makeNs({
+        files: { "/data/settings.txt": settings },
+        extra: {
+          getPlayer: () => player(),
+          getResetInfo: () => ({ currentNode: node, ownedSF: owned }),
+          gang: { inGang: () => false },
+          singularity: { getCurrentWork: () => null, getCompanyRep: () => 0 },
+        },
+      });
+      const r = await mods["rpc"].rpc(ns, READ);
+      assert(r.grindKarma === want, `BN${node} SF ${JSON.stringify([...owned])} ${settings} -> grindKarma ${r.grindKarma}`);
+    }
   },
 };

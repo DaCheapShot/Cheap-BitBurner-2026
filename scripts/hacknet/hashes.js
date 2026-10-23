@@ -49,7 +49,7 @@ import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-  const log = (s) => ns.print(`${new Date().toLocaleTimeString()}  ${s}`);
+  const log = (s) => ns.print(s);
   const news = settingsLog(null, ns.read(SETTINGS_FILE), "hacknet.");
   if (news) log(news);
   const dry = ns.args.map(String).includes("--dry-run");

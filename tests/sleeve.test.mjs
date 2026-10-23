@@ -518,6 +518,30 @@ export const tests = {
     assert(JSON.stringify(w.companies) === JSON.stringify(["ECorp"]), `only where the player is employed: ${w.companies}`);
   },
 
+  // repWant gives sleeves only companies the player holds a job at, so sing
+  // must hold one at every company step - not just the one the player works.
+  "sing applies at every workable company step, not just the player's": async () => {
+    const { jobsToApply } = (await loadScripts())["sing/plan"];
+    const p = {
+      skills: skills(240), factions: ["OmniTek Incorporated"],
+      jobs: { ECorp: "Software Engineer" }, karma: 0,
+    };
+    const st = {
+      rep: {}, workTypes: {},
+      companyRep: { "Blade Industries": 400e3 },
+      targets: { "Four Sigma": 0 },
+    };
+    const j = jobsToApply(p, st);
+    const names = j.map((x) => x.company);
+    assert(names.includes("Bachman & Associates") && names.includes("KuaiGong International"), `unemployed, above the bar: ${names}`);
+    assert(j.find((x) => x.company === "ECorp")?.employed === true, "ECorp is held - kept for promotions");
+    assert(!names.includes("NWO") && !names.includes("MegaCorp"), `below the 250 bar and not hired: ${names}`);
+    assert(!names.includes("OmniTek Incorporated"), "its faction is joined");
+    assert(!names.includes("Blade Industries"), "its rep bar is met");
+    assert(!names.includes("Four Sigma"), "nothing left to buy from its faction");
+    assert(new Set(names).size === names.length, "each company once");
+  },
+
   // ------------------------------------------------------------ the pass ----
 
   // boot gates on SF10 now, so a hand-run without it is just a WARN line - and

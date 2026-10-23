@@ -117,6 +117,7 @@ run scripts/set.js gang.enabled off     # live switch: boot stops gang.js next t
 run scripts/set.js hud.tick 5           # overview repaint seconds (inside boot's sleep)
 run scripts/set.js boot.tick 30         # cadences: boot.tick, sing.tick, hacknet.every, gang.*Every
 run scripts/set.js sing.autoInstall off # sing: autoInstall, idleStudy, minAugBatch, graft, graftCash, graftMin
+run scripts/set.js sing.karma on       # player grinds gang karma even with sleeves (default off)
 node tests/run.mjs                      # run the test suite
 ```
 
@@ -987,7 +988,11 @@ covers the rare tick where it lands on a gang equip and a sing CRIME.
 homicides, ~15 hours even at 100% success, ahead of all rep work, while SF2 is owned and no gang
 exists. The gym goes with it - Homicide's success and the crime factions' combat bars are all the
 combat stats serve here. There is no sing knob of its own: karma buys nothing but a gang, so one
-could only disagree with the gang switch (the sleeves follow the same one). It is read inside the
+could only disagree with the gang switch (the sleeves follow the same one). **With sleeves (BN10 /
+SF10) and `sleeve.enabled` on, the player does not grind at all** - the user's rule: the sleeves'
+karma rung does it and the player's hours go to rep. `sleeve.enabled` off hands it back; boot's
+`--no-sleeve` is a flag READ cannot see, so with it nobody grinds. `sing.karma` on (default off)
+forces the player's grind beside the sleeves, for a node where they alone are too slow. It is read inside the
 READ body, not by `plan.js`, so `set.js gang.enabled off` takes effect next tick, while anything the resident process imports (the cadences,
 `WORK_ORDER`) is frozen until sing restarts. The tick is 20 s and every cadence is counted in
 ticks, sized so upgrade and join run each minute and programs and promotions every two - change
@@ -1000,7 +1005,11 @@ the invite needs employment there plus `CorpFactionRepRequirement` = 400k compan
 is skipped below hacking 225 (intern `reqdHacking` 1 + Bachman's `jobStatReqOffset` 224) rather
 than applied for every tick. Promotion is re-applying: `applyForJob` hands out the highest
 position the player qualifies for and touches only `Player.jobs`, so APPLY runs every
-`PROMOTE_EVERY` ticks mid-shift and is not an action body. Neither `applyToCompany` nor
+`PROMOTE_EVERY` ticks mid-shift and is not an action body. **APPLY covers every company
+step, not only the player's** (`jobsToApply`, one batched body): `repWant` hands a sleeve
+a company only where the player holds the job, and with only the player's own job held,
+late-node sleeves sat on money crime beside megacorp steps nobody could work. The fork has
+no job limit and an install clears them all. Neither `applyToCompany` nor
 `workForCompany` checks the city, so Bachman being in Aevum does not matter. After Bachman the
 hacking factions run HIGHEST first (Daedalus, BitRunners, The Black Hand, NiteSec, CyberSec): the
 higher shops largely cover the lower ones' augs, and each lower target drops as those are bought.

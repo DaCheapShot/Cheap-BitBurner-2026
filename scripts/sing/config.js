@@ -266,10 +266,16 @@ export const NFG = "NeuroFlux Governor";
 /**
  * Each queued aug multiplies every later price by this
  * (getGenericAugmentationPriceMultiplier). CONSTANTS.MultipleAugMultiplier is
- * 1.9 and Source-File 11 only LOWERS it, so planning at 1.9 over-states a batch
- * and can never plan one the cash cannot cover.
+ * 1.9 and Source-File 11 LOWERS it (getBaseAugmentationPriceMultiplier):
+ * x [1, 0.96, 0.94, 0.93] by level, so 1.767 at SF11.3. Planning at a flat 1.9
+ * there over-priced the 10th aug of a batch (1.9/1.767)^9 = 1.92x, and every
+ * batch waited for about twice the cash it needed. 1.9 stays the fallback: it
+ * over-states, so it can never plan a batch the cash cannot cover.
  */
 export const AUG_PRICE_MULT = 1.9;
+const SF11_PRICE_SCALE = [1, 0.96, 0.94, 0.93];
+/** The per-queued-aug price multiplier at Source-File 11 level `sf11`. */
+export const augPriceMult = (sf11) => AUG_PRICE_MULT * (SF11_PRICE_SCALE[sf11] ?? 1);
 /** NeuroFlux's price AND rep requirement grow by CONSTANTS.NeuroFluxGovernorLevelMult per level. */
 export const NFG_LEVEL_MULT = 1.14;
 /**

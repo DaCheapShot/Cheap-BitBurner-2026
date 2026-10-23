@@ -70,8 +70,9 @@ export const KNOBS = {
   "hacknet.studyLevels": { def: STUDY_LEVELS, min: 0, max: 100, int: true, doc: "Improve Studying levels to buy while sing studies" },
 
   // autoInstall and idleStudy are read inside the SWEEP and READ bodies;
-  // minAugBatch at the top of each aug pass. No karma knob: sing grinds gang
-  // karma while gang.enabled is on, the same switch the sleeves follow.
+  // minAugBatch at the top of each aug pass. sing grinds gang karma while
+  // gang.enabled is on - but not with sleeves to do it (BN10/SF10), unless
+  // sing.karma forces it: a node where the sleeves alone are too slow.
   "sing.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "sing.js supervisor (off also releases the share hold)" },
   "sing.tick": { def: SING_TICK_MS / 1000, min: 5, max: 600, doc: "seconds per sing tick; scales all sing cadences" },
   "sing.homeRam": { def: HOME_RAM_BUDGET_FRACTION, min: 0, max: 1, doc: "fraction of cash a home RAM upgrade may cost" },
@@ -79,6 +80,7 @@ export const KNOBS = {
   "sing.progs": { def: PROG_BUDGET_FRACTION, min: 0, max: 1, doc: "fraction of cash a darkweb program may cost" },
   "sing.autoInstall": { def: AUTO_INSTALL ? 1 : 0, min: 0, max: 1, bool: true, doc: "install the aug queue once minAugBatch are queued" },
   "sing.idleStudy": { def: IDLE_STUDY ? 1 : 0, min: 0, max: 1, bool: true, doc: "nothing to work: a university class, not a money crime" },
+  "sing.karma": { def: 0, min: 0, max: 1, bool: true, doc: "player grinds gang karma even when sleeves could (needs gang.enabled)" },
   "sing.minAugBatch": { def: MIN_AUG_BATCH, min: 1, max: 100, int: true, doc: "augs a batch (plus the queue) must reach to buy" },
   "sing.graft": { def: GRAFT ? 1 : 0, min: 0, max: 1, bool: true, doc: "graft tier-1 augs no joined faction's rep reaches (BN10/SF10)" },
   "sing.graftCash": { def: GRAFT_CASH, min: 0, max: 1, doc: "fraction of cash one graft may cost (Congruity ignores it)" },
