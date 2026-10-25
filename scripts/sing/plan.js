@@ -71,6 +71,14 @@ export function repTargets(augsOf, owned, info, priority = null) {
  * MIN_AUG_BATCH and the cash covers all of it - buying part of one leaves
  * augs queued and no reason to install.
  *
+ * NeuroFlux is ranked by VALUE, the user's rule: an aug worth less than one
+ * NFG level (`augValue`, its product over PRIORITY_MULTS) is planned AFTER the
+ * fill, on what it leaves. Every tier-2 aug scores 1 and a level ~1.08, so a
+ * combat aug no longer takes cash a level of every multiplier wanted. Those
+ * weaker augs pay the ladder for the levels ahead of them - the game counts a
+ * queued NFG like any aug (getGenericAugmentationPriceMultiplier). No `value`,
+ * or no NFG entry in it, is the old order: everything before the fill.
+ *
  * An aug short of rep at every seller is still in reach at a seller that takes
  * donations (`o.donate`): its price then carries the donation that lifts that
  * faction to the aug's rep, and the batch's `donations` are made before its
@@ -95,6 +103,7 @@ export function repTargets(augsOf, owned, info, priority = null) {
  * @param o.cash     money on hand
  * @param o.donate   { perRep, can(faction) } - or null, and nothing is donated
  * @param o.priority {aug: bool} - priority augs are planned first (tier 1), each class dearest first
+ * @param o.value    {aug: augValue}, NFG's per level included - or null; a missing aug ranks above NFG
  * @param o.force    buy what fits even under MIN_AUG_BATCH
  * @param o.minBatch the live `sing.minAugBatch`; MIN_AUG_BATCH when omitted
  * @param o.priceMult each queued aug's price ladder step (augPriceMult); AUG_PRICE_MULT when omitted
@@ -102,8 +111,8 @@ export function repTargets(augsOf, owned, info, priority = null) {
  *             batch: number, total: number, eligible: number,
  *             nfg: {faction, levels, why: "rep"|"cash", ...}|null }}
  */
-export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, donate = null, priority = null, force = false,
-  minBatch = MIN_AUG_BATCH, priceMult = AUG_PRICE_MULT }) {
+export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, donate = null, priority = null, value = null,
+  force = false, minBatch = MIN_AUG_BATCH, priceMult = AUG_PRICE_MULT }) {
   // Who sells each aug, among joined factions we may buy from.
   const sellers = {};
   for (const [faction, augs] of Object.entries(augsOf)) {
@@ -141,20 +150,25 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, d
       total = d;
     }
   }
-  for (const c of eligible) {
-    if (!(prereqs[c.name] ?? []).every((p) => have.has(p))) continue;
-    const f = cheapest(c);
-    const d = lift(f, c.need);
-    const cost = c.price * priceMult ** buys.length;
-    if (total + cost + d > cash) continue;
-    if (d) {
-      donated[f] = (donated[f] ?? 0) + d;
-      reach[f] = c.need + 1;
+  const take = (list) => {
+    for (const c of list) {
+      if (!(prereqs[c.name] ?? []).every((p) => have.has(p))) continue;
+      const f = cheapest(c);
+      const d = lift(f, c.need);
+      const cost = c.price * priceMult ** buys.length;
+      if (total + cost + d > cash) continue;
+      if (d) {
+        donated[f] = (donated[f] ?? 0) + d;
+        reach[f] = c.need + 1;
+      }
+      buys.push({ faction: f, name: c.name, cost });
+      total += cost + d;
+      have.add(c.name);
     }
-    buys.push({ faction: f, name: c.name, cost });
-    total += cost + d;
-    have.add(c.name);
-  }
+  };
+  const nfgValue = value?.[NFG] ?? 1;
+  const strong = (c) => (value?.[c.name] ?? Infinity) >= nfgValue;
+  take(eligible.filter(strong));
 
   // Why the fill stopped, for the log. NeuroFlux looks cheap in the shop and
   // is the batch's only unlimited filler, so "best batch is 9 of 10" reads as
@@ -173,6 +187,7 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, d
       total += cost;
     }
   }
+  take(eligible.filter((c) => !strong(c)));
 
   const batch = queued + buys.length;
   const donations = Object.entries(donated)
@@ -539,7 +554,12 @@ export function sameAsCurrent(work, action) {
  * @param mults {mult: value} - getAugmentationStats, any subset
  */
 export function graftGain(mults) {
-  return PRIORITY_MULTS.reduce((g, k) => g * (mults[k] ?? 1) * ENTROPY, 1);
+  return augValue(mults) * ENTROPY ** PRIORITY_MULTS.length;
+}
+
+/** An aug's worth on the tier-1 multipliers: their product. 1 is nothing. */
+export function augValue(mults) {
+  return PRIORITY_MULTS.reduce((g, k) => g * (mults[k] ?? 1), 1);
 }
 
 /**
@@ -561,7 +581,7 @@ export function graftCandidates({ mults, owned, prereqs, augsOf, factions, minGa
   const joinedSells = (a) => factions.some((f) => (augsOf[f] ?? []).includes(a));
   return Object.entries(mults)
     .map(([aug, m]) => ({ aug, gain: graftGain(m) }))
-    .filter(({ aug, gain }) => gain > minGain && aug !== CONGRUITY && !owned.includes(aug) &&
+    .filter(({ aug, gain }) => gain > minGain && aug !== CONGRUITY && aug !== NFG && !owned.includes(aug) &&
       (prereqs[aug] ?? []).every((p) => owned.includes(p)) && !joinedSells(aug))
     .sort((a, b) => b.gain - a.gain);
 }

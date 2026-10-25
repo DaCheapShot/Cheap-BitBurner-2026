@@ -488,6 +488,38 @@ export const tests = {
     assert(JSON.stringify(flat) === '["c1","h2","h1"]', `no priority map: dearest first, as before: ${flat}`);
   },
 
+  // The user's rule: NFG is ranked by value. An aug worth less than a level
+  // (every tier-2 aug scores 1) waits behind the fill and pays its ladder.
+  "NFG levels outrank augs worth less than a level, and those pay the ladder after": async () => {
+    const { planAugBuys, augValue } = (await loadScripts())["sing/plan"];
+    const info = {
+      strong: { rep: 1, price: 1e6 }, weak: { rep: 1, price: 9e6 }, combat: { rep: 1, price: 5e6 },
+      "NeuroFlux Governor": { rep: 1e3, price: 1e5 },
+    };
+    const value = {
+      strong: augValue({ hacking: 1.1 }), weak: augValue({ company_rep: 1.02 }), combat: 1,
+      "NeuroFlux Governor": augValue(Object.fromEntries(
+        ["hacking", "hacking_exp", "hacking_chance", "hacking_speed", "hacking_money", "hacking_grow",
+          "faction_rep", "company_rep"].map((k) => [k, 1.01]))),
+    };
+    // Rep for exactly two NFG levels (1e3, 1.14e3), so the fill stops on rep.
+    const base = {
+      augsOf: { F: Object.keys(info) }, owned: [], queued: 0, info, prereqs: {}, rep: { F: 1.2e3 },
+      cash: 1e15, force: true,
+    };
+    const names = planAugBuys({ ...base, value }).buys.map((b) => b.name);
+    assert(JSON.stringify(names) === '["strong","NeuroFlux Governor","NeuroFlux Governor","weak","combat"]',
+      `stronger aug, then the fill, then the weaker ones dearest first: ${names}`);
+    const weak = planAugBuys({ ...base, value }).buys[3];
+    assert(Math.abs(weak.cost - 9e6 * 1.9 ** 3) < 1, `weak pays the ladder for the two levels: ${weak.cost}`);
+    const old = planAugBuys(base).buys.map((b) => b.name);
+    assert(JSON.stringify(old) === '["weak","combat","strong","NeuroFlux Governor","NeuroFlux Governor"]',
+      `no value map: every aug before the fill, as before: ${old}`);
+    // Cash for the strong aug and one more thing: the level, not the combat aug.
+    const tight = planAugBuys({ ...base, value, cash: 1e6 + 1e5 * 1.9 + 1 }).buys.map((b) => b.name);
+    assert(JSON.stringify(tight) === '["strong","NeuroFlux Governor"]', `the level wins the cash: ${tight}`);
+  },
+
   "the batch: dearest first, each priced x1.9 per aug ahead of it": async () => {
     const { planAugBuys } = (await loadScripts())["sing/plan"];
     const names = Array.from({ length: 10 }, (_, i) => `a${i}`);

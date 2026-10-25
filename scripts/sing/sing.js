@@ -3,10 +3,10 @@ import {
   CITY_GROUPS,
   GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
-  STUDY_MARKER, REP_WANT_MARKER, GRAFT_CITY, CONGRUITY, augPriceMult,
+  STUDY_MARKER, REP_WANT_MARKER, GRAFT_CITY, CONGRUITY, PRIORITY_AUGS, augPriceMult,
 } from "./config.js";
 import {
-  chooseAction, chooseTravel, sameAsCurrent, repTargets, planAugBuys,
+  chooseAction, chooseTravel, sameAsCurrent, repTargets, planAugBuys, augValue,
   canDonate, bankedFavor, installForFavor, donationPerRep, bestCrime, chooseCityGroup, studyAction, repWant, jobsToApply,
   graftCandidates, chooseGraft,
 } from "./plan.js";
@@ -871,7 +871,8 @@ export async function main(ns) {
     const pool = [...new Set([...sold, ...(grafts ? graftable ?? [] : [])])];
     const noPrereqs = pool.filter((a) => a !== NFG && !(a in prereqs));
     if (noPrereqs.length) Object.assign(prereqs, (await call("prereqs", PREREQ, ...noPrereqs)) ?? {});
-    const unrated = pool.filter((a) => a !== NFG && !(a in priority));
+    // NFG is rated too: planAugBuys ranks its levels against the other augs by value.
+    const unrated = pool.filter((a) => !(a in priority));
     if (unrated.length) {
       for (const [a, v] of Object.entries((await call("aug stats", AUG_STATS, ...unrated)) ?? {})) {
         priority[a] = v.tier;
@@ -937,8 +938,11 @@ export async function main(ns) {
         ` - buying what fits`);
     }
     const force = crossesFavorBar(r, owned) || banked.length > 0;
+    // Named augs rank above any NFG level whatever their multipliers say.
+    const value = Object.fromEntries(Object.entries(augMults)
+      .map(([a, m]) => [a, PRIORITY_AUGS.includes(a) ? Infinity : augValue(m)]));
     const planFor = (c) => planAugBuys({
-      augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash: c, donate, priority, force,
+      augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash: c, donate, priority, value, force,
       minBatch, priceMult: augPriceMult(r.sf11),
     });
     let plan = planFor(cash);
