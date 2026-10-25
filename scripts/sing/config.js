@@ -69,7 +69,7 @@ export const HOME_RAM_BUDGET_FRACTION = 0.25;
  */
 export const HOME_CORES_BUDGET_FRACTION = 0.10;
 /** Each darkweb program is bought only when it costs at most this fraction of cash. */
-export const PROG_BUDGET_FRACTION = 0.10;
+export const PROG_BUDGET_FRACTION = 0.5;
 /**
  * The only darkweb programs bought: the five port openers and Formulas.exe.
  * The rest (ServerProfiler, DeepscanV1/V2, AutoLink, DarkscapeNavigator) serve
