@@ -233,7 +233,8 @@ function renderMoney(ns, rows) {
         : (s.requiredHackingSkill ?? 0) > level ? "hacking too low"
           : !(max > 0) ? "no money"
             : priced.has(s.hostname) ? "target, not streamed"
-              : "unpriced";
+              : (s.hackDifficulty ?? 0) > (s.minDifficulty ?? 0) ? "needs prep"
+                : "unpriced";
     counts[status] = (counts[status] ?? 0) + 1;
     ns.print(
       pad(s.hostname, 20) + padL(fmtMoney(max), 10) + padL(fmtMoney(s.moneyAvailable ?? 0), 10) +

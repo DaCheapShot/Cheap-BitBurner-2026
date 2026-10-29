@@ -17,6 +17,21 @@ import { SPACER_MS, STEAL_FRACTION } from "scripts/continuous/config";
 export const isPrepped = (snap) => snap.moneyOk && snap.secOk;
 
 /**
+ * The snapshot as it would read once prepped: max money, minimum security.
+ *
+ * The formulas backend reads its numbers off snap.server, so the hypothetical
+ * has to be applied there too or it prices the live server. The analyze
+ * backend reads the live server regardless and cannot be fooled this way.
+ */
+export function idealSnap(snap) {
+  const ideal = { ...snap, money: snap.maxMoney, sec: snap.minSec, moneyOk: true, secOk: true };
+  if (snap.server) {
+    ideal.server = { ...snap.server, moneyAvailable: snap.maxMoney, hackDifficulty: snap.minSec };
+  }
+  return ideal;
+}
+
+/**
  * Every host worth considering: rooted, holds money, and within reach.
  *
  * The hacking-level check is not cosmetic - below the requirement hackAnalyze
@@ -100,12 +115,35 @@ export function rankTargets(ns, math, opts = {}) {
   const { steal = STEAL_FRACTION, hosts = null } = opts;
 
   const scored = [];
+  const blind = [];
   for (const host of hosts ?? candidates(ns)) {
     const snap = math.snapshot(ns, host);
-    const score = scoreTarget(math, snap, steal);
-    if (score) scored.push(score);
+    // Scored as it will be once prepped, never as it stands. At 100 security
+    // the difficulty factor (100 - sec) / 100 is 0, so hack percent is 0 on
+    // both backends and the live score is null - and a host missing from this
+    // list is never priced, never queued for prep, and so never weakened off
+    // 100. A live run sat on three $200m-$700m targets while 49 servers up to
+    // $375b sat there unranked, every one at 100.00 security.
+    //
+    // The entry keeps the LIVE snap: rescan reads isPrepped(t.snap), and
+    // priceTargets still refuses an unprepped host, so this makes a dirty host
+    // a prep candidate and nothing more.
+    const score = scoreTarget(math, idealSnap(snap), steal);
+    if (score) scored.push({ ...score, snap });
+    else if (snap.maxMoney > 0) blind.push(snap);
   }
 
   scored.sort((a, b) => b.moneyPerSecPerDepth - a.moneyPerSecPerDepth);
+  // The analyze backend reads the live server whatever the snapshot says, so it
+  // cannot price a host at 100 security even hypothetically. Rank those last,
+  // richest first, so prep still reaches them; once prepped they price normally.
+  // ponytail: maxMoney is a crude order, and only until the host is prepped.
+  blind.sort((a, b) => b.maxMoney - a.maxMoney);
+  for (const snap of blind) {
+    scored.push({
+      host: snap.host, snap, perThread: 0, chance: 0, times: null,
+      perBatch: 0, depth: 0, moneyPerSec: 0, moneyPerSecPerDepth: 0,
+    });
+  }
   return scored;
 }
