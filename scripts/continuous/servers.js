@@ -11,6 +11,7 @@ import {
   WORKER_FILES,
   WORKER_RAM_FALLBACK,
   HACKNET_HOST_PREFIX,
+  TARGETS_MARKER,
 } from "scripts/continuous/config";
 
 /**
@@ -23,8 +24,9 @@ import {
  *   run scripts/continuous/servers.js                 one pass, then exit
  *   run scripts/continuous/servers.js --loop           redraw every 5s
  *   run scripts/continuous/servers.js --loop 15000     redraw every 15s
- *   run scripts/continuous/servers.js --all            also list EVERY host and
- *                                                      whether the pool takes it
+ *   run scripts/continuous/servers.js --all            also list the money on
+ *                                                      EVERY server, and why each
+ *                                                      one is or is not a target
  *
  * Output goes to the SCRIPT LOG (ns.ui.openTail), not the terminal. That is the
  * point of it: the table is wide and is meant to be left open and re-read - and
@@ -185,48 +187,61 @@ function render(ns, ram, push) {
     `STEAL is what chooseSteal picks for a target admitted now at the slice above. ` +
       `A live stream adapts from there - its own log is the authority.`,
   );
+  return rows;
 }
 
 /**
- * Every host on the network, in the pool or not, and why not.
+ * Money on every server, target or not, and why the manager skips it.
  *
- * The pool is ServerPool.build with the manager's own options, so IN POOL is
- * what a manager starting now would admit (a running one also adopts hosts at
- * each rescan through sync, on the same terms). Hacknet servers are walked here
- * on purpose - scanAll drops them - so the report accounts for every host
- * `scan` can reach. FREE is before the manager's Stanek reserve and pending
- * reservations, which only the manager's own process holds.
+ * The targets table only lists hosts candidates() admits and chooseSteal can
+ * price, so a server missing from it is invisible there. This lists every
+ * reachable host except home, cloud and hacknet (they hold no money) with the
+ * first reason, in candidates()'s own order, that keeps it out. LIVE marks the
+ * hosts the running manager published to TARGETS_MARKER at its last rescan -
+ * a priced target it is NOT streaming lost on income, or is waiting on prep.
+ *
+ * getServer is already billed through lib/math.js, and ns.read is 0 GB.
  */
-function renderPool(ns, pool) {
-  const inPool = new Map(pool.servers.map((s) => [s.hostname, s]));
+function renderMoney(ns, rows) {
+  const priced = new Set(rows.map((r) => r.snap.host));
+  const live = new Set(ns.read(TARGETS_MARKER).split("\n").map((h) => h.trim()).filter(Boolean));
+  const level = ns.getHackingLevel();
+
   const seen = new Set(["home"]);
   const queue = ["home"];
   for (let i = 0; i < queue.length; i++) {
     for (const h of ns.scan(queue[i])) if (!seen.has(h)) { seen.add(h); queue.push(h); }
   }
 
-  const rows = queue.map((host) => {
-    const s = inPool.get(host);
-    const why = s ? "yes"
-      : host.startsWith(HACKNET_HOST_PREFIX) ? "no: hacknet"
-        : !ns.hasRootAccess(host) ? "no: not rooted"
-          : ns.getServerMaxRam(host) <= 0 ? "no: 0 RAM"
-            : "no: ???";
-    return { host, why, max: ns.getServerMaxRam(host), used: ns.getServerUsedRam(host), s };
-  }).sort((a, b) => b.max - a.max);
+  const all = queue
+    .filter((h) => h !== "home" && !h.startsWith(HACKNET_HOST_PREFIX))
+    .map((h) => ns.getServer(h))
+    .filter((s) => !s.purchasedByPlayer)
+    .sort((a, b) => (b.moneyMax ?? 0) - (a.moneyMax ?? 0));
 
   ns.print("");
-  ns.print(`=== ALL HOSTS (${rows.length} reachable, ${inPool.size} in pool) ` + "=".repeat(10));
-  ns.print(pad("HOST", 20) + padL("MAX", 11) + padL("USED", 11) + padL("FREE", 11) + "  IN POOL");
-  for (const r of rows) {
+  ns.print(`=== ALL SERVERS (${all.length}, hacking ${level}) ` + "=".repeat(18));
+  ns.print(
+    pad("HOST", 20) + padL("MAX $", 10) + padL("NOW $", 10) + padL("AT%", 8) +
+      padL("SEC", 8) + padL("MIN", 7) + padL("REQ", 6) + "  STATUS",
+  );
+  const counts = {};
+  for (const s of all) {
+    const max = s.moneyMax ?? 0;
+    const status = live.has(s.hostname) ? "LIVE"
+      : !s.hasAdminRights ? "not rooted"
+        : (s.requiredHackingSkill ?? 0) > level ? "hacking too low"
+          : !(max > 0) ? "no money"
+            : priced.has(s.hostname) ? "target, not streamed"
+              : "unpriced";
+    counts[status] = (counts[status] ?? 0) + 1;
     ns.print(
-      pad(r.host, 20) + padL(ns.format.ram(r.max), 11) + padL(ns.format.ram(r.used), 11) +
-        padL(r.s ? ns.format.ram(r.s.freeRam) : "-", 11) + "  " + r.why +
-        (r.s?.staticReserve ? ` (reserve ${ns.format.ram(r.s.staticReserve)})` : ""),
+      pad(s.hostname, 20) + padL(fmtMoney(max), 10) + padL(fmtMoney(s.moneyAvailable ?? 0), 10) +
+        padL(max > 0 ? ns.format.percent((s.moneyAvailable ?? 0) / max, 1) : "-", 8) +
+        padL((s.hackDifficulty ?? 0).toFixed(2), 8) + padL((s.minDifficulty ?? 0).toFixed(2), 7) +
+        padL(s.requiredHackingSkill ?? 0, 6) + "  " + status,
     );
   }
-  const counts = {};
-  for (const r of rows) counts[r.why] = (counts[r.why] ?? 0) + 1;
   ns.print(Object.entries(counts).map(([k, n]) => `${k} ${n}`).join(", "));
 }
 
@@ -258,8 +273,8 @@ export async function main(ns) {
   // existing invocation of this script expects.
   do {
     if (loopMs) ns.clearLog();
-    render(ns, ram, push);
-    if (all) renderPool(ns, ServerPool.build(ns, { homeReserve: HOME_RESERVE_GB }));
+    const rows = render(ns, ram, push);
+    if (all) renderMoney(ns, rows);
     if (loopMs) await ns.sleep(loopMs);
   } while (loopMs);
 }
