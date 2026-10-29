@@ -10,6 +10,7 @@ import {
   TARGET_RAM_BUDGET,
   WORKER_FILES,
   WORKER_RAM_FALLBACK,
+  HACKNET_HOST_PREFIX,
 } from "scripts/continuous/config";
 
 /**
@@ -22,6 +23,8 @@ import {
  *   run scripts/continuous/servers.js                 one pass, then exit
  *   run scripts/continuous/servers.js --loop           redraw every 5s
  *   run scripts/continuous/servers.js --loop 15000     redraw every 15s
+ *   run scripts/continuous/servers.js --all            also list EVERY host and
+ *                                                      whether the pool takes it
  *
  * Output goes to the SCRIPT LOG (ns.ui.openTail), not the terminal. That is the
  * point of it: the table is wide and is meant to be left open and re-read - and
@@ -184,6 +187,49 @@ function render(ns, ram, push) {
   );
 }
 
+/**
+ * Every host on the network, in the pool or not, and why not.
+ *
+ * The pool is ServerPool.build with the manager's own options, so IN POOL is
+ * what a manager starting now would admit (a running one also adopts hosts at
+ * each rescan through sync, on the same terms). Hacknet servers are walked here
+ * on purpose - scanAll drops them - so the report accounts for every host
+ * `scan` can reach. FREE is before the manager's Stanek reserve and pending
+ * reservations, which only the manager's own process holds.
+ */
+function renderPool(ns, pool) {
+  const inPool = new Map(pool.servers.map((s) => [s.hostname, s]));
+  const seen = new Set(["home"]);
+  const queue = ["home"];
+  for (let i = 0; i < queue.length; i++) {
+    for (const h of ns.scan(queue[i])) if (!seen.has(h)) { seen.add(h); queue.push(h); }
+  }
+
+  const rows = queue.map((host) => {
+    const s = inPool.get(host);
+    const why = s ? "yes"
+      : host.startsWith(HACKNET_HOST_PREFIX) ? "no: hacknet"
+        : !ns.hasRootAccess(host) ? "no: not rooted"
+          : ns.getServerMaxRam(host) <= 0 ? "no: 0 RAM"
+            : "no: ???";
+    return { host, why, max: ns.getServerMaxRam(host), used: ns.getServerUsedRam(host), s };
+  }).sort((a, b) => b.max - a.max);
+
+  ns.print("");
+  ns.print(`=== ALL HOSTS (${rows.length} reachable, ${inPool.size} in pool) ` + "=".repeat(10));
+  ns.print(pad("HOST", 20) + padL("MAX", 11) + padL("USED", 11) + padL("FREE", 11) + "  IN POOL");
+  for (const r of rows) {
+    ns.print(
+      pad(r.host, 20) + padL(ns.format.ram(r.max), 11) + padL(ns.format.ram(r.used), 11) +
+        padL(r.s ? ns.format.ram(r.s.freeRam) : "-", 11) + "  " + r.why +
+        (r.s?.staticReserve ? ` (reserve ${ns.format.ram(r.s.staticReserve)})` : ""),
+    );
+  }
+  const counts = {};
+  for (const r of rows) counts[r.why] = (counts[r.why] ?? 0) + 1;
+  ns.print(Object.entries(counts).map(([k, n]) => `${k} ${n}`).join(", "));
+}
+
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
@@ -192,6 +238,7 @@ export async function main(ns) {
   const args = ns.args.map(String);
   const lIdx = args.indexOf("--loop");
   const loopMs = lIdx >= 0 ? Math.max(1000, Number(args[lIdx + 1]) || 5000) : 0;
+  const all = args.includes("--all");
 
   // Outside the loop on purpose. prepare() caches game constants that do not
   // move - weakenAnalyze(1,1) and the two security-per-thread figures - so
@@ -212,6 +259,7 @@ export async function main(ns) {
   do {
     if (loopMs) ns.clearLog();
     render(ns, ram, push);
+    if (all) renderPool(ns, ServerPool.build(ns, { homeReserve: HOME_RESERVE_GB }));
     if (loopMs) await ns.sleep(loopMs);
   } while (loopMs);
 }
