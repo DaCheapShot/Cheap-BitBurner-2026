@@ -405,8 +405,13 @@ export const CITY_GROUPS = [["Sector-12", "Aevum"], ["Chongqing", "New Tokyo", "
 export const CITY_INVITE_MONEY = {
   "Sector-12": 15e6, Aevum: 40e6, Chongqing: 20e6, "New Tokyo": 20e6, Ishima: 30e6, Volhaven: 50e6,
 };
-/** Unfocused work earns CONSTANTS.BaseFocusBonus = 0.8 without the Neuroreceptor implant. */
-export const WORK_FOCUS = true;
+/**
+ * Unfocused work earns CONSTANTS.BaseFocusBonus = 0.8 unless this aug is INSTALLED
+ * (Player.focusPenalty: hasAugmentation(NeuroreceptorManager, true) skips the queue).
+ * Focus drags the UI to the Work page on every new action - the user's rule: focus
+ * only while the penalty applies.
+ */
+export const FOCUS_FREE_AUG = "Neuroreceptor Management Implant";
 
 // ---------------------------------------------------------------- grafting ---
 

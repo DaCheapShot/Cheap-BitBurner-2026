@@ -1,7 +1,7 @@
 import {
   UPGRADE_EVERY, PROGS_EVERY, JOIN_EVERY, AUGS_EVERY, PARKED_MS, FINAL_CHECK_MS,
   CITY_GROUPS,
-  GANG_KARMA_TARGET, WORK_FOCUS, PROMOTE_EVERY, SHARE_HOLD_MARKER,
+  GANG_KARMA_TARGET, PROMOTE_EVERY, SHARE_HOLD_MARKER,
   WORK_ORDER, NFG, RED_PILL, RED_PILL_FACTION, BACKDOOR_EVERY, BACKDOOR_SCRIPT, BACKDOOR_GB, BACKDOOR_KEEP_GB,
   STUDY_MARKER, REP_WANT_MARKER, GRAFT_CITY, CONGRUITY, PRIORITY_AUGS, augPriceMult,
 } from "./config.js";
@@ -331,13 +331,15 @@ const TRAVEL = `return ns.singularity.travelToCity(args[0]);`;
  * level - so the difference from the installed list is the queue length the
  * price multiplier counts. `pill` is the Red Pill bought but not installed: an
  * install that failed must be retried on the next pass, and a queue of one is
- * under MIN_AUG_BATCH.
+ * under MIN_AUG_BATCH. `focusFree` is the focus penalty gone: installed only,
+ * as the game checks it.
  */
 const OWNED = `
-import { RED_PILL } from "/scripts/sing/config.js";
+import { RED_PILL, FOCUS_FREE_AUG } from "/scripts/sing/config.js";
 const all = ns.singularity.getOwnedAugmentations(true);
 const installed = ns.singularity.getOwnedAugmentations(false);
-return { all, queued: all.length - installed.length, pill: all.includes(RED_PILL) && !installed.includes(RED_PILL) };
+return { all, queued: all.length - installed.length, pill: all.includes(RED_PILL) && !installed.includes(RED_PILL),
+  focusFree: installed.includes(FOCUS_FREE_AUG) };
 `;
 
 const FAC_AUGS = `
@@ -653,13 +655,13 @@ function describe(ns, a, r) {
 }
 
 /** The body and its arguments for a chosen action. The focus flag rides along. */
-function actionCall(a) {
-  if (a.kind === "gym") return [GYM, a.gym, a.stat, WORK_FOCUS];
-  if (a.kind === "crime") return [CRIME, a.crime, WORK_FOCUS];
-  if (a.kind === "company") return [COMPANY, a.company, WORK_FOCUS];
-  if (a.kind === "study") return [STUDY, a.university, a.course, WORK_FOCUS];
-  if (a.kind === "graft") return [GRAFT, a.aug, WORK_FOCUS];
-  return [FACTION, a.faction, a.type, WORK_FOCUS];
+function actionCall(a, focus) {
+  if (a.kind === "gym") return [GYM, a.gym, a.stat, focus];
+  if (a.kind === "crime") return [CRIME, a.crime, focus];
+  if (a.kind === "company") return [COMPANY, a.company, focus];
+  if (a.kind === "study") return [STUDY, a.university, a.course, focus];
+  if (a.kind === "graft") return [GRAFT, a.aug, focus];
+  return [FACTION, a.faction, a.type, focus];
 }
 
 // -------------------------------------------------------------------- main ---
@@ -757,6 +759,10 @@ export async function main(ns) {
   // Backdoors vanish at an install, which kills this process - so once none is
   // left, none is left for the life of the process.
   let backdoorsDone = false;
+  // The focus penalty is gone once FOCUS_FREE_AUG is installed, and installing
+  // kills this process - so set by the aug pass, never cleared. Focused until
+  // the first pass says otherwise: one Work-page jump beats a 0.8x action.
+  let focusFree = false;
 
   /**
    * How the batch may buy rep, or null. The price needs the node's rep
@@ -859,6 +865,7 @@ export async function main(ns) {
     const minBatch = setting(ns.read(SETTINGS_FILE), "sing.minAugBatch");
     const owned = await call("owned", OWNED);
     if (!owned) return;
+    focusFree ||= owned.focusFree;
     // Every faction WORK_ORDER names, joined or not: a company step and a city
     // stop are both judged by what their faction sells before any invite.
     const named = WORK_ORDER.map((s) => s.faction ?? s.company);
@@ -1228,7 +1235,7 @@ export async function main(ns) {
       } else if (sameAsCurrent(r.work, action)) {
         log(`work: ${what}${action.kind === "idle" ? "" : " (running)"}`);
       } else if (hired) {
-        const [body, ...args] = actionCall(action);
+        const [body, ...args] = actionCall(action, !focusFree);
         started = Boolean(await call(action.kind, body, ...args));
         log(`work: ${started ? "started" : "could not start"} ${what}`);
         if (started && action.kind === "graft") {
