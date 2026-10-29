@@ -3,7 +3,7 @@ import { coreMap } from "scripts/continuous/lib/cores";
 import { deployWorkers, describeDeploy } from "scripts/continuous/lib/deploy";
 import { clear } from "scripts/continuous/lib/report";
 import { fmtMoney } from "scripts/continuous/lib/fmt";
-import { isPrepped, rankTargets } from "scripts/continuous/lib/target";
+import { idealSnap, isPrepped, rankTargets } from "scripts/continuous/lib/target";
 import { launchPrepWave, placePrepWave, prepTargets } from "scripts/continuous/lib/prep";
 import { serviceShare } from "scripts/continuous/lib/share";
 import { createStream } from "scripts/continuous/lib/stream";
@@ -537,22 +537,7 @@ export function pricePotential(ns, math, ram, steal, ranked) {
     const snap = math.snapshot(ns, entry.host);
     if (!(snap.maxMoney > 0)) continue;
 
-    const ideal = {
-      ...snap,
-      money: snap.maxMoney,
-      sec: snap.minSec,
-      moneyOk: true,
-      secOk: true,
-    };
-    // The formulas backend reads its numbers off snap.server, so the
-    // hypothetical has to be applied there too or it prices the live server.
-    if (snap.server) {
-      ideal.server = {
-        ...snap.server,
-        moneyAvailable: snap.maxMoney,
-        hackDifficulty: snap.minSec,
-      };
-    }
+    const ideal = idealSnap(snap);
 
     const th = planThreads(math, ideal, steal);
     if (!th) continue;

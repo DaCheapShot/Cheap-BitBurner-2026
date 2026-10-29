@@ -1194,6 +1194,49 @@ export const tests = {
     assert(ranked[0].depth < ranked[1].depth, "the quick target should need less depth");
   },
 
+  // A live run: 49 servers up to $375b sat at 100.00 security, where the game's
+  // (100 - sec) / 100 difficulty factor zeroes hack percent on both backends.
+  // Scored live they dropped out of the ranking, so they were never prepped,
+  // so they stayed at 100 forever. Both mocks zero hack percent at 100 here.
+  "ranking scores a dirty host as prepped, and keeps its live snap (formulas)": async () => {
+    const { mods } = await loadContinuous();
+    const { rankTargets, isPrepped } = mods["lib/target"];
+    const math = mods["lib/math"];
+
+    const servers = {
+      dirty: { moneyMax: 1e11, moneyAvailable: 9e9, minDifficulty: 50, hackDifficulty: 100, weakenTime: 20000 },
+      clean: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5, weakenTime: 20000 },
+    };
+    const ns = mathNs({ hosts: { home: 4096 }, servers, formulas: true });
+    ns.formulas.hacking.hackPercent = (s) => (s.hackDifficulty >= 100 ? 0 : 0.0037);
+    await math.prepare(ns);
+
+    const ranked = rankTargets(ns, math);
+    assert(ranked[0].host === "dirty", `ranked ${ranked.map((r) => r.host)} - the dirty host was scored live`);
+    assert(ranked[0].perBatch > 0, "the dirty host should be priced as prepped");
+    assert(ranked[0].snap.sec === 100 && !isPrepped(ranked[0].snap),
+      "the entry must carry the LIVE snap, or rescan reads a dirty host as prepped");
+  },
+
+  "ranking keeps a host analyze cannot price, last and richest first": async () => {
+    const { mods } = await loadContinuous();
+    const { rankTargets } = mods["lib/target"];
+    const math = mods["lib/math"];
+
+    const servers = {
+      poor: { moneyMax: 1e10, moneyAvailable: 1e9, minDifficulty: 50, hackDifficulty: 100, weakenTime: 20000 },
+      rich: { moneyMax: 1e11, moneyAvailable: 9e9, minDifficulty: 50, hackDifficulty: 100, weakenTime: 20000 },
+      clean: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5, weakenTime: 20000 },
+    };
+    const ns = mathNs({ hosts: { home: 4096 }, servers });
+    ns.hackAnalyze = (h) => (servers[h].hackDifficulty >= 100 ? 0 : 0.0037);
+    await math.prepare(ns);
+
+    const ranked = rankTargets(ns, math).map((r) => r.host);
+    assert(ranked.join() === "clean,rich,poor",
+      `ranked ${ranked} - an unpriceable host must still reach the prep queue`);
+  },
+
   // --------------------------------------------------------- plan (pure) ---
 
   "the first anchor is a full weaken plus the lead away": async () => {

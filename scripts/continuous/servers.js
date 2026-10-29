@@ -10,6 +10,8 @@ import {
   TARGET_RAM_BUDGET,
   WORKER_FILES,
   WORKER_RAM_FALLBACK,
+  HACKNET_HOST_PREFIX,
+  TARGETS_MARKER,
 } from "scripts/continuous/config";
 
 /**
@@ -22,6 +24,9 @@ import {
  *   run scripts/continuous/servers.js                 one pass, then exit
  *   run scripts/continuous/servers.js --loop           redraw every 5s
  *   run scripts/continuous/servers.js --loop 15000     redraw every 15s
+ *   run scripts/continuous/servers.js --all            also list the money on
+ *                                                      EVERY server, and why each
+ *                                                      one is or is not a target
  *
  * Output goes to the SCRIPT LOG (ns.ui.openTail), not the terminal. That is the
  * point of it: the table is wide and is meant to be left open and re-read - and
@@ -182,6 +187,63 @@ function render(ns, ram, push) {
     `STEAL is what chooseSteal picks for a target admitted now at the slice above. ` +
       `A live stream adapts from there - its own log is the authority.`,
   );
+  return rows;
+}
+
+/**
+ * Money on every server, target or not, and why the manager skips it.
+ *
+ * The targets table only lists hosts candidates() admits and chooseSteal can
+ * price, so a server missing from it is invisible there. This lists every
+ * reachable host except home, cloud and hacknet (they hold no money) with the
+ * first reason, in candidates()'s own order, that keeps it out. LIVE marks the
+ * hosts the running manager published to TARGETS_MARKER at its last rescan -
+ * a priced target it is NOT streaming lost on income, or is waiting on prep.
+ *
+ * getServer is already billed through lib/math.js, and ns.read is 0 GB.
+ */
+function renderMoney(ns, rows) {
+  const priced = new Set(rows.map((r) => r.snap.host));
+  const live = new Set(ns.read(TARGETS_MARKER).split("\n").map((h) => h.trim()).filter(Boolean));
+  const level = ns.getHackingLevel();
+
+  const seen = new Set(["home"]);
+  const queue = ["home"];
+  for (let i = 0; i < queue.length; i++) {
+    for (const h of ns.scan(queue[i])) if (!seen.has(h)) { seen.add(h); queue.push(h); }
+  }
+
+  const all = queue
+    .filter((h) => h !== "home" && !h.startsWith(HACKNET_HOST_PREFIX))
+    .map((h) => ns.getServer(h))
+    .filter((s) => !s.purchasedByPlayer)
+    .sort((a, b) => (b.moneyMax ?? 0) - (a.moneyMax ?? 0));
+
+  ns.print("");
+  ns.print(`=== ALL SERVERS (${all.length}, hacking ${level}) ` + "=".repeat(18));
+  ns.print(
+    pad("HOST", 20) + padL("MAX $", 10) + padL("NOW $", 10) + padL("AT%", 8) +
+      padL("SEC", 8) + padL("MIN", 7) + padL("REQ", 6) + "  STATUS",
+  );
+  const counts = {};
+  for (const s of all) {
+    const max = s.moneyMax ?? 0;
+    const status = live.has(s.hostname) ? "LIVE"
+      : !s.hasAdminRights ? "not rooted"
+        : (s.requiredHackingSkill ?? 0) > level ? "hacking too low"
+          : !(max > 0) ? "no money"
+            : priced.has(s.hostname) ? "target, not streamed"
+              : (s.hackDifficulty ?? 0) > (s.minDifficulty ?? 0) ? "needs prep"
+                : "unpriced";
+    counts[status] = (counts[status] ?? 0) + 1;
+    ns.print(
+      pad(s.hostname, 20) + padL(fmtMoney(max), 10) + padL(fmtMoney(s.moneyAvailable ?? 0), 10) +
+        padL(max > 0 ? ns.format.percent((s.moneyAvailable ?? 0) / max, 1) : "-", 8) +
+        padL((s.hackDifficulty ?? 0).toFixed(2), 8) + padL((s.minDifficulty ?? 0).toFixed(2), 7) +
+        padL(s.requiredHackingSkill ?? 0, 6) + "  " + status,
+    );
+  }
+  ns.print(Object.entries(counts).map(([k, n]) => `${k} ${n}`).join(", "));
 }
 
 /** @param {NS} ns */
@@ -192,6 +254,7 @@ export async function main(ns) {
   const args = ns.args.map(String);
   const lIdx = args.indexOf("--loop");
   const loopMs = lIdx >= 0 ? Math.max(1000, Number(args[lIdx + 1]) || 5000) : 0;
+  const all = args.includes("--all");
 
   // Outside the loop on purpose. prepare() caches game constants that do not
   // move - weakenAnalyze(1,1) and the two security-per-thread figures - so
@@ -211,7 +274,8 @@ export async function main(ns) {
   // existing invocation of this script expects.
   do {
     if (loopMs) ns.clearLog();
-    render(ns, ram, push);
+    const rows = render(ns, ram, push);
+    if (all) renderMoney(ns, rows);
     if (loopMs) await ns.sleep(loopMs);
   } while (loopMs);
 }
