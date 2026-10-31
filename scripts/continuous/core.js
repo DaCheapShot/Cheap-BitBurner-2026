@@ -31,7 +31,7 @@ import {
   POOL_WAIT_MS,
   PREP_CONCURRENCY,
   PREP_MAX_CYCLES,
-  PREP_SPARE_SHARE,
+  PREP_EXTRA_SHARE,
   PROMOTE_PREP_FIRST,
   REPREP_GRACE_MS,
   PUSH_MS,
@@ -892,12 +892,6 @@ export function rescan(ns, math, opts) {
   const next = [];
 
   const baseFor = new Map();
-  // What the admitted streams will really occupy, at the fraction and pace the
-  // calculator settled on. admitTargets' own `committed` is priced against the
-  // PROVISIONAL slice - budget / maxTargets - so on a pool where one target is
-  // admitted it under-states the commitment threefold, and prep would read the
-  // other two thirds as spare when the one live stream is about to take it.
-  let spent = 0;
 
   for (const p of admitted) {
     const picked = plan.picks.get(p.host);
@@ -907,7 +901,6 @@ export function rescan(ns, math, opts) {
     // the chosen count is not maxTargets.
     p.depth = Math.min(Math.ceil(p.times.weaken / picked.cadence), MAX_IN_FLIGHT);
     baseFor.set(p.host, picked.steal);
-    spent += picked.gb;
     // Re-state the admission figures at the fraction actually chosen. Leaving
     // them at the seed fraction used for ranking would have the log report a
     // batch size the stream never uses.
@@ -1050,23 +1043,11 @@ export function rescan(ns, math, opts) {
   ];
 
   // How many targets may be QUEUED for prep. Not how many get RAM - that is
-  // decided by servicePreps, which stops at the first wave the pool could not
-  // cover in full. Queuing reserves nothing, so an extra entry here costs a map
-  // slot and a line in the report.
-  //
-  // Spare is what the ADMITTED STREAMS will not use, NOT what happens to be free
-  // this instant. Free RAM was the first attempt and it is wrong at exactly the
-  // moment that matters: at startup nothing is placed yet, so the pool reads
-  // 100% idle and every slot is granted. `spent` is the calculator's own figure
-  // for what the streams will occupy in steady state, which is the honest
-  // answer - but note it does not save this from the startup case either, since
-  // with no target prepped there is nothing to admit and `spent` is 0. Only
-  // placement knows whether one target's need fits; see the `tight` gate in
-  // servicePreps.
-  const capacity = pool.placeableRam(ram.grow);
-  const idle = Math.max(0, budget - spent);
-  const spare = capacity > 0 ? Math.floor(idle / (capacity * PREP_SPARE_SHARE)) : 0;
-  let slots = Math.min(PREP_CONCURRENCY, 1 + spare) - preps.size;
+  // decided by servicePreps, wave by wave. Queuing reserves nothing, so this is
+  // not rationed by RAM. Rationing it on planned stream use held a live 11 PB pool
+  // to one slot with 9 PB free, and repairs took that slot: the richest targets
+  // went 24 minutes unprepped.
+  let slots = PREP_CONCURRENCY - preps.size;
   for (const t of queue) {
     if (slots <= 0) break;
     if (prepped.has(t.host) || streaming.has(t.host) || preps.has(t.host)) continue;
@@ -1134,10 +1115,9 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
   // exceeds the whole pool, three queued preps split it three ways and all three
   // crawl instead of one finishing and starting to earn.
   //
-  // PREP_SPARE_SHARE cannot catch this. It compares RAM SHARES, and at startup
-  // no target is prepped, so nothing is admitted, `spent` is 0, `idle` is the
-  // whole budget and every slot is granted however small the pool is. Need
-  // against capacity is knowable only here, at placement.
+  // Need against capacity is knowable only here, at placement. So a wave that came
+  // up short, or one past PREP_EXTRA_SHARE of the pool, holds back the preps
+  // behind it: on 1.6 TB one wave is the constraint, on 11 PB it is a rounding error.
   let tight = false;
 
   // Repairs before fresh preps. A stopped stream is a target we already admitted
@@ -1219,8 +1199,10 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
     active.wave = wave;
     active.deadline = res.landAt + REPREP_GRACE_MS;
     active.waves++;
-    active.shrunk = wave.shrunk;
-    if (wave.shrunk) tight = true;
+    const held = [...wave.grow.placements, ...wave.weaken.placements]
+      .reduce((n, p) => n + p.gb, 0);
+    active.shrunk = wave.shrunk || held > pool.usableRam * PREP_EXTRA_SHARE;
+    if (active.shrunk) tight = true;
   }
 
   return finished;

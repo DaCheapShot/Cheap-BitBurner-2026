@@ -330,7 +330,8 @@ export function createStream(ns, math, opts) {
     if (perThreadLog[perThreadLog.length - 1].t - base.t < lastWeaken) return 0;
     let peak = base.v;
     for (const s of perThreadLog) if (s.v > peak) peak = s.v;
-    return peak / base.v - 1;
+    // Hack is re-sized at launch, so only its own run can overshoot.
+    return (peak / base.v - 1) * exposure;
   }
 
   const driftBudget = () => {
@@ -351,6 +352,8 @@ export function createStream(ns, math, opts) {
   const ceiling = () => Math.min(base, maxStealForDrift(driftBudget()));
   let holdUntil = 0;
   let lastWeaken = 0;
+  // Share of a weaken window a hack is exposed to drift for: launch to landing.
+  let exposure = 1;
   // No-room evidence is not counted before this. After a step, the pool is still
   // full of batches sized at the OLD fraction until the last of them lands, so a
   // refusal in that window says nothing about the new one - and counting it cut
@@ -520,6 +523,7 @@ export function createStream(ns, math, opts) {
     // schedules. See anchorSwingFor for why there are two figures.
     const { swing, anchorSwing } = anchorSwingFor(th, snap.minSec);
     pace(th, times, swing, anchorSwing);
+    exposure = Math.min(1, (times.hack * (1 + swing)) / times.weaken);
 
     // Free: planThreads already measured it, and this is the only place that
     // knows both the value and the window it has to be compared across.

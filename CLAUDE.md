@@ -608,6 +608,9 @@ a count fixed at dispatch is a weaken window stale, and at 91% steal a 10% overs
 balance. A live run drained the-hub, rho and alpha that way, with 750 batches committed before the
 first report. `launchOp` re-reads `hackFractionPerThread` and cuts the threads to the planned take,
 which leaves about a quarter of the exposure. It never raises them: the grow is already out.
+`predictedDrift` is scaled to that same exposure, and the formulas backend reads hack power at
+minimum security, where a hack lands: the live reading ran up to 10% low on a 40-minimum server,
+which oversized batches and read as a 24% trend against 6.9% measured.
 
 **A stopped stream repairs when its hacks have landed, not when `depth` is 0** (`s.landing`), and
 rescan never winds one down. After a stop `depth` is mostly aborted batches waiting out deadlines
@@ -637,12 +640,12 @@ live stream to 169 aborts in 170 batches.
 first wave the pool could not cover in full — `placePrepWave` reports that as `shrunk` — so
 extras only ever get leftovers. It has to be placement that decides, because prep need is set
 by the target's excess security and money deficit, not by the pool, and one target's need
-routinely exceeds the whole pool early in a BitNode. `PREP_CONCURRENCY` and `PREP_SPARE_SHARE`
-survive as bounds on how many hosts are QUEUED; queuing reserves nothing. Both were written as
-the RAM throttle and neither could be one: a ratio of shares cannot answer "does one target's
-need fit", and at the start of a BitNode nothing is prepped, so nothing is admitted, `spent` is
-0, `idle` is the whole budget and all four slots are granted on a 32 GB home exactly as readily
-as on 26 PB — the 1.6 TB failure reached from the other end.
+routinely exceeds the whole pool early in a BitNode. A wave over `PREP_EXTRA_SHARE` (5%) of the
+pool counts the same as a short one, so on 1.6 TB preps go one at a time and on 11 PB they run
+side by side. `PREP_CONCURRENCY` only bounds how many hosts are QUEUED; queuing reserves nothing.
+Rationing the queue by shares of the RAM budget failed both ways: at the start of a BitNode nothing
+is admitted, so all four slots went to a 32 GB home, and once planned stream use filled the budget
+a live 11 PB pool got one slot with 9 PB free, leaving $559b-a-batch targets 24 minutes unprepped.
 
 The gate is carried on the prep entry, not recomputed per tick, because a short wave is still
 the constraint while it is in flight. Without that the split just moves from space into time:

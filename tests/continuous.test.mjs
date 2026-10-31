@@ -2328,9 +2328,9 @@ export const tests = {
     const now = Date.now();
     s.dispatch(now);
 
-    // Hack effectiveness rises 6% over one weaken window. That IS the drift: a
-    // batch dispatched at the start of the window lands into this.
-    t.hackPercentPerThread = 0.003 * 1.06;
+    // Hack effectiveness rises 40% over one weaken window. A hack launched a
+    // quarter of a window before landing lands into a quarter of that.
+    t.hackPercentPerThread = 0.003 * 1.4;
     s.dispatch(now + 21000);
 
     // The report-based estimator cannot see this. `over` is stolen/take - 1, so
@@ -2340,9 +2340,10 @@ export const tests = {
     // then took overshoots of 6.23% and 9.16%. All three drained to under 1%.
     assert(
       s.drift > GROW_DRIFT_TOLERANCE + 1e-9,
-      `budget ignored a 6% trend: ${(s.drift * 100).toFixed(2)}%`,
+      `budget ignored the trend: ${(s.drift * 100).toFixed(2)}%`,
     );
-    assertClose(s.drift, 0.06 * DRIFT_SAFETY, 2e-3, "budget should be the trend times the safety factor");
+    // A hair over the quarter: the exposure carries the batch's swing as well.
+    assertClose(s.drift, 0.4 * 0.25 * DRIFT_SAFETY, 0.02, "budget should be the exposed trend times the safety factor");
   },
 
   "the drift budget cannot grow to excuse itself": async () => {
@@ -3913,7 +3914,7 @@ export const tests = {
     assert(roomy.length === 3, `a roomy budget should run three, got ${roomy.length}`);
   },
 
-  "prep slots scale with the RAM the streams will not use": async () => {
+  "prep slots are queued however much of the budget the streams want": async () => {
     const dirty = (moneyMax) => ({
       moneyMax, moneyAvailable: moneyMax * 0.2, minDifficulty: 5, hackDifficulty: 40,
       hackPercentPerThread: 0.003, growBase: 1.0018,
@@ -3945,28 +3946,70 @@ export const tests = {
     // - so a fixture with fixed ms times quietly gets a deeper pipeline every
     // time the spacer is tightened, and stops being the small target the test
     // needs. Five cadences of weaken is that target at any spacer.
-    const { CADENCE_MS } = (await loadContinuous()).mods["config"];
-    const { preps: wide, mods } = await run({
+    const { CADENCE_MS, PREP_CONCURRENCY } = (await loadContinuous()).mods["config"];
+    const { preps: wide } = await run({
       moneyMax: 1e7, moneyAvailable: 1e7, minDifficulty: 5, hackDifficulty: 5,
       hackPercentPerThread: 0.003, growBase: 1.0018,
       weakenTime: 5 * CADENCE_MS, growTime: 4 * CADENCE_MS, hackTime: 1.25 * CADENCE_MS,
     });
-    const { PREP_CONCURRENCY } = mods["config"];
     assert(
       wide.size === PREP_CONCURRENCY,
       `a pool with room should still fan out to ${PREP_CONCURRENCY}, got ${wide.size}`,
     );
 
-    // Same candidates; the only difference is a stream whose pipeline wants the
-    // whole budget. Measuring FREE RAM instead would grant every slot here too,
-    // because at rescan nothing is placed yet and the pool reads 100% idle -
-    // which is the exact moment four waves took a 1.6 TB pool and kept it.
+    // A stream whose pipeline wants the whole budget. Queuing reserves nothing,
+    // and a live 11 PB pool held one slot this way: planned use filled the budget
+    // while 9 PB sat free, and $559b-a-batch targets went 24 minutes unprepped.
     const { preps: narrow } = await run({
       moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
       hackPercentPerThread: 0.003, growBase: 1.0018,
       weakenTime: 600000, growTime: 480000, hackTime: 150000,
     });
-    assert(narrow.size === 1, `a fully-spoken-for pool preps one at a time, got ${narrow.size}`);
+    assert(narrow.size === PREP_CONCURRENCY, `queue held to ${narrow.size}`);
+  },
+
+  // One wave here is ~13 TB. RAM is decided at placement, against the wave itself.
+  "a wave that is a large part of the pool holds the next prep back": async () => {
+    const { ns, math, pool, ram, mods, targets } = await prepFixture(65536);
+    const preps = new Map([["a", freshPrepEntry()], ["b", freshPrepEntry()]]);
+    mods["core"].servicePreps(ns, { math, pool, ram, streams: [], preps, log: () => {} });
+    assert(targets().join() === "a", `expected only a, got [${targets()}]`);
+
+    // Still the constraint while it is in flight, not only on the tick it landed.
+    mods["core"].servicePreps(ns, { math, pool, ram, streams: [], preps, log: () => {} });
+    assert(targets().join() === "a", `b took a turn, got [${targets()}]`);
+  },
+
+  "a wave that is a sliver of the pool lets the next prep go": async () => {
+    const { ns, math, pool, ram, mods, targets } = await prepFixture(8388608);
+    const preps = new Map([["a", freshPrepEntry()], ["b", freshPrepEntry()]]);
+    mods["core"].servicePreps(ns, { math, pool, ram, streams: [], preps, log: () => {} });
+    assert(targets().join() === "a,b", `expected both, got [${targets()}]`);
+  },
+
+  // Hack lands at minimum security: its weaken-2 went before it. Read at a
+  // transient it is under-stated, 8-10% on a 40-minimum server, so the batch took
+  // that much more than its grow covered.
+  "hack power is read at minimum security, where the hack lands": async () => {
+    const { ns, math } = await makeMath("formulas", {
+      servers: { t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 20, hackDifficulty: 40 } },
+    });
+    ns.formulas.hacking.hackPercent = (s) => ((100 - s.hackDifficulty) / 100) * 0.01;
+    assertClose(math.hackFractionPerThread(math.snapshot(ns, "t")), 0.008, 1e-12, "read at 40, not 20");
+  },
+
+  // Hack is sized at launch, so only launch-to-landing can overshoot. Charging the
+  // whole window held a stream to 73% on 24% against 6.9% measured.
+  "predicted drift covers the hack's own run, not the whole window": async () => {
+    const { s, ns } = await makeStream();
+    const t = Date.now();
+    s.dispatch(t);
+    ns.hackAnalyze = () => 0.003 * 1.2;
+    s.dispatch(t + 21000);
+    s.dispatch(t + 21300);
+    // 20% over the window x 0.25 exposure x 1.5 safety, a little more for swing.
+    assert(s.drift < 0.1, `budget ${s.drift} still charges the whole window`);
+    assert(s.drift > 0.07, `budget ${s.drift} lost the trend`);
   },
 
   "a prep that never converges releases its slot": async () => {
@@ -4102,7 +4145,9 @@ export const tests = {
   },
 
   "prep still fans out when the pool has room for both": async () => {
-    const { ns, math, pool, ram, mods, targets } = await prepFixture(262144);
+    // Twice the old size: at 256 TB this wave is 5.2% of the pool, just over
+    // PREP_EXTRA_SHARE.
+    const { ns, math, pool, ram, mods, targets } = await prepFixture(524288);
     const { servicePreps } = mods["core"];
 
     const preps = new Map([["a", freshPrepEntry()], ["b", freshPrepEntry()]]);
