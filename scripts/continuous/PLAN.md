@@ -12,7 +12,7 @@
 >
 > ### What it does now
 >
-> - **3 targets max** (`MAX_TARGETS`), admitted on money-per-GB-second against a RAM budget.
+> - **6 targets max** (`MAX_TARGETS`), the count chosen by income against a RAM budget.
 > - **Steal starts at the 0.95 ceiling and descends** on measured evidence. `over = stolen/take - 1`
 >   carries both signals because money clamps at maxMoney: positive is level-drift, negative is a
 >   drain. Also backs off on bad batches and on the pool refusing to seat a batch.
@@ -30,9 +30,9 @@
 > - **Spacer/cadence is untouched.** `SPACER_MS` 100 gives `CADENCE_MS` 400. Measured jitter was
 >   avg 10ms / max 29ms, so spacer 50 would double depth and double income with a 1.7x margin
 >   instead of 3.4x. Deliberately left for a run where it is the only variable changed.
-> - The pool is mostly idle by design at 3 targets: depth is capped by `weakenTime / cadence` and
->   steal by the ceiling, so a fully-fed target cannot absorb another byte. Spending the rest
->   needs a smaller cadence or more targets.
+> - A fully-fed target cannot absorb another byte: depth is capped by `weakenTime / cadence` and
+>   steal by the ceiling, ~1.4 PB a stream. Past six of those, spending the rest needs a smaller
+>   cadence.
 >
 > ### Measured
 >

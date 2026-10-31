@@ -687,8 +687,9 @@ export function createStream(ns, math, opts) {
    * at the instant of the call, so measuring at the instant we call is exact,
    * where the old design measured once and hoped it still held a window later.
    */
-  function launchOp(item, opTime) {
-    const { batch, op, land, threads } = item;
+  function launchOp(item, opTime, perThread) {
+    const { batch, op, land } = item;
+    let { threads } = item;
 
     // Slack is how much time the op has in hand. Negative means it will land
     // late by that much.
@@ -709,6 +710,15 @@ export function createStream(ns, math, opts) {
     const kind = OP_WORKER[op];
     let placements;
     if (op === "H") {
+      // Re-sized here, because ns.hack takes its percent at LANDING. From dispatch
+      // that is a whole weaken window of rising hacking level, and a live run
+      // measured 10-14% overshoot: at 91% steal, the whole balance. From launch it
+      // is about a quarter of that. Only ever down, since the grow already out
+      // covers the planned take and nothing more. The sliver keeps float error
+      // from costing a thread when nothing has changed.
+      if (perThread > 0) {
+        threads = Math.min(threads, Math.max(1, Math.floor(batch.steal / perThread + 1e-9)));
+      }
       // Hack gets no core bonus, so its demand IS its raw thread count.
       placements = pool.allocate(ram.hack, threads, { order: OP_FILL_ORDER.H });
     } else {
@@ -791,6 +801,7 @@ export function createStream(ns, math, opts) {
     // One fresh measurement per tick, taken lazily - only when something is
     // actually going out.
     let fresh = null;
+    let perThread = 0;
 
     for (const op of LAUNCH_ORDER) {
       const q = queues[op];
@@ -808,8 +819,12 @@ export function createStream(ns, math, opts) {
         if (item.land - worst - now > lead) break;
 
         dequeue(q);
-        if (!fresh) fresh = opTimesByOp(math.opTimes(math.snapshot(ns, host)));
-        launchOp(item, fresh[op]);
+        if (!fresh) {
+          const snap = math.snapshot(ns, host);
+          fresh = opTimesByOp(math.opTimes(snap));
+          perThread = math.hackFractionPerThread(snap);
+        }
+        launchOp(item, fresh[op], perThread);
         launched++;
       }
     }
@@ -1202,6 +1217,15 @@ export function createStream(ns, math, opts) {
     stats,
     get retiring() { return retiring; },
     get depth() { return inFlight.size; },
+    // Batches that can still land a hack. Hack launches last and a stop aborts
+    // everything queued, so on a stopped stream a live batch is one whose hack is
+    // out. Repair waits for this, not for depth: aborted batches sit in flight
+    // until their deadline, up to a whole weaken window with nothing to wait for.
+    get landing() {
+      let n = 0;
+      for (const b of inFlight.values()) if (!b.aborted) n++;
+      return n;
+    },
     // What the pipeline still owes the pool. Reported because "why has this
     // stream stopped dispatching against a pool with free RAM" is otherwise
     // unanswerable from a log - the answer is that the free RAM is spoken for.

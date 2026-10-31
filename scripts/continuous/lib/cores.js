@@ -22,17 +22,13 @@
  */
 
 /**
- * Cores by hostname, remembered across calls.
- *
- * RAM is charged per ns function REACHABLE, not per call, so caching buys no
- * RAM at all - it only saves the work of rebuilding a full server object for
- * every host on every cadence tick, which at a 400ms cadence is a few hundred
- * calls a second for a value that almost never changes.
- */
-const cache = new Map();
-
-/**
  * Cores per host.
+ *
+ * Read fresh every time, and never cached. initForeignServers re-rolls cpuCores
+ * at every install while this module outlives the process, so a cache handed the
+ * next run another install's numbers, and a host over-stated that way
+ * under-delivers grow and weaken. It only runs at startup and for hosts sync
+ * finds, so there is nothing to save.
  *
  * @param {NS} ns
  * @param {string[]} hosts
@@ -40,21 +36,8 @@ const cache = new Map();
  */
 export function coreMap(ns, hosts) {
   const out = {};
-  for (const host of hosts) {
-    // home is the one host whose cores genuinely change during a run - they are
-    // purchasable - so it is never served from cache. Every other host's core
-    // count is fixed at world generation.
-    if (host === "home" || !cache.has(host)) {
-      cache.set(host, ns.getServer(host).cpuCores ?? 1);
-    }
-    out[host] = cache.get(host);
-  }
+  for (const host of hosts) out[host] = ns.getServer(host).cpuCores ?? 1;
   return out;
-}
-
-/** Forget everything - for tests, and after an augmentation install. */
-export function resetCoreCache() {
-  cache.clear();
 }
 
 /**

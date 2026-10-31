@@ -754,6 +754,14 @@ export function rescan(ns, math, opts) {
   if (grown.grewGb > 1) {
     log(`  pool grew ${(grown.grewGb / 1024).toFixed(2)}TB since the last rescan`);
   }
+  // Grow and weaken fill home first, so this says whether they are.
+  const home = pool.get("home");
+  if (home) {
+    log(
+      `  home: ${home.cores} cores, ${(home.freeRam / 1024).toFixed(2)}TB free ` +
+        `of ${(home.usableRam / 1024).toFixed(2)}TB`,
+    );
+  }
 
   // After sync: a host sync just added is built with no reserve of its own.
   applyStanekReserve(ns, pool);
@@ -981,6 +989,11 @@ export function rescan(ns, math, opts) {
   // killed - see stream.windDown for why killing loses money.
   for (const s of streams) {
     if (want.has(s.host)) continue;
+    // Off baseline is why it failed pricing, not a sign it was outranked. Winding
+    // it down would stop its repair, and a live run ended with every stream gone
+    // that way: 8.7 PB free and nothing dispatching. Once back on baseline it is
+    // priced like the rest and loses its slot here if it really has.
+    if (s.stopped && !s.retiring) { next.push(s); continue; }
     if (!s.retiring) log(`  -${s.host}: no longer in the top ${maxTargets}, draining`);
     s.windDown();
     if (s.depth > 0) next.push(s);
@@ -1107,9 +1120,9 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
   // be repaired.
   for (const s of streams) {
     if (!s.stopped || s.retiring) continue;
-    // Wait for its own batches to clear first: measuring a target while its
-    // last hacks are still landing reads the transient as the drift.
-    if (s.depth > 0) continue;
+    // Wait for its own hacks to land first: measuring a target while they are
+    // still landing reads the transient as the drift.
+    if (s.landing > 0) continue;
     if (!preps.has(s.host)) preps.set(s.host, freshPrep());
   }
 
@@ -1183,6 +1196,8 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
     // weak to outrun the security it adds.
     if (active.waves >= PREP_MAX_CYCLES) {
       preps.delete(host);
+      // Or a stopped stream re-queues this prep on the next tick, for ever.
+      byHost.get(host)?.windDown?.();
       log(
         `  ${host}: prep ABANDONED after ${active.waves} waves - ` +
           `${fmtMoney(snap.money)} of ${fmtMoney(snap.maxMoney)}, ` +

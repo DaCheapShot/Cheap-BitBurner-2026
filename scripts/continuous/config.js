@@ -714,21 +714,18 @@ export const DESYNC_STRIKES = 3;
 // --------------------------------------------------------------- targets ----
 
 /**
- * How many targets stream at once. A hard limit, not a budget-driven guess.
+ * How many targets may stream at once. A ceiling: rescan picks the count by
+ * income, so a small pool still runs one.
  *
- * Kept small on purpose. More streams is not more income past the point where
- * the pool stops being the constraint: depth is capped by weakenTime / cadence
- * and steal by MAX_STEAL_FRACTION, so three targets at the ceiling already earn
- * everything three servers can be made to yield. What extra streams buy is
- * churn - more preps to keep finished, more sets to re-evaluate, and a longer
- * list for the admission ordering to shuffle between rescans.
+ * A fully-fed target cannot absorb another byte: depth is capped by weakenTime /
+ * cadence and steal by MAX_STEAL_FRACTION. A live run measured that at ~1.4 PB a
+ * stream at the 300ms floor, so three streams left over half of a 7.5 PB budget
+ * idle. Six covers that pool; on a bigger one the rest needs a smaller cadence.
  *
- * The RAM left over is genuinely idle, and that is the honest state of things:
- * a fully-fed target at 95% steal and full depth cannot absorb another byte.
- * Spending it needs a smaller cadence (SPACER_MS) or more targets, and those
- * are separate decisions with their own evidence.
+ * ponytail: timelineFits sorts the whole ledger per dispatch, so this also doubles
+ * that work. Keep the ledger sorted if jitter climbs toward SPACER_MS.
  */
-export const MAX_TARGETS = 3;
+export const MAX_TARGETS = 6;
 
 /**
  * Fraction of the pool's free RAM to commit across all streams at full depth.

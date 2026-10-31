@@ -603,11 +603,31 @@ trend in `hackFractionPerThread` over a weaken window) and sizes every batch for
 steady state `worstOver / tolerance ≈ 1 / DRIFT_SAFETY`, whatever the fraction or the target — so
 a climb threshold below that is one no healthy stream can ever meet.
 
-**`MAX_TARGETS = 3`, but the count is chosen by INCOME, not capacity.** Running the most targets
+**Hack is re-sized at its own launch, only ever down.** `ns.hack` takes its percent at landing, so
+a count fixed at dispatch is a weaken window stale, and at 91% steal a 10% overshoot is the whole
+balance. A live run drained the-hub, rho and alpha that way, with 750 batches committed before the
+first report. `launchOp` re-reads `hackFractionPerThread` and cuts the threads to the planned take,
+which leaves about a quarter of the exposure. It never raises them: the grow is already out.
+
+**A stopped stream repairs when its hacks have landed, not when `depth` is 0** (`s.landing`), and
+rescan never winds one down. After a stop `depth` is mostly aborted batches waiting out deadlines
+with no hack to land, so waiting on it cost a weaken window. A stopped stream also fails pricing,
+which read as outranked, and retiring streams are never repaired: a live run ended with 8.7 PB free
+and nothing dispatching. It resumes first and loses its slot at a later rescan if it really has.
+
+**`MAX_TARGETS = 6`, but the count is chosen by INCOME, not capacity.** Running the most targets
 that fit is only right when the budget is not the constraint. When it is, every extra target
 narrows the slice for all of them and income is near-linear in the slice — a live run measured
 phantasy alone at $2.84m/s against $1.96m/s for three. `rescan` prices 1..N and takes the best
-total, so the count rises to 3 on its own as the pool grows.
+total, so the count rises on its own as the pool grows. The ceiling is 6 because a stream at the
+300 ms floor saturates at ~1.4 PB, and three left over half of a 7.5 PB budget idle.
+
+**Grow and weaken fill home first, and hack leaves it for last**, whatever its cores (`hostsBy`,
+the user's rule). A foreign host can out-core home, but it holds a few GB, and each one taken first
+is another split. `sync` re-reads home's cores, since sing buys them mid-run. `coreMap` caches
+nothing: `initForeignServers` re-rolls foreign cores at every install and the module outlives the
+process, so a cache over-stated hosts and under-delivered grow and weaken. Each rescan logs a
+`home:` line with its cores and free RAM.
 
 **Prep runs concurrently with streaming**, one target at a time unless the pool genuinely has
 leftovers. Four concurrent preps on a 1.6 TB pool reserved the whole of it and starved the only

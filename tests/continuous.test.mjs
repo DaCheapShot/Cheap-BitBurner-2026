@@ -105,12 +105,7 @@ function makeCoreNs(hosts, cores = {}) {
 async function makePool(hosts, cores = {}, opts = {}) {
   const { mods } = await loadContinuous();
   const { ServerPool } = mods["lib/server"];
-  const { coreMap, resetCoreCache } = mods["lib/cores"];
-
-  // The core cache is module-level and lives for the whole test run, so a test
-  // that reuses a hostname with different cores would otherwise read the
-  // previous test's answer.
-  resetCoreCache();
+  const { coreMap } = mods["lib/cores"];
 
   const ns = makeCoreNs(hosts, cores);
   const pool = ServerPool.build(ns, { cores: coreMap(ns, Object.keys(hosts)), ...opts });
@@ -165,9 +160,8 @@ function mathNs({ hosts = { home: 4096 }, servers = {}, cores = {}, formulas = f
 async function makeMath(which, opts = {}) {
   const { mods } = await loadContinuous();
   const { ServerPool } = mods["lib/server"];
-  const { coreMap, resetCoreCache } = mods["lib/cores"];
+  const { coreMap } = mods["lib/cores"];
 
-  resetCoreCache();
   const ns = mathNs({ ...opts, formulas: which === "formulas" });
   const math = mods["lib/math"];
 
@@ -4642,5 +4636,123 @@ export const tests = {
     // The trader is told which companies are reachable; a host with no org is not one.
     const { STOCK_PUSHABLE_FILE } = mods["config"];
     assert(ns.read(STOCK_PUSHABLE_FILE) === '["B Corp"]', `pushable: ${ns.read(STOCK_PUSHABLE_FILE)}`);
+  },
+
+  // ns.hack takes its percent at LANDING. Sized at dispatch it is a weaken window
+  // stale: a live run measured 10-14% overshoot, and at 91% steal that is the
+  // whole balance. Sized at launch it is a quarter of that.
+  "a hack launches smaller when hacking has improved since dispatch": async () => {
+    const { s, ns, calls } = await makeStream();
+    s.dispatch();
+    ns.hackAnalyze = () => 0.0045; // planned at 0.003: 33 threads for 9.9%
+    s.tick(Date.now() + 1e9);
+
+    const hack = calls.find((c) => c.args[5] === "H");
+    assert(hack.threads === 22, `expected 22 hack threads, got ${hack.threads}`);
+  },
+
+  // The grow is sized for the planned take and was launched first. A weaker
+  // reading at launch must not raise the take past it.
+  "a hack never launches larger than it was planned": async () => {
+    const { s, ns, calls } = await makeStream();
+    s.dispatch();
+    ns.hackAnalyze = () => 0.002;
+    s.tick(Date.now() + 1e9);
+
+    const hack = calls.find((c) => c.args[5] === "H");
+    assert(hack.threads === 33, `expected the planned 33, got ${hack.threads}`);
+  },
+
+  // After a stop `depth` is mostly aborted batches waiting out their deadlines. A
+  // live run sat dead 155 report lines waiting on batches with no hack to land.
+  "a stopped stream is repaired once no hack is left to land": async () => {
+    const servers = {
+      t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+           hackPercentPerThread: 0.003, growBase: 1.0018,
+           weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+    };
+    const { s, ns, math, pool, ram, mods } = await makeStream({ servers });
+    const { DESYNC_STRIKES } = mods["config"];
+
+    s.dispatch(); // queued, nothing launched
+    servers.t.moneyAvailable = 1e3;
+    for (let i = 0; i < DESYNC_STRIKES; i++) s.dispatch();
+    assert(s.stopped, "the fixture should stop the stream");
+    s.tick(Date.now() + 1e9);
+    assert(s.depth > 0, "the aborted batch should still be in flight");
+
+    const preps = new Map();
+    mods["core"].servicePreps(ns, { math, pool, ram, streams: [s], preps, log: () => {} });
+    assert(preps.has("t"), "nothing can land a hack, so repair must start now");
+  },
+
+  "a stopped stream waits for a hack already launched": async () => {
+    const servers = {
+      t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+           hackPercentPerThread: 0.003, growBase: 1.0018,
+           weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+    };
+    const { s, ns, math, pool, ram, mods, fire } = await makeStream({ servers });
+    const { DESYNC_STRIKES } = mods["config"];
+
+    fire(); // every op out, the hack included
+    servers.t.moneyAvailable = 1e3;
+    for (let i = 0; i < DESYNC_STRIKES; i++) s.dispatch();
+    assert(s.stopped, "the fixture should stop the stream");
+
+    const preps = new Map();
+    mods["core"].servicePreps(ns, { math, pool, ram, streams: [s], preps, log: () => {} });
+    assert(!preps.has("t"), "measuring now would read that hack's transient as the drift");
+  },
+
+  // A stopped target fails pricing, so it read as outranked, and a retiring
+  // stream is never repaired. The live log ends with every stream gone this way.
+  "rescan keeps a stopped stream so it can be repaired": async () => {
+    const { ns, math, pool, ram, mods } = await makeMath("analyze", { hosts: { home: 262144 } });
+    ns.exec = () => 1;
+    const stopped = {
+      host: "gone", stopped: "off baseline", retiring: false, depth: 5, drained: true,
+      drift: 0, windDown() { this.retiring = true; },
+    };
+
+    const next = mods["core"].rescan(ns, math, {
+      pool, ram, steal: 0.1, maxTargets: 3, forced: null,
+      streams: [stopped], preps: new Map(), log: () => {}, verbose: false,
+    });
+
+    assert(next.includes(stopped), "the stopped stream was dropped");
+    assert(!stopped.retiring, "a retiring stream is never repaired");
+  },
+
+  "grow and weaken fill home first, even against more cores": async () => {
+    const { pool } = await makePool({ home: 1024, big: 2048, low: 4096 }, { home: 4, big: 15 });
+    const order = pool.hostsBy("coresDesc").map((s) => s.hostname);
+    assert(order.join() === "home,big,low", `got ${order}`);
+  },
+
+  "hack leaves home for last, even when it ties on one core": async () => {
+    const { pool } = await makePool({ home: 8192, a: 1024, b: 2048 }, {});
+    const order = pool.hostsBy("coresAsc").map((s) => s.hostname);
+    assert(order.join() === "b,a,home", `got ${order}`);
+  },
+
+  // sing buys home cores while the manager runs.
+  "home's cores are re-read at sync": async () => {
+    const cores = { home: 2 };
+    const { ns, pool, mods } = await makeMath("analyze", { cores });
+    cores.home = 8;
+    pool.sync((h) => mods["lib/cores"].coreMap(ns, [h])[h]);
+    assert(pool.get("home").cores === 8, `home still reads ${pool.get("home").cores}`);
+  },
+
+  // initForeignServers re-rolls cpuCores at every install and the module outlives
+  // the process, so a cache hands the next run another install's numbers.
+  "coreMap reads a foreign host's cores fresh": async () => {
+    const cores = { a: 12 };
+    const { ns, mods } = await makeMath("analyze", { hosts: { home: 4096, a: 64 }, cores });
+    const { coreMap } = mods["lib/cores"];
+    coreMap(ns, ["a"]);
+    cores.a = 3;
+    assert(coreMap(ns, ["a"]).a === 3, "a stale core count over-states grow and weaken");
   },
 };
