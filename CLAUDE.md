@@ -1534,7 +1534,7 @@ another of the subsystem's own.
 
 ### The IPvGO player (`scripts/go/`)
 
-Prep for BitNode 14, not yet run live. Self-contained like `gang/`: it imports `scripts/rpc.js`, and
+Built for BitNode 14, proven live outside it (search: 44-8, against 6-22 for the heuristic alone). Self-contained like `gang/`: it imports `scripts/rpc.js`, and
 boot and settings read one path out of `go/config.js`. **`ns.go` has no node gate**, so boot runs it on
 every node; only `go.cheat` needs SF14, and nothing here uses it.
 
