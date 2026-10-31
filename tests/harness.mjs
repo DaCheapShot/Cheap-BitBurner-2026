@@ -19,6 +19,12 @@ const NESTED = [
   "continuous/lib/share.js",
   // The pool the share tests plan against - the continuous manager's own.
   "continuous/lib/server.js",
+  // The IPvGO player. board.js and plan.js are pure and hold every decision;
+  // go.js holds ns calls only inside main() and its body is parsed by rpc.test.
+  "go/config.js",
+  "go/board.js",
+  "go/plan.js",
+  "go/go.js",
   // The gang subsystem's pure modules. gang/math.js is where every gang
   // decision is made and it holds no ns call, so it is testable directly -
   // which is the point of putting the decisions there rather than in the

@@ -48,6 +48,11 @@ const COST = {
   attempt: 10, getContract: 15, getContractType: 5, getData: 5,
   getDescription: 5, getNumTriesRemaining: 2, createDummyContract: 2,
   getContractTypes: 0,
+  // ns.go and its analysis and cheat namespaces. Names to avoid in scripts/go/,
+  // which is pinned at BASE: a board helper called getLiberties is 16.00 GB.
+  makeMove: 4, getBoardState: 4, getValidMoves: 8, getChains: 16, getLiberties: 16,
+  getControlledEmptyNodes: 16, setTestingBoardState: 4, getCheatSuccessChance: 1,
+  getCheatCount: 1, removeRouter: 8, playTwoMoves: 8, repairOfflineNode: 8, destroyNode: 8,
   // The clock the contract gate reads. lastAugReset / lastNodeReset are the
   // only route to it: ns.getPlayer() carries totalPlaytime, not
   // playtimeSinceLastAug.
@@ -866,6 +871,29 @@ export const tests = {
   "sellall.js costs 10.65 GB": () => {
     const ram = ramOf("stocks/sellall");
     assert(Math.abs(ram - 10.65) < 0.011, `expected 10.65 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // A resident turn loop cannot hide makeMove in a body. 10.60 = 1.60 + run 1.00
+  // + makeMove 4.00 + getBoardState 4.00; the analysis API, 8.00-16.00 GB a name,
+  // is what board.js exists to keep out.
+  "go.js costs 10.60 GB": () => {
+    const ram = ramOf("go/go");
+    assert(Math.abs(ram - 10.6) < 0.011, `expected 10.60 GB, got ${ram.toFixed(2)}`);
+  },
+
+  // A local called getLiberties would cost 16.00 GB here, the API's price.
+  "the Go subsystem's shared modules are free to import": () => {
+    for (const mod of ["go/config", "go/board", "go/plan"]) {
+      const ram = ramOf(mod);
+      assert(Math.abs(ram - BASE) < 0.011,
+        `${mod}.js costs ${(ram - BASE).toFixed(2)} GB to import; it must be 0`);
+    }
+  },
+
+  "the Go ENV body is priced": () => {
+    const got = bodiesOf("go/go");
+    assert(Object.keys(got).join() === "ENV", `go.js bodies ${Object.keys(got)} - every body must be pinned here`);
+    assert(Math.abs(got.ENV - 6.6) < 0.011, `ENV body: expected 6.60 GB, got ${got.ENV.toFixed(2)}`);
   },
 
   "the hacknet subsystem's peak is one sweep, not both": () => {

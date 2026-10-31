@@ -10,6 +10,7 @@ import { SING_SERVICE, GANG_KARMA_TARGET } from "./sing/config.js";
 import { SLEEVE_SERVICE, STATUS_FILE as SLEEVE_STATUS_FILE } from "./sleeve/config.js";
 import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE } from "./hacknet/config.js";
 import { STOCKS_SERVICE } from "./stocks/config.js";
+import { GO_SERVICE } from "./go/config.js";
 import { STANEK_SERVICE, CHARGE_WORKER, STATUS_FILE as STANEK_STATUS_FILE } from "./stanek/config.js";
 import { SETTINGS_FILE, setting, settingsLog, BOOT_TICK_S } from "./settings.js";
 import { rpc } from "./rpc.js";
@@ -373,6 +374,7 @@ export async function main(ns) {
   const noStocks = args.includes("--no-stocks");
   const noHud = args.includes("--no-hud");
   const noStanek = args.includes("--no-stanek");
+  const noGo = args.includes("--no-go");
   // sing.js holds share off whenever the player is not doing faction work, and
   // publishes the rep work sleeves take on. With sing opted out nothing would
   // ever release that hold or refresh that list, so clear both here.
@@ -627,6 +629,15 @@ export async function main(ns) {
     } else if (!noStocks && ns.stock.hasTixApiAccess()) {
       killDuplicates(ns, STOCKS_SERVICE, log);
       ensureService(ns, STOCKS_SERVICE, [], log);
+    }
+    // The IPvGO player. No gate: ns.go works on every node and go.js never exits,
+    // so ensureService finds it up. After the resident services, because its
+    // 10.60 GB is the first thing a fresh home should go without.
+    if (!live("go")) {
+      stopService(ns, GO_SERVICE, log);
+    } else if (!noGo) {
+      killDuplicates(ns, GO_SERVICE, log);
+      ensureService(ns, GO_SERVICE, [], log);
     }
     // The hacknet, money sweep then hash sweep, every `hacknet.every` ticks (live setting).
     //

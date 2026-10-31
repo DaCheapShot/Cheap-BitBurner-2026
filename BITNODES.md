@@ -32,11 +32,11 @@ cheaper; nodes that need a new subsystem written come after, one subsystem at a 
 
 | # | Node | Repo ready? | Why now |
 |---|---|---|---|
-| 1 | **BN6.1** Like Tears in Rain | **no** - needs a Bladeburner subsystem | Bladeburner access + combat stat mults. Destroyable by hacking too, but slowly. Build `scripts/bladeburner/` first. |
-| 2 | **BN7.1** Bladeburners 2079 | reuses #1 | Bladeburner API outside BN7; 7.3 gives Blade's Simulacrum (bladeburner while working). Then take 6 and 7 to level 3. Note SF7.3: Stanek's Gift must be accepted BEFORE joining Bladeburner. |
-| 3 | **BN15.1** Secrets of the Dark Net | **no** - fork-specific darknet, needs new scripts | TOR + DarkscapeNavigator at start everywhere; 15.2/15.3 make charisma boost rep. The Red Pill is not in Daedalus here - sing's `RED_PILL` path will not work as-is. |
-| 4 | **BN3.1** Corporatocracy | **no** - corporation automation is a large project | Corp API everywhere; a running corp is the biggest money engine in the game. Highest payoff, highest build cost. |
-| 5 | **BN14.1** IPvGO Subnet Takeover | **no** - needs a Go player | Node Power stat mults, favor from win streaks. Lowest priority. |
+| 1 | **BN14.1** IPvGO Subnet Takeover | yes - `go/`, untested live | Node Power x2 everywhere, favor from win streaks. The user's pick for next (2026-10-31). |
+| 2 | **BN6.1** Like Tears in Rain | **no** - needs a Bladeburner subsystem | Bladeburner access + combat stat mults. Destroyable by hacking too, but slowly. Build `scripts/bladeburner/` first. |
+| 3 | **BN7.1** Bladeburners 2079 | reuses #2 | Bladeburner API outside BN7; 7.3 gives Blade's Simulacrum (bladeburner while working). Then take 6 and 7 to level 3. Note SF7.3: Stanek's Gift must be accepted BEFORE joining Bladeburner. |
+| 4 | **BN15.1** Secrets of the Dark Net | **no** - fork-specific darknet, needs new scripts | TOR + DarkscapeNavigator at start everywhere; 15.2/15.3 make charisma boost rep. The Red Pill is not in Daedalus here - sing's `RED_PILL` path will not work as-is. |
+| 5 | **BN3.1** Corporatocracy | **no** - corporation automation is a large project | Corp API everywhere; a running corp is the biggest money engine in the game. Highest payoff, highest build cost. |
 
 After the queue: SF8.3 (cheap, `stocks/` ready) whenever a filler node is wanted, then more BN12
 levels (vanilla SF12 starts each node with NeuroFlux levels - verify the fork's effect before farming
@@ -45,6 +45,12 @@ further).
 ## Per-node notes
 
 Fill these in during a run - what broke, what had to be tuned, how long it took.
+
+- **BN14**: GoPower x4, hacking level x0.4, hack speed x0.3, rep work x0.2, aug prices x1.5,
+  daemon difficulty x5.
+  - `go.js` runs on every node, so run it live here first: `cat /data/go.txt` shows wins per opponent.
+    Win rate under about 50% on the arms it favours means the engine needs search before BN14.
+  - Weights are `NODE_WEIGHTS[14]` in `go/config.js`: tune them after the first cycle.
 
 - **BN13**: hacking level x0.25, hack exp x0.1, gift power x2, board 6x5.
   - Boot accepts the gift on its **first tick**, ahead of sing. **Do not buy or install an aug by hand
