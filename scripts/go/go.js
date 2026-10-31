@@ -1,5 +1,7 @@
-import { OPPONENTS, STATUS_FILE, GAME_LOG_FILE, GAME_LOG_KEEP, ARMS_FILE, STUCK_MS, WORLD, SLICE_MS } from "./config.js";
-import { chooseArm, chooseMove, searchMoves, learn, armKey } from "./plan.js";
+import {
+  OPPONENTS, STATUS_FILE, GAME_LOG_FILE, GAME_LOG_KEEP, ARMS_FILE, STUCK_MS, WORLD, SLICE_MS, CHEAT_BELOW, CHEAT_MIN_CHANCE,
+} from "./config.js";
+import { chooseArm, chooseMove, searchMoves, learn, armKey, canCheat, cheatOptions, cheatPays } from "./plan.js";
 import { startSearch } from "./search.js";
 import { rpc } from "scripts/rpc.js";
 import { SETTINGS_FILE, setting } from "scripts/settings.js";
@@ -26,6 +28,11 @@ import { SETTINGS_FILE, setting } from "scripts/settings.js";
  *         cat /data/go.txt               each opponent's bonus, streak and record
  *         cat /data/go.log.txt            one line per game
  *
+ * CHEATS ARE RPC BODIES, ONLY. The game bills every name in a script whether it
+ * runs or not, so one go.cheat call here would cost 8.00 GB on every save without
+ * SF14, the check in front of it notwithstanding. A body is generated at runtime,
+ * so canCheat failing means it is never even written.
+ *
  * RAM: 1.60 base + run 1.00 + makeMove 4.00 + getBoardState 4.00 = 10.60 GB
  *
  * ponytail: getBoardState could be replaced by replaying moves through board.js
@@ -43,6 +50,28 @@ let goPower = null;
 try { goPower = ns.getBitNodeMultipliers().GoPower ?? null; } catch {}
 return { node: r.currentNode, sf14: r.ownedSF.get(14) ?? 0, goPower };
 `;
+
+/** One attempt a game, so these are the only cheat reads: a chance and a count. */
+const CHEAT_ODDS = `
+return { chance: ns.go.cheat.getCheatSuccessChance(), count: ns.go.cheat.getCheatCount() };
+`;
+
+/**
+ * No await on either: the cheat lands at the call, the promise only waits for the
+ * AI, which can outlast rpc's 10 s. The turn loop awaits white as usual.
+ */
+const CHEAT_REMOVE = `
+ns.go.cheat.removeRouter(args[0], args[1]);
+return true;
+`;
+
+const CHEAT_TWO = `
+ns.go.cheat.playTwoMoves(args[0], args[1], args[2], args[3]);
+return true;
+`;
+
+/** pickMove's answer when a cheat took the turn: there is no move left to make. */
+const CHEATED = "cheated";
 
 /** Without SF5 only the node is known, and BN14 is the only GoPower not 1 (BitNode.tsx). */
 const goPowerFor = (node, read) => read ?? (node === 14 ? 4 : 1);
@@ -92,6 +121,8 @@ export async function main(ns) {
   // process: installing the pill restarts it, which is the retry.
   const gone = new Set();
   let current = "starting";
+  let cheatDone = false;
+  let cheatNote = "";
 
   const report = () => {
     const stats = ns.go.analysis.getStats();
@@ -136,12 +167,67 @@ export async function main(ns) {
     const moves = budget > 0 ? searchMoves(rows, history, s, quick) : null;
     if (!moves) return quick;
     const search = startSearch(rows, moves, s.komi);
-    const end = Date.now() + budget;
+    await think(search, budget);
+    if (await tryCheat(rows, search, s.komi, budget)) return CHEATED;
+    return search.best() ?? quick;
+  };
+
+  const think = async (search, ms) => {
+    const end = Date.now() + ms;
     while (Date.now() < end) {
       search.step(SLICE_MS);
       await ns.asleep(0);
     }
-    return search.best() ?? quick;
+  };
+
+  /**
+   * One attempt a game, and that is the safety: only a failure AFTER an earlier
+   * cheat can eject, so a first attempt can cost a turn but never the game.
+   *
+   * The game's value is cheap and comes first; the node read only runs on a losing
+   * position. Everything after the gate may fail for want of free RAM on home, and
+   * a cheat is never worth stopping a game, so any failure plays the normal move.
+   *
+   * ponytail: cheats only where search runs, up to 7x7, since nothing bigger has a
+   * value to judge them by. That leaves out the secret opponent's 19x19 board.
+   */
+  const tryCheat = async (rows, search, komi, budget) => {
+    const [first, second] = search.ranked();
+    if (cheatDone || !second || first.value >= CHEAT_BELOW) return false;
+    const { node, sf14 } = await readEnv();
+    if (!canCheat(node, sf14) || setting(ns.read(SETTINGS_FILE), "go.cheat") === 0) return false;
+    try {
+      const odds = await rpc(ns, CHEAT_ODDS);
+      if (odds.count > 0 || odds.chance < CHEAT_MIN_CHANCE) {
+        cheatDone = true; // Neither changes within a game: do not pay to ask again.
+        return false;
+      }
+      const options = cheatOptions(rows, first, second);
+      const slice = budget / (options.length + 1);
+      const value = async (board) => {
+        const q = startSearch(board, null, komi, "O");
+        await think(q, slice);
+        return q.worth();
+      };
+      const skip = await value(rows);
+      let best = null;
+      let bestV = -1;
+      for (const o of options) {
+        const v = await value(o.rows);
+        if (v > bestV) {
+          best = o;
+          bestV = v;
+        }
+      }
+      if (!best || !cheatPays(odds.chance, bestV, skip, first.value)) return false;
+      await rpc(ns, best.kind === "two" ? CHEAT_TWO : CHEAT_REMOVE, ...best.points);
+      cheatDone = true;
+      cheatNote = `, cheated (${best.kind} at ${ns.format.percent(odds.chance, 0)})`;
+      return true;
+    } catch (err) {
+      warnOnce(`cheat: ${err}`);
+      return false;
+    }
   };
 
   const playOut = async () => {
@@ -156,6 +242,7 @@ export async function main(ns) {
       const state = ns.go.getGameState();
       const opponentPassed = state.previousMove === null && history.length > 0;
       const m = await pickMove(ns.go.getBoardState(), history, { komi: state.komi, opponentPassed });
+      if (m === CHEATED) continue;
       try {
         const turn = m ? ns.go.makeMove(m.x, m.y) : ns.go.passTurn();
         if ((await within(turn)) === null) await unstick();
@@ -190,6 +277,8 @@ export async function main(ns) {
       current = fresh ? shown : `${shown} (resumed)`;
       report();
       const started = Date.now();
+      cheatDone = false;
+      cheatNote = "";
       await playOut();
       const end = ns.go.getGameState();
       const win = end.blackScore >= end.whiteScore;
@@ -197,7 +286,7 @@ export async function main(ns) {
       // A resumed game's clock started at some unknown earlier point.
       arms[key] = learn(arms[key], { score: end.blackScore, win, secs: fresh ? (Date.now() - started) / 1000 : null });
       ns.write(ARMS_FILE, JSON.stringify(arms), "w");
-      event(`${shown}: ${win ? "won" : "lost"} ${end.blackScore} to ${end.whiteScore} in ${ns.format.time(Date.now() - started)}`);
+      event(`${shown}: ${win ? "won" : "lost"} ${end.blackScore} to ${end.whiteScore} in ${ns.format.time(Date.now() - started)}${cheatNote}`);
       report();
       warned.clear();
       await ns.sleep(50);

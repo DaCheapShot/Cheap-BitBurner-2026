@@ -51,6 +51,8 @@ Fill these in during a run - what broke, what had to be tuned, how long it took.
   - `go.js` runs on every node, so run it live here first: `cat /data/go.txt` shows wins per opponent.
     Live before BN14: heuristic alone 6-22, search 44-8 (Daedalus 26-1, Black Hand 10-1, Illuminati 8-6).
   - Weights are `NODE_WEIGHTS[14]` in `go/config.js`: tune them after the first cycle.
+  - `go.cheat` opens on the SECOND BN14 run (SF14.1 inside BN14), then everywhere at SF14.2. Untested
+    live until then: `cheated` in `/data/go.log.txt` marks each attempt, one per game at most.
 
 - **BN13**: hacking level x0.25, hack exp x0.1, gift power x2, board 6x5.
   - Boot accepts the gift on its **first tick**, ahead of sing. **Do not buy or install an aug by hand

@@ -1,8 +1,8 @@
 import {
   OPPONENTS, SIZES, WORLD, WORLD_SIZE, NORMAL_WEIGHTS, NODE_WEIGHTS, EWMA_RATE,
-  PRIOR_SCORE_SHARE, PRIOR_WIN, PRIOR_SECONDS_PER_POINT, SEARCH_MAX_SIZE,
+  PRIOR_SCORE_SHARE, PRIOR_WIN, PRIOR_SECONDS_PER_POINT, SEARCH_MAX_SIZE, CHEAT_MAX_OPTIONS,
 } from "./config.js";
-import { toGrid, other, around, groupAt, allGroups, legalMoves, regions, tally } from "./board.js";
+import { toGrid, fromGrid, other, around, groupAt, allGroups, legalMoves, regions, tally, tryStone } from "./board.js";
 
 /**
  * Every IPvGO decision, pure and 0 GB: which game to play next (chooseArm) and
@@ -276,3 +276,39 @@ export function searchMoves(rows, history, { komi }, quick) {
   const moves = legalMoves(grid, "X", history).filter((m) => m.taken > 0 || !eyes.has(`${m.x},${m.y}`));
   return moves.length > 1 ? moves : null;
 }
+
+// ------------------------------------------------------------------ cheats ---
+
+/**
+ * May this save call go.cheat? checkCheatApiAccess, to the letter: SF14.2, or
+ * SF14.1 while inside BitNode 14. go.js asks before any cheat body exists, which
+ * is what keeps a save without access at 10.60 GB: the body is never written.
+ */
+export const canCheat = (node, sf14) => sf14 >= 2 || (sf14 === 1 && node === 14);
+
+/**
+ * The boards a cheat could leave, white to move: the search's top two moves
+ * together, and each white stone gone, weakest groups first. Removing a router
+ * and placing one are the only cheats that win a race; destroyNode and
+ * repairOfflineNode only reshape the board.
+ *
+ * @returns {{kind:"two"|"remove", points:number[], rows:string[]}[]}
+ */
+export function cheatOptions(rows, first, second) {
+  const grid = toGrid(rows);
+  const out = [];
+  const one = tryStone(grid, first.x, first.y, "X");
+  const both = one && tryStone(one.grid, second.x, second.y, "X");
+  if (both) out.push({ kind: "two", points: [first.x, first.y, second.x, second.y], rows: fromGrid(both.grid) });
+  const stones = allGroups(grid).filter((g) => g.color === "O").sort((a, b) => a.libs.length - b.libs.length)
+    .flatMap((g) => g.cells).slice(0, CHEAT_MAX_OPTIONS);
+  for (const p of stones) {
+    const next = grid.map((col) => col.slice());
+    next[p.x][p.y] = ".";
+    out.push({ kind: "remove", points: [p.x, p.y], rows: fromGrid(next) });
+  }
+  return out;
+}
+
+/** A failed cheat skips the turn, so its value is the skip's, not the normal move's. */
+export const cheatPays = (chance, option, skip, normal) => chance * option + (1 - chance) * skip > normal;

@@ -94,5 +94,15 @@ export const SLICE_MS = 5;
 /** UCB exploration. Rewards run 0 to 1, so this is low for a value near 0.5. */
 export const SEARCH_UCB = 0.5;
 
+/**
+ * go.cheat. The search's value of the game must be under CHEAT_BELOW before a
+ * cheat is even priced: a game going well has no reason to risk a skipped turn.
+ * Under CHEAT_MIN_CHANCE the skipped turn is the likelier outcome. Removing a
+ * router is scored for at most CHEAT_MAX_OPTIONS stones, weakest groups first.
+ */
+export const CHEAT_BELOW = 0.45;
+export const CHEAT_MIN_CHANCE = 0.5;
+export const CHEAT_MAX_OPTIONS = 8;
+
 /** No answer from the AI for this long is a stuck game, not a slow one. */
 export const STUCK_MS = 30_000;

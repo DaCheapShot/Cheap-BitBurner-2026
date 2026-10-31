@@ -890,10 +890,16 @@ export const tests = {
     }
   },
 
-  "the Go ENV body is priced": () => {
+  // The cheat names are why these are bodies: in go.js, 8.00 GB each on every save
+  // without SF14. The pin on go.js above is what holds that.
+  "every Go body is priced": () => {
+    const want = { ENV: 6.60, CHEAT_ODDS: 3.60, CHEAT_REMOVE: 9.60, CHEAT_TWO: 9.60 };
     const got = bodiesOf("go/go");
-    assert(Object.keys(got).join() === "ENV", `go.js bodies ${Object.keys(got)} - every body must be pinned here`);
-    assert(Math.abs(got.ENV - 6.6) < 0.011, `ENV body: expected 6.60 GB, got ${got.ENV.toFixed(2)}`);
+    assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),
+      `go.js bodies ${Object.keys(got)} - every body must be pinned here`);
+    for (const [name, gb] of Object.entries(want)) {
+      assert(Math.abs(got[name] - gb) < 0.011, `${name} body: expected ${gb.toFixed(2)} GB, got ${got[name].toFixed(2)}`);
+    }
   },
 
   "the hacknet subsystem's peak is one sweep, not both": () => {

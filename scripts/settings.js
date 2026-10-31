@@ -97,6 +97,7 @@ export const KNOBS = {
   // Read by stocks.js every market tick. Off STOPS the trader and leaves its
   // positions open - selling them is sellall.js's job, or the next install's.
   "go.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "go.js IPvGO player (off stops it, the game stays on the board)" },
+  "go.cheat": { def: 1, min: 0, max: 1, bool: true, doc: "go.js may use go.cheat when losing (needs SF14.2, or SF14.1 in BN14)" },
   "go.searchMs": { def: SEARCH_MS, min: 0, max: 10000, int: true, doc: "search per Go move on boards up to 7x7 (0 = heuristic only)" },
   "stocks.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "stocks.js trader (off leaves positions open)" },
   "stocks.cash": { def: STOCKS_CASH, min: 0, max: 1, doc: "fraction of net worth the trader may hold in stocks (BN8: 1)" },

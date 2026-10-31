@@ -107,6 +107,7 @@ run scripts/set.js stanek.relayout off  # keep a hand-laid Stanek board (default
 cat /data/go.txt                        # the IPvGO player: current game, each opponent's bonus, streak, record
 cat /data/go.log.txt                    # one line per game (last 500)
 run scripts/set.js go.searchMs 500      # search per Go move on boards up to 7x7, live (0 = heuristic only)
+run scripts/set.js go.cheat off         # no go.cheat even with access (needs SF14.2, or SF14.1 in BN14)
 run scripts/last.js /data/sleeves.log.txt  # its last 10 lines in a tail window (any file; 2nd arg = count)
 run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
 run scripts/set.js sleeve.covenantCash 0.5  # BN10: fraction of cash a Covenant sleeve/memory buy may cost
@@ -390,6 +391,7 @@ editor's RAM panel when one moves.
 | `go/search.js` | Monte Carlo tree search in slices, boards up to 7x7 - pure | 0 |
 | `go/go.js` | entry: resident player, one game after another, every node | 10.60 |
 | ↳ ENV body | transient: node, SF14, GoPower | 6.60 |
+| ↳ three cheat bodies | transients, with SF14 access only: odds, remove, two moves | 3.60–9.60 |
 
 `hud.js` writes into the overview's `overview-extra-hook-0/1` cells, which React never fills, so the
 rows outlive the transient - the user's rule was no new resident. Boot runs it every `hud.tick` (5 s)
@@ -1536,7 +1538,7 @@ another of the subsystem's own.
 
 Built for BitNode 14, proven live outside it (search: 44-8, against 6-22 for the heuristic alone). Self-contained like `gang/`: it imports `scripts/rpc.js`, and
 boot and settings read one path out of `go/config.js`. **`ns.go` has no node gate**, so boot runs it on
-every node; only `go.cheat` needs SF14, and nothing here uses it.
+every node; only `go.cheat` needs SF14.
 
 **What a game pays.** `endGoGame` adds `blackScore x difficulty x streakMult` to that opponent's node
 power, **win or lose**. Difficulty is `(komi + 0.5) / 4`, except Illuminati on 5x5 at 8. The streak mult
@@ -1592,6 +1594,20 @@ kind), so synchronous code stops the manager's dispatch ticks for its whole leng
 costs other scripts nothing. `go.js` calls `step(SLICE_MS)` (5 ms) and `await ns.asleep(0)` in turn.
 **ponytail:** `chooseMove` is itself synchronous and measured 30 ms on one 13x13 board, past the 25 ms
 tick, from `liveCount` on every legal move; narrow those candidates if the batcher's jitter shows it.
+
+**`go.cheat` is rpc bodies only, the user's rule: no SF14, no RAM.** A check in front of a call does
+nothing for the bill, because names are charged whether they run or not, so one cheat name in `go.js`
+adds 8.00 GB to every save. `canCheat` is the game's `checkCheatApiAccess`: SF14.2, or SF14.1 inside
+BN14. Failing it, no body is ever written, and `go.cheat` off (live) does the same. With access, a cheat
+is priced only where search runs and only when its value is under `CHEAT_BELOW`. `go.js` asks the odds
+(3.60) and scores two moves at once and each white stone removed, by search with white to move, against
+the skipped turn a failure costs: `chance x option + (1 - chance) x skip` has to beat the normal move.
+**One attempt a game, because that is what makes ejection impossible:** the 10% only applies to a
+failure after an earlier cheat, and ejection pays no node power. The two cheat bodies (9.60 each) do not
+await: the cheat lands at the call, and the AI's reply can outlast rpc's 10 s. Any failure, such as no
+free RAM, plays the normal move. A local called `share` here cost 2.40 GB until the pin caught it.
+**ponytail:** cheats stop at 7x7, so the secret opponent's 19x19 board has none. Not yet run live: it
+needs BN14 at SF14.1.
 
 `/data/go-arms-2.txt` has a number that moves when the engine does. There is deliberately no `--forget`:
 one run beside the resident would be undone by its next write, since it holds the table in memory.

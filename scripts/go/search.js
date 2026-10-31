@@ -33,7 +33,13 @@ const OFFLINE = 3;
  */
 const WIN_SHARE = 0.9;
 
-export function startSearch(rows, candidates, komi) {
+/**
+ * @param {string[]} rows the board
+ * @param {{x:number,y:number}[]|null} candidates the root's moves; null generates them
+ * @param {number} komi
+ * @param {"X"|"O"} first who moves first: "O" values a board after a black cheat
+ */
+export function startSearch(rows, candidates, komi, first = "X") {
   const n = rows.length;
   const size = n * n;
   const root = new Int8Array(size);
@@ -174,10 +180,10 @@ export function startSearch(rows, candidates, komi) {
       last = pick;
       color = 3 - color;
     }
-    return worth();
+    return finalValue();
   }
 
-  function worth() {
+  function finalValue() {
     let black = 0;
     let white = 0;
     tick++;
@@ -221,13 +227,13 @@ export function startSearch(rows, candidates, komi) {
     return out;
   }
 
-  const top = { point: -1, visits: 0, value: 0, kids: [], todo: candidates.map((m) => m.x * n + m.y) };
+  const top = { point: -1, visits: 0, value: 0, kids: [], todo: candidates ? candidates.map((m) => m.x * n + m.y) : null };
 
   /** One descent, one expansion, one playout, one update. */
   function iterate() {
     cells.set(root);
     let node = top;
-    let color = BLACK;
+    let color = first === "X" ? BLACK : WHITE;
     let last = -1;
     const path = [top];
     for (;;) {
@@ -279,6 +285,15 @@ export function startSearch(rows, candidates, komi) {
       let kid = null;
       for (const k of top.kids) if (!kid || k.visits > kid.visits) kid = k;
       return kid && { x: Math.floor(kid.point / n), y: kid.point % n };
+    },
+    /** The root's moves, most-visited first, each with black's mean value. */
+    ranked() {
+      return top.kids.slice().sort((a, b) => b.visits - a.visits)
+        .map((k) => ({ x: Math.floor(k.point / n), y: k.point % n, value: k.value / k.visits }));
+    },
+    /** Black's mean value of the root: what this board is worth with `first` to move. */
+    worth() {
+      return top.visits ? top.value / top.visits : 0;
     },
     get playouts() {
       return top.visits;

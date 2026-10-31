@@ -86,6 +86,28 @@ function mockGo(b, { reply = () => null, pill = false, stats = {}, board = null,
   return { g, api };
 }
 
+/**
+ * Answer rpc bodies the way the game would, by what their source calls, and keep
+ * the source of each. `body` is what the cheat bodies do to the game.
+ */
+function answerBodies(ns, g, { node, sf14, odds = { chance: 0.6, count: 0 }, oddsFail = false }) {
+  const ran = [];
+  ns.run = (file, opts, back) => {
+    const src = ns.read(file);
+    ran.push(src);
+    let out = { v: true };
+    if (src.includes("getResetInfo")) out = { v: { node, sf14, goPower: 1 } };
+    else if (src.includes("getCheatSuccessChance")) out = oddsFail ? { e: "boom" } : { v: odds };
+    else g.toMove = "White"; // a cheat lands, and it is white's turn either way
+    setTimeout(() => ns.writePort(back, JSON.stringify(out)), 0);
+    return 1;
+  };
+  return ran;
+}
+
+/** A board black is losing: white holds most of it, and the search can tell. */
+const LOSING = ["OOOOO", "O.O.O", "OOOOO", "..X..", "....."];
+
 /** Drive go.js for `games` games: ns.sleep rejects once they are done, which exits main's loop. */
 async function drive(s, opts = {}, games = 1) {
   const b = s["go/board"];
@@ -94,7 +116,8 @@ async function drive(s, opts = {}, games = 1) {
   ns.go = api;
   ns.args = opts.args ?? [];
   ns.run = () => 0; // the ENV body fails, the one-WARN path; GoPower then defaults
-  ns.write("/data/settings.txt", JSON.stringify({ "go.searchMs": opts.searchMs ?? 0 }), "w");
+  const ran = opts.bodies ? answerBodies(ns, g, opts.bodies) : [];
+  ns.write("/data/settings.txt", JSON.stringify({ "go.searchMs": opts.searchMs ?? 0, ...opts.settings }), "w");
   let played = 0;
   ns.sleep = async () => {
     if (++played >= games) throw new Error("test over");
@@ -102,7 +125,7 @@ async function drive(s, opts = {}, games = 1) {
   await s["go/go"].main(ns).catch((e) => {
     if (!String(e).includes("test over")) throw e;
   });
-  return { g, ns };
+  return { g, ns, ran };
 }
 
 export const tests = {
@@ -370,6 +393,106 @@ export const tests = {
     const quiet = chooseArm({ node: 1, goPower: 1, sf14: 0, stats: { Daedalus: { bonusPercent: 0, winStreak: -6 } }, arms, gone });
     const calm = chooseArm({ node: 1, goPower: 1, sf14: 0, stats: { Daedalus: { bonusPercent: 0, winStreak: 0 } }, arms, gone });
     assert(quiet.opp === calm.opp && quiet.size === calm.size, `${quiet.opp} ${quiet.size} vs ${calm.opp} ${calm.size}`);
+  },
+
+  // ---------------------------------------------------------------- cheats ---
+
+  "cheats follow the game's own access check": async () => {
+    const { canCheat } = (await loadScripts())["go/plan"];
+    const cases = [[1, 0, false], [14, 0, false], [1, 1, false], [14, 1, true], [1, 2, true], [14, 3, true], [0, 0, false]];
+    for (const [node, sf14, want] of cases) assert(canCheat(node, sf14) === want, `node ${node} SF14.${sf14}`);
+  },
+
+  // The user's rule, and it needs the RAM pin in ram.test as well: a gate alone
+  // would not stop the names being billed.
+  "without access no cheat body is ever written": async () => {
+    const s = await loadScripts();
+    for (const sf14 of [0, 1]) {
+      const { ran, ns } = await drive(s, { board: LOSING, history: [empty(5)], searchMs: 10, bodies: { node: 1, sf14 } });
+      assert(!ran.some((src) => src.includes("go.cheat")), `SF14.${sf14} ran a cheat body`);
+      assert(failures(ns).length === 0, failures(ns).join());
+    }
+  },
+
+  "go.cheat off stops it with access": async () => {
+    const s = await loadScripts();
+    const { ran } = await drive(s, {
+      board: LOSING, history: [empty(5)], searchMs: 10, bodies: { node: 14, sf14: 3 }, settings: { "go.cheat": 0 },
+    });
+    assert(!ran.some((src) => src.includes("go.cheat")), "ran with the switch off");
+  },
+
+  "with access a losing game is priced for a cheat": async () => {
+    const s = await loadScripts();
+    const { ran } = await drive(s, { board: LOSING, history: [empty(5)], searchMs: 40, bodies: { node: 14, sf14: 1 } });
+    assert(ran.some((src) => src.includes("getCheatSuccessChance")), "never asked the odds");
+  },
+
+  // A count over 0 means a resumed game already tried: a second can eject.
+  "a game that has cheated never cheats again": async () => {
+    const s = await loadScripts();
+    const { ran } = await drive(s, {
+      board: LOSING, history: [empty(5)], searchMs: 20, bodies: { node: 14, sf14: 3, odds: { chance: 1, count: 1 } },
+    });
+    assert(!ran.some((src) => /removeRouter|playTwoMoves/.test(src)), "cheated twice");
+    assert(ran.filter((src) => src.includes("getCheatSuccessChance")).length === 1, "asked again");
+  },
+
+  // A certain cheat from a lost position: the whole path, odds to body to log.
+  "a sure cheat in a lost game lands, and the game plays on": async () => {
+    const s = await loadScripts();
+    const { g, ns, ran } = await drive(s, {
+      board: LOSING, history: [empty(5)], searchMs: 60, bodies: { node: 14, sf14: 1, odds: { chance: 1, count: 0 } },
+    });
+    assert(ran.filter((src) => /removeRouter|playTwoMoves/.test(src)).length === 1, "not exactly one cheat");
+    assert(ns.read("/data/go.log.txt").includes("cheated ("), ns.read("/data/go.log.txt"));
+    assert(failures(ns).length === 0 && g.toMove === "None", g.toMove);
+  },
+
+  "a poor chance is not taken": async () => {
+    const s = await loadScripts();
+    const { ran } = await drive(s, {
+      board: LOSING, history: [empty(5)], searchMs: 20, bodies: { node: 14, sf14: 3, odds: { chance: 0.2, count: 0 } },
+    });
+    assert(!ran.some((src) => /removeRouter|playTwoMoves/.test(src)), "took 20%");
+  },
+
+  "a failed cheat body plays the normal move": async () => {
+    const s = await loadScripts();
+    const { g, ns } = await drive(s, { board: LOSING, history: [empty(5)], searchMs: 10, bodies: { node: 14, sf14: 1, oddsFail: true } });
+    assert(failures(ns).length === 0, failures(ns).join());
+    assert(ns.read("/data/go.log.txt").includes("cheat:"), "no warning");
+    assert(g.moves.length + g.passes > 0, "never moved");
+  },
+
+  "a cheat has to beat the normal move, counting the skipped turn": async () => {
+    const { cheatPays } = (await loadScripts())["go/plan"];
+    assert(cheatPays(0.6, 0.9, 0.1, 0.3), "0.58 beats 0.3");
+    assert(!cheatPays(0.6, 0.4, 0.1, 0.3), "0.28 does not beat 0.3");
+  },
+
+  "cheat options are the boards the cheats leave": async () => {
+    const s = await loadScripts();
+    const { cheatOptions } = s["go/plan"];
+    const rows = ["O....", ".....", "..X..", ".....", "....."];
+    const got = cheatOptions(rows, { x: 1, y: 1 }, { x: 3, y: 3 });
+    const two = got.find((o) => o.kind === "two");
+    assert(two.rows[1][1] === "X" && two.rows[3][3] === "X", two.rows.join());
+    const gone = got.find((o) => o.kind === "remove");
+    assert(gone.rows[0][0] === "." && gone.points.join() === "0,0", gone.rows.join());
+  },
+
+  // The capture race again, from white's side: to move, 0,4 takes black's four.
+  "search reads white's reply when white moves first": async () => {
+    const s = await loadScripts();
+    const { startSearch } = s["go/search"];
+    const rows = ["XXXX.", "OOOO.", "XXXXX", ".....", "....."];
+    const q = startSearch(rows, null, 1.5, "O");
+    q.step(150);
+    assert(q.ranked()[0].x === 0 && q.ranked()[0].y === 4, JSON.stringify(q.ranked()[0]));
+    const black = startSearch(rows, [{ x: 1, y: 4 }, { x: 4, y: 4 }], 1.5);
+    black.step(100);
+    assert(black.worth() > q.worth(), `${black.worth()} vs ${q.worth()}`);
   },
 
   // ----------------------------------------------------------------- go.js ---
