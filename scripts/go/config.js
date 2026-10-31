@@ -20,9 +20,11 @@ export const GAME_LOG_KEEP = 500;
 
 /**
  * What the engine has measured per arm. It describes the ENGINE, not the cycle,
- * so an install keeps it; `--forget` clears it after the engine changes.
+ * so an install keeps it. The number in the name moves when the engine does: a
+ * --forget beside the resident player is undone by its next write, because it
+ * holds the table in memory.
  */
-export const ARMS_FILE = "/data/go-arms.txt";
+export const ARMS_FILE = "/data/go-arms-2.txt";
 
 export const WORLD = "????????????";
 
@@ -75,6 +77,22 @@ export const EWMA_RATE = 0.2;
 export const PRIOR_SCORE_SHARE = 0.6;
 export const PRIOR_WIN = 0.7;
 export const PRIOR_SECONDS_PER_POINT = 2;
+
+/**
+ * Boards the search plays. A playout grows with the square of the side and a move
+ * gets the same budget, so past this the heuristic is the better use of the time.
+ */
+export const SEARCH_MAX_SIZE = 7;
+
+/**
+ * Search per move and the most it may hold the game's one thread at a stretch.
+ * The batcher dispatches on a 25 ms tick, so a slice has to stay well under it.
+ */
+export const SEARCH_MS = 500;
+export const SLICE_MS = 5;
+
+/** UCB exploration. Rewards run 0 to 1, so this is low for a value near 0.5. */
+export const SEARCH_UCB = 0.5;
 
 /** No answer from the AI for this long is a stuck game, not a slow one. */
 export const STUCK_MS = 30_000;

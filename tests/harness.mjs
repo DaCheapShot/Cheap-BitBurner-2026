@@ -24,6 +24,7 @@ const NESTED = [
   "go/config.js",
   "go/board.js",
   "go/plan.js",
+  "go/search.js",
   "go/go.js",
   // The gang subsystem's pure modules. gang/math.js is where every gang
   // decision is made and it holds no ns call, so it is testable directly -

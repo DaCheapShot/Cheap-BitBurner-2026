@@ -49,7 +49,8 @@ Fill these in during a run - what broke, what had to be tuned, how long it took.
 - **BN14**: GoPower x4, hacking level x0.4, hack speed x0.3, rep work x0.2, aug prices x1.5,
   daemon difficulty x5.
   - `go.js` runs on every node, so run it live here first: `cat /data/go.txt` shows wins per opponent.
-    Win rate under about 50% on the arms it favours means the engine needs search before BN14.
+    The heuristic alone won 6 of 28; boards up to 7x7 now use search. Win rate still under about 50%
+    on the arms it favours means search needs work before BN14.
   - Weights are `NODE_WEIGHTS[14]` in `go/config.js`: tune them after the first cycle.
 
 - **BN13**: hacking level x0.25, hack exp x0.1, gift power x2, board 6x5.

@@ -883,7 +883,7 @@ export const tests = {
 
   // A local called getLiberties would cost 16.00 GB here, the API's price.
   "the Go subsystem's shared modules are free to import": () => {
-    for (const mod of ["go/config", "go/board", "go/plan"]) {
+    for (const mod of ["go/config", "go/board", "go/plan", "go/search"]) {
       const ram = ramOf(mod);
       assert(Math.abs(ram - BASE) < 0.011,
         `${mod}.js costs ${(ram - BASE).toFixed(2)} GB to import; it must be 0`);

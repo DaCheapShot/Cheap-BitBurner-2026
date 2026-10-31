@@ -106,7 +106,7 @@ run scripts/set.js stanek.maxGb 131072  # most GB the Stanek charge worker takes
 run scripts/set.js stanek.relayout off  # keep a hand-laid Stanek board (default on: relay when better)
 cat /data/go.txt                        # the IPvGO player: current game, each opponent's bonus, streak, record
 cat /data/go.log.txt                    # one line per game (last 500)
-run scripts/go/go.js --forget           # clear what it learned per opponent and board, after an engine change
+run scripts/set.js go.searchMs 500      # search per Go move on boards up to 7x7, live (0 = heuristic only)
 run scripts/last.js /data/sleeves.log.txt  # its last 10 lines in a tail window (any file; 2nd arg = count)
 run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
 run scripts/set.js sleeve.covenantCash 0.5  # BN10: fraction of cash a Covenant sleeve/memory buy may cost
@@ -387,6 +387,7 @@ editor's RAM panel when one moves.
 | `go/config.js` | opponent table, stat weights per node, paths | 0 |
 | `go/board.js` | the rules, pure: groups, capture, legality, score | 0 |
 | `go/plan.js` | `chooseArm` + `chooseMove`, every decision - pure | 0 |
+| `go/search.js` | Monte Carlo tree search in slices, boards up to 7x7 - pure | 0 |
 | `go/go.js` | entry: resident player, one game after another, every node | 10.60 |
 | ↳ ENV body | transient: node, SF14, GoPower | 6.60 |
 
@@ -1554,9 +1555,9 @@ not the seconds.
 is 2.16 log-points against 0.97 on one), so that one line spreads play with no rule of its own, and
 each game lowers its own arm's next score. Log, because bonuses multiply. `p` is read back out of
 `getStats().bonusPercent`, the only place the API shows it, so an install and a hand-played game are
-simply right. Score, win rate and seconds are EWMAs per arm in `/data/go-arms.txt`: they describe the
-ENGINE, so they survive installs, and `--forget` clears them. An untried arm's prior is generous, so
-it gets its game.
+simply right. Score, win rate and seconds are EWMAs per arm in `/data/go-arms-2.txt`: they describe the
+ENGINE, so they survive installs. An untried arm's prior is generous, so it gets its game, but it takes
+no dry-run bonus: on a guess, that pulled every loss back to the same opponent's next board.
 
 **The weights are the user's rule: BN14 plays to end the node, every other node for the normal
 stats.** `NORMAL_WEIGHTS` plus one override per node in `NODE_WEIGHTS`: BN14 rep and hacking level x3,
@@ -1575,8 +1576,25 @@ searches them all.
 **`chooseMove` is a one-ply heuristic**: capture, save atari, make life or block it, then the best
 standing (stones + territory + influence). It never fills its own eye and never self-ataris without a
 capture. Once white has passed and black leads it banks the win, unless a move still adds a whole
-point: points are what the game pays. **ponytail:** no search. Under about 50% wins on the arms worth
-playing, add MCTS for boards up to 7x7, where 5x5 Illuminati pays.
+point: points are what the game pays. It alone plays boards over 7x7, and it won 6 of 28 live games.
+
+**`search.js` plays boards up to 7x7: Monte Carlo tree search, because the heuristic never sees the
+reply.** Against a local approximation of Daedalus it took 26 of 26 games at 100 ms a move where the
+heuristic took 15, at ~10k playouts a move on 5x5 and ~5k on 7x7. It has its own flat board: `tryStone`
+copies the grid per move. A playout is scored 0.9 for the win and 0.1 for the share of points, so a lost
+game still plays for what it pays. `searchMoves` decides when it runs, and a heuristic pass is believed
+only when black leads: behind, search is what finds the invasion. `go.searchMs` (live, default 500) is
+the budget; 0 is heuristic only. **ponytail:** no RAVE, no tree reuse.
+
+**The search runs in slices, because every script shares one JavaScript thread.**
+`startNetscript2Script` calls `main` in the game's own context (`NetscriptWorker.ts`, no Worker of any
+kind), so synchronous code stops the manager's dispatch ticks for its whole length, while an `await`
+costs other scripts nothing. `go.js` calls `step(SLICE_MS)` (5 ms) and `await ns.asleep(0)` in turn.
+**ponytail:** `chooseMove` is itself synchronous and measured 30 ms on one 13x13 board, past the 25 ms
+tick, from `liveCount` on every legal move; narrow those candidates if the batcher's jitter shows it.
+
+`/data/go-arms-2.txt` has a number that moves when the engine does. There is deliberately no `--forget`:
+one run beside the resident would be undone by its next write, since it holds the table in memory.
 
 **`go.js` is 10.60 GB and started after the other residents**, so a fresh home loses it first. A turn
 loop awaits the AI between calls, so a body per move would cost a process per move and lower no peak.

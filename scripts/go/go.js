@@ -1,6 +1,8 @@
-import { OPPONENTS, STATUS_FILE, GAME_LOG_FILE, GAME_LOG_KEEP, ARMS_FILE, STUCK_MS, WORLD } from "./config.js";
-import { chooseArm, chooseMove, learn, armKey } from "./plan.js";
+import { OPPONENTS, STATUS_FILE, GAME_LOG_FILE, GAME_LOG_KEEP, ARMS_FILE, STUCK_MS, WORLD, SLICE_MS } from "./config.js";
+import { chooseArm, chooseMove, searchMoves, learn, armKey } from "./plan.js";
+import { startSearch } from "./search.js";
 import { rpc } from "scripts/rpc.js";
+import { SETTINGS_FILE, setting } from "scripts/settings.js";
 
 /**
  * The IPvGO player: resident, one game after another, on every node.
@@ -21,8 +23,7 @@ import { rpc } from "scripts/rpc.js";
  * the effect curve is steepest at zero.
  *
  * Usage:  run scripts/go/go.js            (boot does this; --no-go opts out)
- *         run scripts/go/go.js --forget   clear what was learned, after an engine change
- *         cat /data/go.txt                each opponent's bonus, streak and record
+ *         cat /data/go.txt               each opponent's bonus, streak and record
  *         cat /data/go.log.txt            one line per game
  *
  * RAM: 1.60 base + run 1.00 + makeMove 4.00 + getBoardState 4.00 = 10.60 GB
@@ -59,8 +60,6 @@ function loadArms(text) {
 /** @param {NS} ns */
 export async function main(ns) {
   ns.disableLog("ALL");
-
-  if (ns.args.map(String).includes("--forget")) ns.write(ARMS_FILE, "{}", "w");
 
   const warned = new Set();
   const event = (l) => {
@@ -126,6 +125,25 @@ export async function main(ns) {
     }
   };
 
+  /**
+   * The heuristic's move, or the search's where it applies. Slices with a yield
+   * between them, or a search would hold the thread through the batcher's dispatch
+   * ticks. asleep, because a game await may still be pending after a timeout.
+   */
+  const pickMove = async (rows, history, s) => {
+    const quick = chooseMove(rows, history, s);
+    const budget = setting(ns.read(SETTINGS_FILE), "go.searchMs");
+    const moves = budget > 0 ? searchMoves(rows, history, s, quick) : null;
+    if (!moves) return quick;
+    const search = startSearch(rows, moves, s.komi);
+    const end = Date.now() + budget;
+    while (Date.now() < end) {
+      search.step(SLICE_MS);
+      await ns.asleep(0);
+    }
+    return search.best() ?? quick;
+  };
+
   const playOut = async () => {
     for (;;) {
       const who = ns.go.getCurrentPlayer();
@@ -137,7 +155,7 @@ export async function main(ns) {
       const history = ns.go.getMoveHistory();
       const state = ns.go.getGameState();
       const opponentPassed = state.previousMove === null && history.length > 0;
-      const m = chooseMove(ns.go.getBoardState(), history, { komi: state.komi, opponentPassed });
+      const m = await pickMove(ns.go.getBoardState(), history, { komi: state.komi, opponentPassed });
       try {
         const turn = m ? ns.go.makeMove(m.x, m.y) : ns.go.passTurn();
         if ((await within(turn)) === null) await unstick();

@@ -1,6 +1,6 @@
 import {
   OPPONENTS, SIZES, WORLD, WORLD_SIZE, NORMAL_WEIGHTS, NODE_WEIGHTS, EWMA_RATE,
-  PRIOR_SCORE_SHARE, PRIOR_WIN, PRIOR_SECONDS_PER_POINT,
+  PRIOR_SCORE_SHARE, PRIOR_WIN, PRIOR_SECONDS_PER_POINT, SEARCH_MAX_SIZE,
 } from "./config.js";
 import { toGrid, other, around, groupAt, allGroups, legalMoves, regions, tally } from "./board.js";
 
@@ -100,7 +100,10 @@ export function chooseArm({ node, goPower, sf14, stats, arms, gone }) {
       const score = seen?.score ?? points * PRIOR_SCORE_SHARE;
       const win = seen?.win ?? PRIOR_WIN;
       const secs = Math.max(seen?.secs ?? points * PRIOR_SECONDS_PER_POINT, 1);
-      const paid = score * difficulty(o.komi, size) * (win * winMult(streak) + (1 - win) * LOSS_MULT);
+      // No dry-run bonus on a guess: PRIOR_WIN x5 pulled every loss straight back
+      // to the same opponent's next untried board.
+      const mult = winMult(seen ? streak : Math.max(streak, 0));
+      const paid = score * difficulty(o.komi, size) * (win * mult + (1 - win) * LOSS_MULT);
       const gain = Math.log(goEffect(p + paid, o.power, goPower, sf14) / goEffect(p, o.power, goPower, sf14));
       const value = (weight * gain) / secs;
       if (!best || value > best.value) best = { opp, size, value };
@@ -250,4 +253,26 @@ export function chooseMove(rows, history, { komi, opponentPassed }) {
   const lead = tally(grid).X - tally(grid).O - komi;
   if (opponentPassed && lead > 0 && bestV - base < 1) return null;
   return at(best);
+}
+
+/**
+ * What the search should look at, or null when it should not run and `quick`,
+ * chooseMove's answer, stands: a board too big, a game past its length cap, or a
+ * pass that banks a lead. Behind, a heuristic pass is NOT trusted: that is where
+ * search finds the invasion a one-ply count cannot see.
+ *
+ * Own eyes are left out, but a capture from inside one is not.
+ */
+export function searchMoves(rows, history, { komi }, quick) {
+  const grid = toGrid(rows);
+  if (grid.length > SEARCH_MAX_SIZE) return null;
+  if (history.length > grid.length ** 2 * LENGTH_CAP) return null;
+  const t = tally(grid);
+  if (quick === null && t.X - t.O - komi > 0) return null;
+  const eyes = new Set();
+  for (const r of regions(grid)) {
+    if (r.owner === "X" && r.cells.length <= 2) for (const p of r.cells) eyes.add(`${p.x},${p.y}`);
+  }
+  const moves = legalMoves(grid, "X", history).filter((m) => m.taken > 0 || !eyes.has(`${m.x},${m.y}`));
+  return moves.length > 1 ? moves : null;
 }

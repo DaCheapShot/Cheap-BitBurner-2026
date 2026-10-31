@@ -94,6 +94,7 @@ async function drive(s, opts = {}, games = 1) {
   ns.go = api;
   ns.args = opts.args ?? [];
   ns.run = () => 0; // the ENV body fails, the one-WARN path; GoPower then defaults
+  ns.write("/data/settings.txt", JSON.stringify({ "go.searchMs": opts.searchMs ?? 0 }), "w");
   let played = 0;
   ns.sleep = async () => {
     if (++played >= games) throw new Error("test over");
@@ -304,6 +305,73 @@ export const tests = {
     assert(wins >= 10, `won ${wins} of ${games}`);
   },
 
+  // ---------------------------------------------------------------- search ---
+
+  // A capture race: black's four and white's four each have one liberty, 0,4 and
+  // 1,4. Extending to 0,4 still leaves 1,4 as the last liberty and white takes it,
+  // so seeing the reply is what picks 1,4. One-ply reasoning has no way to tell.
+  "search wins the capture race that needs the reply read": async () => {
+    const s = await loadScripts();
+    const b = s["go/board"];
+    const { startSearch } = s["go/search"];
+    const rows = ["XXXX.", "OOOO.", "XXXXX", ".....", "....."];
+    const moves = b.legalMoves(b.toGrid(rows), "X", []);
+    const q = startSearch(rows, moves, 1.5);
+    q.step(150);
+    const m = q.best();
+    assert(q.playouts > 100, `only ${q.playouts} playouts`);
+    assert(moves.some((c) => c.x === m.x && c.y === m.y), `illegal ${JSON.stringify(m)}`);
+    assert(m.x === 1 && m.y === 4, JSON.stringify(m));
+  },
+
+  // The whole reason for slices: the batcher dispatches on a 25 ms tick.
+  "a search slice gives the thread back on time": async () => {
+    const s = await loadScripts();
+    const b = s["go/board"];
+    const { startSearch } = s["go/search"];
+    const q = startSearch(empty(7), b.legalMoves(b.toGrid(empty(7)), "X", []), 5.5);
+    let worst = 0;
+    for (let i = 0; i < 40; i++) {
+      const t = performance.now();
+      q.step(5);
+      worst = Math.max(worst, performance.now() - t);
+    }
+    assert(worst < 25, `a 5 ms slice held the thread ${worst.toFixed(1)} ms`);
+  },
+
+  "search stands aside for big boards, a banked lead and the length cap": async () => {
+    const { searchMoves } = (await loadScripts())["go/plan"];
+    const quick = { x: 0, y: 0 };
+    assert(searchMoves(empty(9), [], { komi: 1.5 }, quick) === null, "9x9");
+    assert(searchMoves(empty(5), [], { komi: 1.5 }, quick).length === 25, "5x5");
+    const won = [".X.O.", "XXXOO", ".XXO.", "XXXOO", ".XXO."];
+    assert(searchMoves(won, [], { komi: 0.5 }, null) === null, "banked lead");
+    const lost = [".....", ".....", "OOOOO", ".X...", "OOOOO"];
+    assert(searchMoves(lost, [], { komi: 0.5 }, null) !== null, "a pass while behind is not trusted");
+    assert(searchMoves(empty(5), Array(100).fill(empty(5)), { komi: 1.5 }, quick) === null, "cap");
+  },
+
+  "the player searches, and go.searchMs 0 turns it off": async () => {
+    const s = await loadScripts();
+    const { g, ns } = await drive(s, { searchMs: 2, reply: () => null });
+    assert(failures(ns).length === 0, failures(ns).join());
+    assert(g.toMove === "None" || g.resets.length >= 1, g.toMove);
+  },
+
+  // A guess carrying a dry-run bonus pulled each loss back to the same opponent.
+  "an untried arm gets no dry-run bonus": async () => {
+    const { chooseArm, armKey } = (await loadScripts())["go/plan"];
+    const { OPPONENTS, SIZES } = (await loadScripts())["go/config"];
+    const arms = {};
+    for (const opp of Object.keys(OPPONENTS)) for (const size of SIZES) arms[armKey(opp, size)] = { n: 9, score: 12, win: 0.7, secs: 50 };
+    delete arms[armKey("Daedalus", 5)];
+    // Only the untried board is left at Daedalus: a measured arm earns the bonus.
+    const gone = new Set(["????????????|19", "Daedalus|7", "Daedalus|9", "Daedalus|13"]);
+    const quiet = chooseArm({ node: 1, goPower: 1, sf14: 0, stats: { Daedalus: { bonusPercent: 0, winStreak: -6 } }, arms, gone });
+    const calm = chooseArm({ node: 1, goPower: 1, sf14: 0, stats: { Daedalus: { bonusPercent: 0, winStreak: 0 } }, arms, gone });
+    assert(quiet.opp === calm.opp && quiet.size === calm.size, `${quiet.opp} ${quiet.size} vs ${calm.opp} ${calm.size}`);
+  },
+
   // ----------------------------------------------------------------- go.js ---
 
   "a game in progress is resumed, never reset": async () => {
@@ -339,7 +407,7 @@ export const tests = {
     const s = await loadScripts();
     const { ns } = await drive(s, { reply: () => null });
     assert(/won|lost/.test(ns.read("/data/go.log.txt")), ns.read("/data/go.log.txt"));
-    assert(Object.keys(JSON.parse(ns.read("/data/go-arms.txt"))).length >= 1, "no arm learned");
+    assert(Object.keys(JSON.parse(ns.read("/data/go-arms-2.txt"))).length >= 1, "no arm learned");
     assert(ns.read("/data/go.txt").startsWith("playing "), ns.read("/data/go.txt"));
   },
 
@@ -357,6 +425,7 @@ export const tests = {
     ns.go = api;
     ns.args = [];
     ns.run = () => 0;
+    ns.write("/data/settings.txt", JSON.stringify({ "go.searchMs": 0 }), "w");
     ns.sleep = async () => { throw new Error("test over"); };
     await s["go/go"].main(ns).catch((e) => { if (!String(e).includes("test over")) throw e; });
     assert(failures(ns).length === 0, failures(ns).join());
