@@ -15,13 +15,15 @@ SF descriptions below are from this fork's `src/BitNode/BitNode.tsx` (stable), n
 | 4 The Singularity | 3 | 3 | done |
 | 5 Artificial Intelligence | 3 | 3 | done |
 | 8 Ghost of Wall Street | 2 | 3 | shorts everywhere; one level left |
-| 9 Hacktocracy | 2 | 3 | one level left |
+| 9 Hacktocracy | 3 | 3 | done |
 | 10 Digital Carbon | 3 | 3 | done |
 | 11 The Big Crash | 3 | 3 | done - aug ladder 1.9 -> 1.767 (sing plans at it) |
-| 3, 6, 7, 12, 13, 14, 15 | 0 | | not started |
+| 12 The Recursion | 5 | none | repeatable, harder each level |
+| 13 They're lunatics | 3 | 3 | done |
+| 3, 6, 7, 14, 15 | 0 | | not started |
 
-Last snapshot (2026-10-17):
-`[{"n":1,"lvl":3},{"n":5,"lvl":3},{"n":2,"lvl":3},{"n":4,"lvl":3},{"n":9,"lvl":2},{"n":10,"lvl":3},{"n":8,"lvl":2},{"n":11,"lvl":3}]`
+Last snapshot (2026-10-31):
+`[{"n":1,"lvl":3},{"n":5,"lvl":3},{"n":2,"lvl":3},{"n":4,"lvl":3},{"n":9,"lvl":3},{"n":10,"lvl":3},{"n":8,"lvl":2},{"n":11,"lvl":3},{"n":13,"lvl":3},{"n":12,"lvl":5}]`
 
 ## Queue
 
@@ -30,21 +32,27 @@ cheaper; nodes that need a new subsystem written come after, one subsystem at a 
 
 | # | Node | Repo ready? | Why now |
 |---|---|---|---|
-| 1 | **BN9.3** Hacktocracy | yes - `hacknet/` | Finishes SF9: a highly upgraded hacknet server on entering each new node. Cheap, low value - can slip anywhere. |
-| 2 | **BN12.1** The Recursion | yes - plain hacking node | Repeatable, harder each level. Vanilla SF12 starts each node with NeuroFlux levels - verify the fork's effect before farming it. |
-| 3 | **BN6.1** Like Tears in Rain | **no** - needs a Bladeburner subsystem | Bladeburner access + combat stat mults. Destroyable by hacking too, but slowly. Build `scripts/bladeburner/` first. |
-| 4 | **BN7.1** Bladeburners 2079 | reuses #3 | Bladeburner API outside BN7; 7.3 gives Blade's Simulacrum (bladeburner while working). Then take 6 and 7 to level 3. |
-| 5 | **BN13.1** They're lunatics | yes - `stanek/`, untested live | Stanek's Gift in other nodes. Note SF7.3: Gift must be accepted BEFORE joining Bladeburner. |
-| 6 | **BN15.1** Secrets of the Dark Net | **no** - fork-specific darknet, needs new scripts | TOR + DarkscapeNavigator at start everywhere; 15.2/15.3 make charisma boost rep. The Red Pill is not in Daedalus here - sing's `RED_PILL` path will not work as-is. |
-| 7 | **BN3.1** Corporatocracy | **no** - corporation automation is a large project | Corp API everywhere; a running corp is the biggest money engine in the game. Highest payoff, highest build cost. |
-| 8 | **BN14.1** IPvGO Subnet Takeover | **no** - needs a Go player | Node Power stat mults, favor from win streaks. Lowest priority. |
+| 1 | **BN14.1** IPvGO Subnet Takeover | yes - `go/`, 44-8 live | Node Power x2 everywhere, favor from win streaks. The user's pick for next (2026-10-31). |
+| 2 | **BN6.1** Like Tears in Rain | **no** - needs a Bladeburner subsystem | Bladeburner access + combat stat mults. Destroyable by hacking too, but slowly. Build `scripts/bladeburner/` first. |
+| 3 | **BN7.1** Bladeburners 2079 | reuses #2 | Bladeburner API outside BN7; 7.3 gives Blade's Simulacrum (bladeburner while working). Then take 6 and 7 to level 3. Note SF7.3: Stanek's Gift must be accepted BEFORE joining Bladeburner. |
+| 4 | **BN15.1** Secrets of the Dark Net | **no** - fork-specific darknet, needs new scripts | TOR + DarkscapeNavigator at start everywhere; 15.2/15.3 make charisma boost rep. The Red Pill is not in Daedalus here - sing's `RED_PILL` path will not work as-is. |
+| 5 | **BN3.1** Corporatocracy | **no** - corporation automation is a large project | Corp API everywhere; a running corp is the biggest money engine in the game. Highest payoff, highest build cost. |
 
 After the queue: SF8.3 (cheap, `stocks/` ready) whenever a filler node is wanted, then more BN12
-levels.
+levels (vanilla SF12 starts each node with NeuroFlux levels - verify the fork's effect before farming
+further).
 
 ## Per-node notes
 
 Fill these in during a run - what broke, what had to be tuned, how long it took.
+
+- **BN14**: GoPower x4, hacking level x0.4, hack speed x0.3, rep work x0.2, aug prices x1.5,
+  daemon difficulty x5.
+  - `go.js` runs on every node, so run it live here first: `cat /data/go.txt` shows wins per opponent.
+    Live before BN14: heuristic alone 6-22, search 44-8 (Daedalus 26-1, Black Hand 10-1, Illuminati 8-6).
+  - Weights are `NODE_WEIGHTS[14]` in `go/config.js`: tune them after the first cycle.
+  - `go.cheat` opens on the SECOND BN14 run (SF14.1 inside BN14), then everywhere at SF14.2. Untested
+    live until then: `cheated` in `/data/go.log.txt` marks each attempt, one per game at most.
 
 - **BN13**: hacking level x0.25, hack exp x0.1, gift power x2, board 6x5.
   - Boot accepts the gift on its **first tick**, ahead of sing. **Do not buy or install an aug by hand

@@ -4,6 +4,7 @@ import { EQUIP_BUDGET_FRACTION, TICK_EVERY, WAR_EVERY, ASCEND_EVERY, EQUIP_EVERY
 import { SLEEVE_AUG_CASH, SLEEVE_AUG_MIN, SLEEVE_COVENANT_CASH } from "./sleeve/config.js";
 import { STOCKS_CASH, PUSH_BONUS } from "./stocks/config.js";
 import { STANEK_MAX_GB } from "./stanek/config.js";
+import { SEARCH_MS } from "./go/config.js";
 import {
   HOME_RAM_BUDGET_FRACTION, HOME_CORES_BUDGET_FRACTION, PROG_BUDGET_FRACTION, SING_TICK_MS,
   AUTO_INSTALL, MIN_AUG_BATCH, IDLE_STUDY, GRAFT, GRAFT_CASH, GRAFT_MIN_GAIN,
@@ -95,6 +96,9 @@ export const KNOBS = {
 
   // Read by stocks.js every market tick. Off STOPS the trader and leaves its
   // positions open - selling them is sellall.js's job, or the next install's.
+  "go.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "go.js IPvGO player (off stops it, the game stays on the board)" },
+  "go.cheat": { def: 1, min: 0, max: 1, bool: true, doc: "go.js may use go.cheat when losing (needs SF14.2, or SF14.1 in BN14)" },
+  "go.searchMs": { def: SEARCH_MS, min: 0, max: 10000, int: true, doc: "search per Go move on boards up to 7x7 (0 = heuristic only)" },
   "stocks.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "stocks.js trader (off leaves positions open)" },
   "stocks.cash": { def: STOCKS_CASH, min: 0, max: 1, doc: "fraction of net worth the trader may hold in stocks (BN8: 1)" },
   "stocks.pushBonus": { def: PUSH_BONUS, min: 1, max: 100, doc: "rank multiplier on stocks the batcher can push (1 = off)" },

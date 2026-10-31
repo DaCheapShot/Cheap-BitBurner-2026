@@ -62,6 +62,7 @@ run scripts/boot.js --no-sleeve         # do not assign sleeve tasks
 run scripts/boot.js --no-stocks         # do not run the stock trader
 run scripts/boot.js --no-hud            # do not paint stats into the overview sidebar
 run scripts/boot.js --no-stanek         # do not run the Stanek's Gift pass (BN13/SF13 only anyway)
+run scripts/boot.js --no-go             # do not run the IPvGO player
 ```
 
 **There is one batcher**, `scripts/continuous/`. A second, the volley-firing "shotgun"
@@ -103,6 +104,10 @@ run scripts/set.js stocks.pushBonus 2   # BN8: rank stocks the batcher can push 
 cat /data/stanek.txt                    # the gift: board, each fragment's effect, the charge worker's host and size
 run scripts/set.js stanek.maxGb 131072  # most GB the Stanek charge worker takes (default 64 TB), live
 run scripts/set.js stanek.relayout off  # keep a hand-laid Stanek board (default on: relay when better)
+cat /data/go.txt                        # the IPvGO player: current game, each opponent's bonus, streak, record
+cat /data/go.log.txt                    # one line per game (last 500)
+run scripts/set.js go.searchMs 500      # search per Go move on boards up to 7x7, live (0 = heuristic only)
+run scripts/set.js go.cheat off         # no go.cheat even with access (needs SF14.2, or SF14.1 in BN14)
 run scripts/last.js /data/sleeves.log.txt  # its last 10 lines in a tail window (any file; 2nd arg = count)
 run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
 run scripts/set.js sleeve.covenantCash 0.5  # BN10: fraction of cash a Covenant sleeve/memory buy may cost
@@ -380,6 +385,13 @@ editor's RAM panel when one moves.
 | `stanek/stanek.js` | entry: ONE pass then exits; boot runs it every tick before sing, BN13/SF13 only | 5.55 |
 | ↳ three bodies | transients: accept 3.60, read 7.40, place 6.60 | 3.60–7.40 |
 | `stanek/charge.js` | the charge worker: one process on the largest non-home host, charges every fragment forever | 2.00 **per thread** |
+| `go/config.js` | opponent table, stat weights per node, paths | 0 |
+| `go/board.js` | the rules, pure: groups, capture, legality, score | 0 |
+| `go/plan.js` | `chooseArm` + `chooseMove`, every decision - pure | 0 |
+| `go/search.js` | Monte Carlo tree search in slices, boards up to 7x7 - pure | 0 |
+| `go/go.js` | entry: resident player, one game after another, every node | 10.60 |
+| ↳ ENV body | transient: node, SF14, GoPower | 6.60 |
+| ↳ three cheat bodies | transients, with SF14 access only: odds, remove, two moves | 3.60–9.60 |
 
 `hud.js` writes into the overview's `overview-extra-hook-0/1` cells, which React never fills, so the
 rows outlive the transient - the user's rule was no new resident. Boot runs it every `hud.tick` (5 s)
@@ -414,7 +426,7 @@ which stays the one home of a default. `setting()` never throws - a mangled file
 defaults - and `setSetting()` is where bad input is refused. Home-only file is fine because every
 reader runs on home; a worker on another host would need a port (see share).
 
-**Switches** (`cloud.enabled|gang|sing|hacknet|sleeve|contracts`, on/off) are read by `boot.js`
+**Switches** (`cloud.enabled|gang|sing|hacknet|sleeve|contracts|go`, on/off) are read by `boot.js`
 every tick. Off STOPS a running resident (gang, sing) and skips a transient (cloud too); sing off also
 clears `SHARE_HOLD_MARKER` and `REP_WANT_MARKER`, since a killed sing cannot, and sleeve off clears
 `SLEEVE_FACTION_MARKER`. The `--no-X` flags keep their old meaning (don't
@@ -1521,6 +1533,91 @@ places a booster; a board gains one only by being relaid.
 READ is 7.40 GB, over sing's 6.60 ceiling: `activeFragments` alone is 5.00, and splitting off the two
 size reads would cost a round trip. Boot awaits each transient one at a time, so it never stacks with
 another of the subsystem's own.
+
+### The IPvGO player (`scripts/go/`)
+
+Built for BitNode 14, proven live outside it (search: 44-8, against 6-22 for the heuristic alone). Self-contained like `gang/`: it imports `scripts/rpc.js`, and
+boot and settings read one path out of `go/config.js`. **`ns.go` has no node gate**, so boot runs it on
+every node; only `go.cheat` needs SF14.
+
+**What a game pays.** `endGoGame` adds `blackScore x difficulty x streakMult` to that opponent's node
+power, **win or lose**. Difficulty is `(komi + 0.5) / 4`, except Illuminati on 5x5 at 8. The streak mult
+is 1.25 up to 3 at 8 wins, 0.5 on a loss, and up to 5 for a win breaking a dry run. Power becomes one
+stat each (`effects/effect.ts`): `1 + ln(p+1) x (p+1)^0.3 x 0.002 x power x GoPower x (SF14 ? 2 : 1)`.
+GoPower is 4 in BN14 and 1 elsewhere.
+
+**An install zeroes node power, and the game survives it.** `Go.prestigeAugmentation` clears power,
+wins and streaks; favor from streaks stays. It also kills `go.js` mid-game, and `resetBoardState` on a
+game with moves in it resets that opponent's streak. So startup RESUMES what is on the board, and only
+a finished game, an empty board or a No AI board starts a new one. A resumed game teaches the score but
+not the seconds.
+
+**`chooseArm` picks an arm, one opponent on one board size**, by
+`weight x [ln f(p+g) - ln f(p)] / seconds`. The curve is steeply concave (30k power on three opponents
+is 2.16 log-points against 0.97 on one), so that one line spreads play with no rule of its own, and
+each game lowers its own arm's next score. Log, because bonuses multiply. `p` is read back out of
+`getStats().bonusPercent`, the only place the API shows it, so an install and a hand-played game are
+simply right. Score, win rate and seconds are EWMAs per arm in `/data/go-arms-2.txt`: they describe the
+ENGINE, so they survive installs. An untried arm's prior is generous, so it gets its game, but it takes
+no dry-run bonus: on a guess, that pulled every loss back to the same opponent's next board.
+
+**The weights are the user's rule: BN14 plays to end the node, every other node for the normal
+stats.** `NORMAL_WEIGHTS` plus one override per node in `NODE_WEIGHTS`: BN14 rep and hacking level x3,
+speed x1.5; BN8 money 0; BN9 hacknet 1. BN14's rep work is x0.2 and the Red Pill needs 2.5m Daedalus
+rep. The secret opponent's hacking level is what x5 daemon difficulty and x0.4 hacking level block, and
+it needs no phase logic: `resetBoardState` throws without the pill, so the arm is dropped for the
+process and installing the pill restarts it. **Its name is `"????????????"`**, the `GoOpponent` enum
+value, not `w0r1d_d43m0n`.
+
+**`board.js` exists to keep the analysis API out**: `getChains`, `getLiberties` and
+`getControlledEmptyNodes` are 16.00 GB each, `getValidMoves` 8.00. A local with one of those names costs
+the same, which is why `tests/ram.test.mjs` pins all three pure modules at BASE. Repeats are checked
+against all of `getMoveHistory()` (0 GB): `evaluateIfMoveIsValid`'s comment says one board, its code
+searches them all.
+
+**`chooseMove` is a one-ply heuristic**: capture, save atari, make life or block it, then the best
+standing (stones + territory + influence). It never fills its own eye and never self-ataris without a
+capture. Once white has passed and black leads it banks the win, unless a move still adds a whole
+point: points are what the game pays. It alone plays boards over 7x7, and it won 6 of 28 live games.
+
+**`search.js` plays boards up to 7x7: Monte Carlo tree search, because the heuristic never sees the
+reply.** Against a local approximation of Daedalus it took 26 of 26 games at 100 ms a move where the
+heuristic took 15, at ~10k playouts a move on 5x5 and ~5k on 7x7. It has its own flat board: `tryStone`
+copies the grid per move. A playout is scored 0.9 for the win and 0.1 for the share of points, so a lost
+game still plays for what it pays. `searchMoves` decides when it runs, and a heuristic pass is believed
+only when black leads: behind, search is what finds the invasion. `go.searchMs` (live, default 500) is
+the budget; 0 is heuristic only. **ponytail:** no RAVE, no tree reuse.
+
+**The search runs in slices, because every script shares one JavaScript thread.**
+`startNetscript2Script` calls `main` in the game's own context (`NetscriptWorker.ts`, no Worker of any
+kind), so synchronous code stops the manager's dispatch ticks for its whole length, while an `await`
+costs other scripts nothing. `go.js` calls `step(SLICE_MS)` (5 ms) and `await ns.asleep(0)` in turn.
+**ponytail:** `chooseMove` is itself synchronous and measured 30 ms on one 13x13 board, past the 25 ms
+tick, from `liveCount` on every legal move; narrow those candidates if the batcher's jitter shows it.
+
+**`go.cheat` is rpc bodies only, the user's rule: no SF14, no RAM.** A check in front of a call does
+nothing for the bill, because names are charged whether they run or not, so one cheat name in `go.js`
+adds 8.00 GB to every save. `canCheat` is the game's `checkCheatApiAccess`: SF14.2, or SF14.1 inside
+BN14. Failing it, no body is ever written, and `go.cheat` off (live) does the same. With access, a cheat
+is priced only where search runs and only when its value is under `CHEAT_BELOW`. `go.js` asks the odds
+(3.60) and scores two moves at once and each white stone removed, by search with white to move, against
+the skipped turn a failure costs: `chance x option + (1 - chance) x skip` has to beat the normal move.
+**One attempt a game, because that is what makes ejection impossible:** the 10% only applies to a
+failure after an earlier cheat, and ejection pays no node power. The two cheat bodies (9.60 each) do not
+await: the cheat lands at the call, and the AI's reply can outlast rpc's 10 s. Any failure, such as no
+free RAM, plays the normal move. A local called `share` here cost 2.40 GB until the pin caught it.
+**ponytail:** cheats stop at 7x7, so the secret opponent's 19x19 board has none. Not yet run live: it
+needs BN14 at SF14.1.
+
+`/data/go-arms-2.txt` has a number that moves when the engine does. There is deliberately no `--forget`:
+one run beside the resident would be undone by its next write, since it holds the table in memory.
+
+**`go.js` is 10.60 GB and started after the other residents**, so a fresh home loses it first. A turn
+loop awaits the AI between calls, so a body per move would cost a process per move and lower no peak.
+ENV is the one body. Its failure on a busy home is retried before each game. **ponytail:** replacing
+`getBoardState` with replay through `board.js` plus a `getGameState` score check saves 4.00 GB, if
+10.60 ever blocks a fresh node. A silent AI is raced against `ns.asleep` (`STUCK_MS`), then passed, then
+reset: a stuck game earns nothing.
 
 ### The hacknet subsystem (`scripts/hacknet/`)
 
