@@ -3443,6 +3443,15 @@ export const tests = {
     assert(admitted.length === 5, `ceiling ignored: ${admitted.length}`);
   },
 
+  "the depth cap holds a stream on a 1200s weaken at the cadence floor": async () => {
+    const { mods } = await loadContinuous();
+    const { MAX_IN_FLIGHT, CADENCE_MS } = mods["config"];
+    // A live run's 1200 cap sent syscore's batches in 6 minutes, then earned $0
+    // on 48% of rows with 16 PB free. The comment already said 4000; only this
+    // holds the number to it.
+    assert(MAX_IN_FLIGHT * CADENCE_MS >= 1200e3, `${MAX_IN_FLIGHT} batches at ${CADENCE_MS}ms`);
+  },
+
   "in-flight depth is capped by MAX_IN_FLIGHT, not just by cadence": async () => {
     const { mods } = await loadContinuous();
     const { admitTargets } = mods["core"];

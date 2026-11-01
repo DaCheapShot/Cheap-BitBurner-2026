@@ -597,7 +597,7 @@ export const CONT_REPORT_PORT = 3;
  * it sizes each target's fraction to fit the budget, so a deeper pipeline
  * arrives as a smaller bite rather than as an over-commitment.
  */
-export const MAX_IN_FLIGHT = 1200;
+export const MAX_IN_FLIGHT = 4000;
 
 /**
  * Minimum head start between deciding a batch's landing time and its hack

@@ -614,7 +614,7 @@ rounding only ever refuses.
 once, and a live run stopped omega-net on `[H,W1,G,W2]` at 247 ms. Above `BAD_BATCH_TOLERANCE` the
 cut also needs `BAD_BATCH_RATE` (2%) of the window, which is ~1000 batches at depth. `stall:` lines
 say whether a pause over `SPACER_MS` fell inside the manager or outside it: the game's 60 s autosave
-writes every running script unless `ExcludeRunningScriptsFromSave` is set.
+writes every running script unless `ExcludeRunningScriptsFromSave` is set. Setting it took a live run from 63 bad batches in 2 hours to 3 in 4.6, with one stall logged.
 
 **Hack is re-sized at its own launch, only ever down.** `ns.hack` takes its percent at landing, so
 a count fixed at dispatch is a weaken window stale, and at 91% steal a 10% overshoot is the whole
