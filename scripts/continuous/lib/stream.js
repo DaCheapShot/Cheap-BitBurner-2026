@@ -114,31 +114,40 @@ const LAUNCH_ORDER = ["W1", "W2", "G", "H"];
  * Prep and share are not, but they are running RAM, already in freeRam, and
  * treating them as never ending is the safe direction.
  *
- * ponytail: sorts the whole ledger per dispatch, O(n log n) in ops in flight
- * across streams; keep it sorted incrementally if depth ~1000 x 3 shows up in
- * a profile.
+ * Steps land in SPACER_MS buckets instead of being sorted: a sort took 8 ms per
+ * dispatch at 6 x 1200 depth and 31 ms at 6 x 4000, on the one thread every
+ * dispatch and landing shares. An op holds its RAM through the whole bucket it
+ * ends in, so rounding only ever refuses, by under a spacer per op.
  */
 export function timelineFits(pool, fresh, now) {
   const ledger = pool.ledger ?? (pool.ledger = new Set());
-  const steps = [];
+  const bucket = (t) => Math.floor((Math.max(t, now) - now) / SPACER_MS);
+  let last = now;
   for (const e of ledger) {
-    if (e.end <= now) { ledger.delete(e); continue; }
-    if (!e.launched) steps.push([Math.max(e.start, now), -e.gb]);
-    steps.push([e.end, e.gb]);
+    if (e.end <= now) ledger.delete(e);
+    else if (e.end > last) last = e.end;
   }
   let from = Infinity;
   let to = -Infinity;
   for (const f of fresh) {
-    steps.push([f.start, -f.gb], [f.end, f.gb]);
     if (f.start < from) from = f.start;
     if (f.end > to) to = f.end;
   }
-  // Takes before gives at the same instant: the pessimistic tie.
-  steps.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const steps = new Float64Array(bucket(Math.max(last, to)) + 2);
+  for (const e of ledger) {
+    if (!e.launched) steps[bucket(e.start)] -= e.gb;
+    steps[bucket(e.end) + 1] += e.gb;
+  }
+  for (const f of fresh) {
+    steps[bucket(f.start)] -= f.gb;
+    steps[bucket(f.end) + 1] += f.gb;
+  }
+  const first = bucket(from);
+  const end = bucket(to);
   let free = pool.freeRam;
-  for (const [t, d] of steps) {
-    free += d;
-    if (t >= from && t < to && free < 0) return false;
+  for (let i = 0; i <= end; i++) {
+    free += steps[i];
+    if (i >= first && free < 0) return false;
   }
   return true;
 }
@@ -960,6 +969,12 @@ export function createStream(ns, math, opts) {
       // perfect order - which is exactly why the per-batch verdict cannot see
       // it and the flag has to be carried on the batch.
       if (b.intruded) v.ok = false;
+      // Late is not wrong. A stall delays every stream at once, and those
+      // batches still land in order: a live run stopped omega-net on
+      // [H,W1,G,W2] at 247ms and cut three streams 40% in the same second. Only
+      // a broken sequence says anything about this stream, so only that earns
+      // a strike or moves the fraction. stats.bad still counts the rest.
+      const fault = !v.orderOk || b.intruded;
       stats.jitterSum += v.jitter;
       stats.jitterMax = Math.max(stats.jitterMax, v.jitter);
       // Came within half a spacer of the ops reordering. Counted because a
@@ -988,7 +1003,7 @@ export function createStream(ns, math, opts) {
       // empty until the new fraction's own batches start landing.
       const mine = b.plannedAt === sample.steal;
       if (mine) sample.batches++;
-      if (mine && !v.ok) sample.bad++;
+      if (mine && fault) sample.bad++;
       if (v.hackHit && b.take > 0) {
         const over = v.stolen / b.take - 1;
         // One number, two signals, separated by sign. Money clamps at maxMoney,
@@ -1016,11 +1031,11 @@ export function createStream(ns, math, opts) {
         lastUnder = over;
       }
 
-      if (v.ok) {
-        stats.ok++;
+      if (v.ok) stats.ok++;
+      else stats.bad++;
+      if (!fault) {
         strikes = 0;
       } else {
-        stats.bad++;
         strikes++;
         if (strikes >= strikeLimit && !stopped) {
           stopped = "desynced";

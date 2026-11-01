@@ -4,6 +4,7 @@ import {
   CADENCE_MS,
   DRAIN_UNDER,
   GROW_MARGIN,
+  BAD_BATCH_RATE,
   BAD_BATCH_TOLERANCE,
   GROW_DRIFT_TOLERANCE,
   GROW_MARGIN_CAP,
@@ -277,7 +278,11 @@ export function nextSteal(steal, sample, cap = MAX_STEAL_FRACTION, opts = {}) {
   // subsequent batch cheaper to get wrong while the cause is unknown - but not
   // to a single one, which on a stream carrying jitter close to the spacer is
   // ordinary. See BAD_BATCH_TOLERANCE for the run this cost 40 points.
-  if (sample.bad > badTolerance) return back(`${sample.bad} bad batch(es)`);
+  // The window is a weaken long, so a count alone gets easier to reach the
+  // deeper the pipeline runs. See BAD_BATCH_RATE.
+  if (sample.bad > Math.max(badTolerance, sample.batches * BAD_BATCH_RATE)) {
+    return back(`${sample.bad} bad batch(es)`);
+  }
 
   // Took MORE than the grow was sized to put back. Since money clamps at
   // maxMoney, a positive `over` can only come from hack effectiveness rising

@@ -603,6 +603,19 @@ trend in `hackFractionPerThread` over a weaken window) and sizes every batch for
 steady state `worstOver / tolerance ≈ 1 / DRIFT_SAFETY`, whatever the fraction or the target — so
 a climb threshold below that is one no healthy stream can ever meet.
 
+**`MAX_IN_FLIGHT` is 4000, and the gate buckets instead of sorting.** A stream needs `W / cadence`
+in flight or it falls into waves: at 1200 a 575 s target sent its batches in 6 minutes, then earned
+$0 until they landed, and computek read $13b/s for half a run with 12 PB free. `timelineFits` sums
+steps into `SPACER_MS` buckets, 0.7 ms a dispatch at 6 x 4000 against 31 ms for the sort, and
+rounding only ever refuses.
+
+**Late is not wrong.** Only a broken sequence or an intrusion earns a strike or moves the steal;
+`stats.bad` still counts a batch landing in order past the spacer. A stall delays every stream at
+once, and a live run stopped omega-net on `[H,W1,G,W2]` at 247 ms. Above `BAD_BATCH_TOLERANCE` the
+cut also needs `BAD_BATCH_RATE` (2%) of the window, which is ~1000 batches at depth. `stall:` lines
+say whether a pause over `SPACER_MS` fell inside the manager or outside it: the game's 60 s autosave
+writes every running script unless `ExcludeRunningScriptsFromSave` is set.
+
 **Hack is re-sized at its own launch, only ever down.** `ns.hack` takes its percent at landing, so
 a count fixed at dispatch is a weaken window stale, and at 91% steal a 10% overshoot is the whole
 balance. A live run drained the-hub, rho and alpha that way, with 750 batches committed before the
@@ -618,12 +631,13 @@ with no hack to land, so waiting on it cost a weaken window. A stopped stream al
 which read as outranked, and retiring streams are never repaired: a live run ended with 8.7 PB free
 and nothing dispatching. It resumes first and loses its slot at a later rescan if it really has.
 
-**`MAX_TARGETS = 6`, but the count is chosen by INCOME, not capacity.** Running the most targets
+**`MAX_TARGETS = 10`, but the count is chosen by INCOME, not capacity.** Running the most targets
 that fit is only right when the budget is not the constraint. When it is, every extra target
 narrows the slice for all of them and income is near-linear in the slice — a live run measured
 phantasy alone at $2.84m/s against $1.96m/s for three. `rescan` prices 1..N and takes the best
-total, so the count rises on its own as the pool grows. The ceiling is 6 because a stream at the
-300 ms floor saturates at ~1.4 PB, and three left over half of a 7.5 PB budget idle.
+total, so the count rises on its own as the pool grows. The ceiling is 10 because a stream at the
+300 ms floor saturates, so the count is what spends a big pool: at six, a 25 PB pool dropped
+silver-helix ($2.4b/s), phantasy and iron-gym for new targets with 12 PB free.
 
 **Grow and weaken fill home first, and hack leaves it for last**, whatever its cores (`hostsBy`,
 the user's rule). A foreign host can out-core home, but it holds a few GB, and each one taken first

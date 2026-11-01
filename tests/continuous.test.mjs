@@ -1870,6 +1870,27 @@ export const tests = {
     assert(s.stopped === null && s.strikes === 0, "resume should clear the stop");
   },
 
+  "a late batch that landed in order is no fault of the stream": async () => {
+    const { s, calls, fire, mods } = await makeStream();
+    const { DESYNC_STRIKES } = mods["config"];
+
+    // A live run stopped omega-net with 'last saw [H,W1,G,W2], jitter 247ms' -
+    // the right order, delayed by a stall every stream on the pool felt at once.
+    const late = { H: [1000, 0], W1: [1100, 0], G: [1200, 250], W2: [1300, 250] };
+    for (let i = 0; i < DESYNC_STRIKES; i++) {
+      calls.length = 0;
+      fire();
+      for (const c of calls) {
+        const [p, by] = late[c.args[5]];
+        s.credit({ b: c.args[2], op: c.args[5], t: c.threads, p, a: p + by, r: c.args[5] === "H" ? 5e7 : 1 });
+      }
+      s.retire();
+    }
+    assert(s.stats.bad === DESYNC_STRIKES, `fixture landed ${s.stats.bad} bad, want them still counted`);
+    assert(s.strikes === 0, `strikes ${s.strikes}`);
+    assert(s.stopped === null, `stopped: ${s.stopped}`);
+  },
+
   "reports are credited to their own batch and retired in order": async () => {
     const { s, calls, fire } = await makeStream();
     fire();
@@ -2067,6 +2088,16 @@ export const tests = {
     // there, while rho-construction took the same 1-in-536 and held.
     const one = nextSteal(0.50, { batches: 20, bad: BAD_BATCH_TOLERANCE, worstOver: 0 }, 0.95);
     assert(one.steal >= 0.50, `one bad batch cut the fraction to ${one.steal}`);
+  },
+
+  "bad batches back off on their RATE, not a count over a whole window": async () => {
+    const { mods } = await loadContinuous();
+    const { nextSteal } = mods["lib/plan"];
+    // A live run cut omega-net from 94.8% to 56.9% on 2 bad of about 700, and
+    // the-hub to 16.0% of a 95% ceiling on 17 of 10,600 spread over an hour.
+    assert(nextSteal(0.90, { batches: 1000, bad: 2, worstOver: 0 }, 0.95).steal >= 0.90, "2 in 1000 cut the fraction");
+    // A pattern still backs off, however long the window.
+    assert(nextSteal(0.90, { batches: 1000, bad: 30, worstOver: 0 }, 0.95).steal < 0.90, "3% bad was ignored");
   },
 
   "it will not step up from the edge of tolerance": async () => {
@@ -3234,15 +3265,17 @@ export const tests = {
 
     // Queued 80 over [10, 20) on a 100 pool: another 80 after it lands fits.
     // The scalar it replaced read 100 - 80 < 80 and refused - the idle RAM.
-    assert(timelineFits(pool(100, op(10, 20, 80)), [op(25, 30, 80)], 0), "a later op was refused");
+    assert(timelineFits(pool(100, op(1000, 2000, 80)), [op(2500, 3000, 80)], 0), "a later op was refused");
     // Overlapping it does not: this is the grows-come-due-together pile-up.
-    assert(!timelineFits(pool(100, op(10, 20, 80)), [op(15, 30, 80)], 0), "an overlap was admitted");
+    assert(!timelineFits(pool(100, op(1000, 2000, 80)), [op(1500, 3000, 80)], 0), "an overlap was admitted");
+    // Rounding must err towards refusing: one landing as the next starts overlaps.
+    assert(!timelineFits(pool(100, op(1000, 2000, 80)), [op(2000, 3000, 80)], 0), "the tie was given away");
     // A running op gives its RAM back at landing, and not before.
-    assert(timelineFits(pool(40, op(0, 12, 50, true)), [op(15, 30, 80)], 0), "a landed op still held RAM");
-    assert(!timelineFits(pool(40, op(0, 12, 50, true)), [op(5, 30, 80)], 0), "a running op was treated as free");
+    assert(timelineFits(pool(40, op(0, 1200, 50, true)), [op(1500, 3000, 80)], 0), "a landed op still held RAM");
+    assert(!timelineFits(pool(40, op(0, 1200, 50, true)), [op(500, 3000, 80)], 0), "a running op was treated as free");
     // Ended entries are pruned, so the ledger cannot grow without bound.
-    const p = pool(100, op(0, 5, 10, true));
-    timelineFits(p, [op(20, 30, 1)], 10);
+    const p = pool(100, op(0, 500, 10, true));
+    timelineFits(p, [op(2000, 3000, 1)], 1000);
     assert(p.ledger.size === 0, `ended entries kept: ${p.ledger.size}`);
   },
 

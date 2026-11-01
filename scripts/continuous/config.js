@@ -411,6 +411,15 @@ export const MONEY_FLOOR_SHARE = 0.5;
 export const BAD_BATCH_TOLERANCE = 1;
 
 /**
+ * Share of a controller window that must be bad before the steal backs off.
+ *
+ * A window is one weaken, ~1000 batches at depth, so 2 of them is not the
+ * pattern BAD_BATCH_TOLERANCE meant: a live run took the-hub to 16.0% of a 95%
+ * ceiling on 17 bad in 10,600. Real breakdowns are DESYNC_STRIKES' job.
+ */
+export const BAD_BATCH_RATE = 0.02;
+
+/**
  * Cap on the anchor's allowance for op times stretching before its ops launch.
  *
  * The allowance is real - a streaming target is at minimum security only about
@@ -572,12 +581,12 @@ export const CONT_REPORT_PORT = 3;
  * dispatch into, and repeated. That is shotgun behaviour, arrived at from the
  * inside, and it is what this whole design exists to avoid.
  *
- * 1200 covers a weaken of 480s at the current 400ms cadence. Targets slower
- * than that - computek's weaken is ~20 minutes - still cap, and still fall back
- * into waves; the honest fix for those is a wider cadence for that target, not
- * a bigger number here.
+ * 4000 covers a weaken of 1200s at the 300ms floor. At 1200 a live run's
+ * computek, rothman-uni, netlink and catalyst each sent 1200 batches in 6
+ * minutes, then stood idle with 12 PB free: computek read $13b/s while landing
+ * and $0 for half the run. Slower targets still fall into waves.
  *
- * Raised from 400 once two things made depth cheap. JIT: a queued op reserves
+ * Raised from 400, and again from 1200, once things made depth cheap. JIT: a queued op reserves
  * nothing, so depth costs bookkeeping rather than RAM - a live run held ~1000
  * batches across five targets against 0.00TB reserved. And retire() no longer
  * walks the whole in-flight map every tick, which at this depth across several
@@ -720,12 +729,12 @@ export const DESYNC_STRIKES = 3;
  * A fully-fed target cannot absorb another byte: depth is capped by weakenTime /
  * cadence and steal by MAX_STEAL_FRACTION. A live run measured that at ~1.4 PB a
  * stream at the 300ms floor, so three streams left over half of a 7.5 PB budget
- * idle. Six covers that pool; on a bigger one the rest needs a smaller cadence.
+ * idle. A 25 PB pool at six dropped earning streams (silver-helix $2.4b/s,
+ * phantasy $1.3b/s, iron-gym $1b/s) for new ones with 12 PB free, so ten.
  *
- * ponytail: timelineFits sorts the whole ledger per dispatch, so this also doubles
- * that work. Keep the ledger sorted if jitter climbs toward SPACER_MS.
+ * ponytail: rescan's chooseSteal calls grow with n^2. Trim if a stall line blames it.
  */
-export const MAX_TARGETS = 6;
+export const MAX_TARGETS = 10;
 
 /**
  * Fraction of the pool's free RAM to commit across all streams at full depth.

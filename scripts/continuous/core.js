@@ -25,6 +25,7 @@ import {
   GROW_DRIFT_TOLERANCE,
   HOME_RESERVE_GB,
   MAX_IN_FLIGHT,
+  SPACER_MS,
   MAX_STEAL_FRACTION,
   MAX_TARGETS,
   POOL_WAIT_CYCLES,
@@ -608,8 +609,13 @@ export async function supervise(ns, math, opts) {
   const push = createPushReader(ns);
   let nextPush = 0;
 
+  // Said per stall, not as one lifetime maximum, so a run shows whether they
+  // repeat and which side of the sleep they fall on.
+  let slept = Date.now();
   while (Date.now() < until) {
     const now = Date.now();
+    const away = now - slept - tick;
+    if (away > SPACER_MS) log(`  stall: ${away.toFixed(0)}ms outside the manager`);
     let rescanned = false;
 
     // The game frees a worker's RAM when it exits; refresh is how the pool
@@ -681,6 +687,10 @@ export async function supervise(ns, math, opts) {
       report({ streams, preps, pool, started, orphans, sawFull, repaired, log, verbose });
     }
 
+    slept = Date.now();
+    if (slept - now > SPACER_MS) {
+      log(`  stall: ${(slept - now).toFixed(0)}ms inside the manager${rescanned ? " (rescan)" : ""}`);
+    }
     await ns.sleep(tick);
   }
 
