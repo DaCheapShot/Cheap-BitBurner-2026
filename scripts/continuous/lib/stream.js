@@ -29,6 +29,7 @@ import {
   MAX_DRIFT_TOLERANCE,
   MIN_DRIFT_TOLERANCE,
   MAX_IN_FLIGHT,
+  PREP_LIVE_SHARE,
   LATE_TOLERANCE_MS,
   LAUNCH_LEAD_MS,
   MAX_STEAL_FRACTION,
@@ -403,7 +404,10 @@ export function createStream(ns, math, opts) {
     // The pool refusing a batch is evidence about SIZE, not about the target -
     // and at high steal a batch is over ten times its size at 10%, so a
     // contended pool is fixed by taking a smaller bite, not by queueing.
-    if (why.startsWith("no room") && now >= noRoomFrom) sample.noRoom++;
+    // Unless prep holds past its share: that wave was placed before any limit
+    // applied, and a smaller batch frees none of it. See PREP_LIVE_SHARE.
+    const prepInTheWay = pool.pendingRam > pool.usableRam * PREP_LIVE_SHARE;
+    if (why.startsWith("no room") && now >= noRoomFrom && !prepInTheWay) sample.noRoom++;
     return { dispatched: false, why };
   };
 

@@ -1796,6 +1796,20 @@ export const tests = {
     assert(later >= 1, "no-room evidence must count again once the pipeline turned over");
   },
 
+  // A live run cut harakiri-sushi 19.8% -> 1.4% on "1/1 dispatches found no room"
+  // with prep holding the pool. No size of batch fixes that.
+  "a refusal while prep is over its share says nothing about the batch": async () => {
+    const { s, pool, mods } = await makeStream();
+    const { CADENCE_MS } = mods["config"];
+    Object.defineProperty(pool, "freeRam", { get: () => 0, configurable: true });
+    Object.defineProperty(pool, "pendingRam", { get: () => pool.usableRam, configurable: true });
+
+    const t0 = Date.now();
+    const before = s.steal;
+    for (let i = 0; i < 20; i++) { s.dispatch(t0 + i * CADENCE_MS); s.retire(t0 + i * CADENCE_MS); }
+    assert(s.steal === before, `steal cut to ${s.steal}`);
+  },
+
   "a refused batch waits a cadence before trying again": async () => {
     const { s, mods } = await makeStream({ hosts: { home: 12 } });
     const { CADENCE_MS } = mods["config"];
@@ -4020,6 +4034,45 @@ export const tests = {
     // Still the constraint while it is in flight, not only on the tick it landed.
     mods["core"].servicePreps(ns, { math, pool, ram, streams: [], preps, log: () => {} });
     assert(targets().join() === "a", `b took a turn, got [${targets()}]`);
+  },
+
+  // A live opening held 1.05 of 1.1 TB in prep for 50 minutes while the one live
+  // stream earned $1.5k/s. A batch earns now, and that money buys the RAM prep wants.
+  "prep leaves a live stream its share of the pool": async () => {
+    const { ns, math, pool, ram, mods } = await prepFixture(16384);
+    const { PREP_LIVE_SHARE } = mods["config"];
+    const preps = new Map([["a", freshPrepEntry()], ["b", freshPrepEntry()]]);
+    const streams = [{ host: "live", stopped: null, retiring: false, landing: 0 }];
+    mods["core"].servicePreps(ns, { math, pool, ram, streams, preps, log: () => {} });
+    assert(pool.pendingRam > 0, "prep must still make progress");
+    assert(pool.pendingRam <= pool.usableRam * PREP_LIVE_SHARE,
+      `prep holds ${pool.pendingRam} of ${pool.usableRam}`);
+  },
+
+  "with no stream earning, prep takes the whole pool": async () => {
+    const { ns, math, pool, ram, mods } = await prepFixture(16384);
+    const { PREP_LIVE_SHARE } = mods["config"];
+    const preps = new Map([["a", freshPrepEntry()]]);
+    const streams = [{ host: "gone", stopped: null, retiring: true, landing: 0 }];
+    mods["core"].servicePreps(ns, { math, pool, ram, streams, preps, log: () => {} });
+    assert(pool.pendingRam > pool.usableRam * PREP_LIVE_SHARE,
+      `prep held back to ${pool.pendingRam} with nothing to protect`);
+  },
+
+  "the stream budget leaves what prep may hold, and a small prep costs it nothing": async () => {
+    const { pool, ram, mods } = await prepFixture(65536);
+    const { streamBudget } = mods["core"];
+    const { PREP_LIVE_SHARE, TARGET_RAM_BUDGET } = mods["config"];
+    const full = pool.placeableRam(ram.grow);
+    assert(streamBudget(pool, ram) === full * TARGET_RAM_BUDGET, "idle pool");
+
+    Object.defineProperty(pool, "pendingRam", { get: () => full * 0.01, configurable: true });
+    assert(streamBudget(pool, ram) === full * TARGET_RAM_BUDGET, "a sliver of prep cut the budget");
+
+    // Past its share prep only holds a wave placed before the stream existed.
+    // Priced at nothing, the first stream could never be admitted.
+    Object.defineProperty(pool, "pendingRam", { get: () => full, configurable: true });
+    assert(streamBudget(pool, ram) === full * (1 - PREP_LIVE_SHARE), "no floor under the budget");
   },
 
   "a wave that is a sliver of the pool lets the next prep go": async () => {

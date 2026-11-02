@@ -68,12 +68,14 @@ import {
  * op that makes irreversible progress toward minimum security, and dropping it
  * to fit more grow would mean growing at a security level we chose not to fix.
  *
+ * @param {number} [maxGb] most the wave may hold, see PREP_LIVE_SHARE
  * @returns {{grow, weaken, excessSec, growSec, growWanted, partial, shrunk} |
  *   null} null when not even a bare weaken fits - a full pool, which is
  *   transient. `shrunk` is true when the wave got less than it asked for, i.e.
  *   the pool is the constraint and there are no leftovers for another target.
  */
-export function placePrepWave(pool, ram, math, snap) {
+export function placePrepWave(pool, ram, math, snap, maxGb = Infinity) {
+  if (!(maxGb > 0)) return null;
   const weakenPer = math.weakenPerThread();
   const bonus = math.coreBonusFor;
   const excessSec = Math.max(0, snap.sec - snap.minSec);
@@ -115,7 +117,10 @@ export function placePrepWave(pool, ram, math, snap) {
       ? pool.allocateEffective(ram.weaken, weakenEff, bonus, { order: OP_FILL_ORDER.W1 })
       : empty;
 
-    if (!weaken) {
+    const over = weaken
+      && grow.rawThreads * ram.grow + weaken.rawThreads * ram.weaken > maxGb;
+    if (!weaken || over) {
+      if (weaken) pool.release(weaken.placements);
       pool.release(grow.placements);
       if (growEff > 0) {
         growEff = growEff <= 1 ? 0 : Math.floor(growEff * 0.7);
@@ -130,7 +135,9 @@ export function placePrepWave(pool, ram, math, snap) {
       // mode the way there is for a batch that hacks but fails to grow. Bailing
       // out here would have prep sit and wait for RAM on exactly the targets
       // that are furthest from ready.
-      const affordable = Math.floor(pool.maxEffectiveThreadsFor(ram.weaken, bonus));
+      const affordable = Math.floor(
+        Math.min(pool.maxEffectiveThreadsFor(ram.weaken, bonus), maxGb / ram.weaken),
+      );
       if (affordable < 1) return null;
 
       const partial = pool.allocateEffective(ram.weaken, affordable, bonus, {

@@ -661,6 +661,12 @@ Rationing the queue by shares of the RAM budget failed both ways: at the start o
 is admitted, so all four slots went to a 32 GB home, and once planned stream use filled the budget
 a live 11 PB pool got one slot with 9 PB free, leaving $559b-a-batch targets 24 minutes unprepped.
 
+**While a stream earns, prep holds at most `PREP_LIVE_SHARE` (half) of the pool.** One wave
+past the extras gate used to take everything: a 1.1 TB opening held 1.05 TB in prep for 50
+minutes, the live stream earned $1.5k/s, and "1/1 dispatches found no room" cut its steal from
+19.8% to 1.4%. `streamBudget` takes prep off the slice, and a refusal while prep is over its
+share is not evidence about batch size. With nothing earning, prep takes the lot.
+
 The gate is carried on the prep entry, not recomputed per tick, because a short wave is still
 the constraint while it is in flight. Without that the split just moves from space into time:
 one target holds a short wave, the next takes the crumbs, the first releases, the next holds.

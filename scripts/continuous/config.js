@@ -842,6 +842,19 @@ export const PREP_CONCURRENCY = 4;
  */
 export const PREP_EXTRA_SHARE = 0.05;
 
+/**
+ * Most of the pool prep may hold while any stream is earning.
+ *
+ * PREP_EXTRA_SHARE stops a second prep; nothing stopped the first. On a 1.1 TB
+ * pool one target's wave took 1.05 TB and the next wave took it again, for 50
+ * minutes: the one live stream earned $1.5k/s and cut its own steal to 1.4% on
+ * refusals no batch size could fix. A stream earns now and its money buys the
+ * RAM prep is short of, so it wins. Half, not all: prep still has to finish,
+ * since the next target is usually far richer. With nothing earning there is
+ * nothing to protect and prep takes the lot.
+ */
+export const PREP_LIVE_SHARE = 0.5;
+
 /** Money must be within this fraction of max for a target to count as prepped. */
 export const MONEY_TOLERANCE = 0.999;
 

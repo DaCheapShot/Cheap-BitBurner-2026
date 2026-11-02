@@ -33,6 +33,7 @@ import {
   PREP_CONCURRENCY,
   PREP_MAX_CYCLES,
   PREP_EXTRA_SHARE,
+  PREP_LIVE_SHARE,
   PROMOTE_PREP_FIRST,
   REPREP_GRACE_MS,
   PUSH_MS,
@@ -515,6 +516,20 @@ export function priceTargets(
 }
 
 /**
+ * RAM the streams share out. Prep comes off capacity up to its PREP_LIVE_SHARE
+ * and no further: past that it holds a wave from before any stream existed, and
+ * pricing that as permanent would leave the first stream a budget of nothing.
+ * TARGET_RAM_BUDGET's spare room absorbs a small prep, so a big pool pays nothing.
+ */
+export function streamBudget(pool, ram) {
+  const capacity = pool.placeableRam(ram.grow);
+  return Math.min(
+    capacity * TARGET_RAM_BUDGET,
+    capacity - Math.min(pool.pendingRam, capacity * PREP_LIVE_SHARE),
+  );
+}
+
+/**
  * Price a candidate as though it were already prepped.
  *
  * The only way to answer "is this unprepped server worth more than one I am
@@ -822,7 +837,7 @@ export function rescan(ns, math, opts) {
   // raw byte total overstates what can be placed. A live run budgeted against
   // usableRam, chose 84.9% steal, and then failed 402 of 439 dispatches with
   // "no room" - the bytes were there and the threads would not fit.
-  const budget = pool.placeableRam(ram.grow) * TARGET_RAM_BUDGET;
+  const budget = streamBudget(pool, ram);
   // priceTargets sorts by paper income per GB-second; in BN8 admission goes by
   // the stock position a target pushes first (stable, so ties stay in paper order).
   const order = byStocks ? [...priced].sort((a, b) => push.valueFor(b.host) - push.valueFor(a.host)) : priced;
@@ -1129,6 +1144,8 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
   // up short, or one past PREP_EXTRA_SHARE of the pool, holds back the preps
   // behind it: on 1.6 TB one wave is the constraint, on 11 PB it is a rounding error.
   let tight = false;
+  const earning = streams.some((s) => !s.stopped && !s.retiring);
+  const prepLimit = earning ? pool.usableRam * PREP_LIVE_SHARE : Infinity;
 
   // Repairs before fresh preps. A stopped stream is a target we already admitted
   // that earns nothing until it is back on baseline, so with prep serialised it
@@ -1201,7 +1218,7 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
     // reservation of a wave that has already landed.
     if (tight) continue;
 
-    const wave = placePrepWave(pool, ram, math, snap);
+    const wave = placePrepWave(pool, ram, math, snap, prepLimit - pool.pendingRam);
     if (!wave) { tight = true; continue; } // pool busy - try again next tick
 
     const times = math.opTimes(snap);
