@@ -4630,6 +4630,20 @@ export const tests = {
     assert(Number(ns.getPortHandle(SHARE_PORT).peek()) === 0.25, "releasing the hold restores the fraction");
   },
 
+  // A live run had share enabled, the player at Bachman (company work, which the
+  // bonus never multiplies), and not one share line in the log: "it's not
+  // submitting share scripts" was the report. A hold the user did not set must say so.
+  "a hold over an enabled share is logged, not silent": async () => {
+    const { ns, pool, mods } = await makePool({ home: 1024 });
+    const { serviceShare } = mods["lib/share"];
+    const { SHARE_HOLD_MARKER } = mods["config"];
+    ns._files["/data/settings.txt"] = '{"share.enabled":1,"share.fraction":0.25}';
+    ns._files[SHARE_HOLD_MARKER] = "hold";
+    const lines = [];
+    serviceShare(ns, pool, (l) => lines.push(l));
+    assert(lines.some((l) => l.includes("HELD")), `nothing said why share is off: ${JSON.stringify(lines)}`);
+  },
+
   // A host bought by cloud.js while the batcher runs is admitted by
   // ServerPool.sync and gets the batch workers - but scripts/deploy.js only
   // runs when root.js roots something NEW, and a purchased server arrives

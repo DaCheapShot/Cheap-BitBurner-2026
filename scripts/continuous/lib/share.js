@@ -289,7 +289,13 @@ export function serviceShare(ns, pool, log, opts = {}) {
   const census = shareCensus(ns, pool.servers.map((s) => s.hostname));
 
   if (fraction <= 0) {
-    if (census.threads === 0) return null;
+    if (census.threads === 0) {
+      // Share on and held by sing is not "off": a live run sat at Bachman, a
+      // company the bonus never multiplies, with share enabled and not one share
+      // line in the log, and read it as share being broken.
+      if (shareHeld(holdText, sleevesText) && shareFraction(ns.read(SETTINGS_FILE)) > 0) log(`${indent}share HELD - enabled, but neither player nor sleeve is on faction work`);
+      return null;
+    }
     // The workers are already on their way out - they poll the port between 10 s
     // share calls. Nothing to do but report it, so RAM that looks busy for one
     // more rescan is not mistaken for a leak.
