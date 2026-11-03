@@ -411,6 +411,15 @@ export const MONEY_FLOOR_SHARE = 0.5;
 export const BAD_BATCH_TOLERANCE = 1;
 
 /**
+ * Share of a controller window that must be bad before the steal backs off.
+ *
+ * A window is one weaken, ~1000 batches at depth, so 2 of them is not the
+ * pattern BAD_BATCH_TOLERANCE meant: a live run took the-hub to 16.0% of a 95%
+ * ceiling on 17 bad in 10,600. Real breakdowns are DESYNC_STRIKES' job.
+ */
+export const BAD_BATCH_RATE = 0.02;
+
+/**
  * Cap on the anchor's allowance for op times stretching before its ops launch.
  *
  * The allowance is real - a streaming target is at minimum security only about
@@ -572,12 +581,12 @@ export const CONT_REPORT_PORT = 3;
  * dispatch into, and repeated. That is shotgun behaviour, arrived at from the
  * inside, and it is what this whole design exists to avoid.
  *
- * 1200 covers a weaken of 480s at the current 400ms cadence. Targets slower
- * than that - computek's weaken is ~20 minutes - still cap, and still fall back
- * into waves; the honest fix for those is a wider cadence for that target, not
- * a bigger number here.
+ * 4000 covers a weaken of 1200s at the 300ms floor. At 1200 a live run's
+ * computek, rothman-uni, netlink and catalyst each sent 1200 batches in 6
+ * minutes, then stood idle with 12 PB free: computek read $13b/s while landing
+ * and $0 for half the run. Slower targets still fall into waves.
  *
- * Raised from 400 once two things made depth cheap. JIT: a queued op reserves
+ * Raised from 400, and again from 1200, once things made depth cheap. JIT: a queued op reserves
  * nothing, so depth costs bookkeeping rather than RAM - a live run held ~1000
  * batches across five targets against 0.00TB reserved. And retire() no longer
  * walks the whole in-flight map every tick, which at this depth across several
@@ -588,7 +597,7 @@ export const CONT_REPORT_PORT = 3;
  * it sizes each target's fraction to fit the budget, so a deeper pipeline
  * arrives as a smaller bite rather than as an over-commitment.
  */
-export const MAX_IN_FLIGHT = 1200;
+export const MAX_IN_FLIGHT = 4000;
 
 /**
  * Minimum head start between deciding a batch's landing time and its hack
@@ -714,21 +723,19 @@ export const DESYNC_STRIKES = 3;
 // --------------------------------------------------------------- targets ----
 
 /**
- * How many targets stream at once. A hard limit, not a budget-driven guess.
+ * How many targets may stream at once. A ceiling: rescan picks the count by
+ * income, so a small pool still runs one.
  *
- * Kept small on purpose. More streams is not more income past the point where
- * the pool stops being the constraint: depth is capped by weakenTime / cadence
- * and steal by MAX_STEAL_FRACTION, so three targets at the ceiling already earn
- * everything three servers can be made to yield. What extra streams buy is
- * churn - more preps to keep finished, more sets to re-evaluate, and a longer
- * list for the admission ordering to shuffle between rescans.
+ * A fully-fed target cannot absorb another byte: depth is capped by weakenTime /
+ * cadence and steal by MAX_STEAL_FRACTION. A live run measured that at ~1.4 PB a
+ * stream at the 300ms floor, so three streams left over half of a 7.5 PB budget
+ * idle. A 25 PB pool at six dropped earning streams (silver-helix $2.4b/s,
+ * phantasy $1.3b/s, iron-gym $1b/s) for new ones with 12 PB free, so ten.
  *
- * The RAM left over is genuinely idle, and that is the honest state of things:
- * a fully-fed target at 95% steal and full depth cannot absorb another byte.
- * Spending it needs a smaller cadence (SPACER_MS) or more targets, and those
- * are separate decisions with their own evidence.
+ * ponytail: rescan's chooseSteal calls grow with n^2 times the slice passes. Trim
+ * if a stall line blames it.
  */
-export const MAX_TARGETS = 3;
+export const MAX_TARGETS = 10;
 
 /**
  * Fraction of the pool's free RAM to commit across all streams at full depth.
@@ -802,9 +809,10 @@ export const PUSH_MS = 2000;
  *
  * A bound on the QUEUE, not on RAM. How many of the queued preps actually place
  * a wave on a given tick is decided by `servicePreps`, which stops at the first
- * wave the pool could not cover in full - so this number and PREP_SPARE_SHARE
- * below cap how long the prep list gets, and nothing more. Queuing is free:
- * an entry with no wave placed costs a map slot and reserves nothing.
+ * wave the pool could not cover in full or that took more than PREP_EXTRA_SHARE
+ * of it - so this number caps how long the prep list gets, and nothing more.
+ * Queuing is free: an entry with no wave placed costs a map slot and reserves
+ * nothing.
  *
  * Prep runs CONCURRENTLY with streaming, never before it. Blocking the whole
  * run until every target was prepped meant the already-prepped ones - the good
@@ -814,33 +822,41 @@ export const PUSH_MS = 2000;
  * It used to be unreachable: rescan queued only the top maxTargets * 2
  * candidates, and the streams occupied most of those, so the queue ran out
  * before the slots did however much RAM was spare. The queue is the whole
- * ranking now, so this is the real bound on its length.
+ * ranking now, so this is the real bound on its length. At 4 a live 25 PB pool
+ * held 12 TB in prep for half an hour at $5b/s, while rho-construction, worth
+ * $36b/s, waited until minute 73 for a place in the queue.
  */
-export const PREP_CONCURRENCY = 4;
+export const PREP_CONCURRENCY = 8;
 
 /**
- * How much of the pool must be idle to earn each queued prep beyond the first.
+ * Largest share of the pool one prep wave may hold and still let the next prep
+ * start beside it.
  *
- * Also a QUEUE bound - it was written as the RAM throttle and could not be one.
- * A wave sized "by need" takes whatever the pool has when need exceeds it, and
- * on a 1.6 TB pool four queued preps reserved 1.58 TB, held it for a weaken
+ * On a 1.6 TB pool four queued preps reserved 1.58 TB, held it for a weaken
  * window each, and left `pool 0.00TB free` on every report: the one live stream
  * aborted 169 of 170 batches for want of RAM, and none of the four finished
- * prepping either, each crawling at a quarter of the rate one alone would have.
+ * prepping either. On an 11 PB pool one wave is 20 TB, and rationing preps there
+ * left the richest targets unprepped for 24 minutes beside 9 PB of free RAM.
  *
- * Scaling the count by idle budget was the first fix and it only moved the
- * failure. A ratio of RAM shares cannot answer "does one target's need fit",
- * because prep need is set by the target's excess security and money deficit,
- * not by the pool - and at the start of a BitNode no target is prepped, so
- * nothing is admitted, `spent` is 0, `idle` is the whole budget and all four
- * are granted on a 32 GB home exactly as readily as on 26 PB. That is the
- * original 1.6 TB failure arrived at from the other end.
- *
- * The RAM decision therefore lives in `servicePreps`, where a wave's ask can be
- * compared against what was actually placed (`shrunk`). This constant survives
- * only to keep the queue - and the prep list in the report - a sane length.
+ * It has to be the wave, measured at placement in `servicePreps`. Prep need is set
+ * by the target's excess security and money deficit, not by the pool, and shares
+ * of a RAM budget cannot answer whether it fits: that was tried twice, and failed
+ * once in each direction. Four waves at this share is a fifth of the pool at most.
  */
-export const PREP_SPARE_SHARE = 0.25;
+export const PREP_EXTRA_SHARE = 0.05;
+
+/**
+ * Most of the pool prep may hold while any stream is earning.
+ *
+ * PREP_EXTRA_SHARE stops a second prep; nothing stopped the first. On a 1.1 TB
+ * pool one target's wave took 1.05 TB and the next wave took it again, for 50
+ * minutes: the one live stream earned $1.5k/s and cut its own steal to 1.4% on
+ * refusals no batch size could fix. A stream earns now and its money buys the
+ * RAM prep is short of, so it wins. Half, not all: prep still has to finish,
+ * since the next target is usually far richer. With nothing earning there is
+ * nothing to protect and prep takes the lot.
+ */
+export const PREP_LIVE_SHARE = 0.5;
 
 /** Money must be within this fraction of max for a target to count as prepped. */
 export const MONEY_TOLERANCE = 0.999;

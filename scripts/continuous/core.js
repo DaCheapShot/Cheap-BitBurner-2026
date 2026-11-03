@@ -25,13 +25,15 @@ import {
   GROW_DRIFT_TOLERANCE,
   HOME_RESERVE_GB,
   MAX_IN_FLIGHT,
+  SPACER_MS,
   MAX_STEAL_FRACTION,
   MAX_TARGETS,
   POOL_WAIT_CYCLES,
   POOL_WAIT_MS,
   PREP_CONCURRENCY,
   PREP_MAX_CYCLES,
-  PREP_SPARE_SHARE,
+  PREP_EXTRA_SHARE,
+  PREP_LIVE_SHARE,
   PROMOTE_PREP_FIRST,
   REPREP_GRACE_MS,
   PUSH_MS,
@@ -514,6 +516,20 @@ export function priceTargets(
 }
 
 /**
+ * RAM the streams share out. Prep comes off capacity up to its PREP_LIVE_SHARE
+ * and no further: past that it holds a wave from before any stream existed, and
+ * pricing that as permanent would leave the first stream a budget of nothing.
+ * TARGET_RAM_BUDGET's spare room absorbs a small prep, so a big pool pays nothing.
+ */
+export function streamBudget(pool, ram) {
+  const capacity = pool.placeableRam(ram.grow);
+  return Math.min(
+    capacity * TARGET_RAM_BUDGET,
+    capacity - Math.min(pool.pendingRam, capacity * PREP_LIVE_SHARE),
+  );
+}
+
+/**
  * Price a candidate as though it were already prepped.
  *
  * The only way to answer "is this unprepped server worth more than one I am
@@ -608,8 +624,13 @@ export async function supervise(ns, math, opts) {
   const push = createPushReader(ns);
   let nextPush = 0;
 
+  // Said per stall, not as one lifetime maximum, so a run shows whether they
+  // repeat and which side of the sleep they fall on.
+  let slept = Date.now();
   while (Date.now() < until) {
     const now = Date.now();
+    const away = now - slept - tick;
+    if (away > SPACER_MS) log(`  stall: ${away.toFixed(0)}ms outside the manager`);
     let rescanned = false;
 
     // The game frees a worker's RAM when it exits; refresh is how the pool
@@ -681,6 +702,10 @@ export async function supervise(ns, math, opts) {
       report({ streams, preps, pool, started, orphans, sawFull, repaired, log, verbose });
     }
 
+    slept = Date.now();
+    if (slept - now > SPACER_MS) {
+      log(`  stall: ${(slept - now).toFixed(0)}ms inside the manager${rescanned ? " (rescan)" : ""}`);
+    }
     await ns.sleep(tick);
   }
 
@@ -754,6 +779,14 @@ export function rescan(ns, math, opts) {
   if (grown.grewGb > 1) {
     log(`  pool grew ${(grown.grewGb / 1024).toFixed(2)}TB since the last rescan`);
   }
+  // Grow and weaken fill home first, so this says whether they are.
+  const home = pool.get("home");
+  if (home) {
+    log(
+      `  home: ${home.cores} cores, ${(home.freeRam / 1024).toFixed(2)}TB free ` +
+        `of ${(home.usableRam / 1024).toFixed(2)}TB`,
+    );
+  }
 
   // After sync: a host sync just added is built with no reserve of its own.
   applyStanekReserve(ns, pool);
@@ -804,7 +837,7 @@ export function rescan(ns, math, opts) {
   // raw byte total overstates what can be placed. A live run budgeted against
   // usableRam, chose 84.9% steal, and then failed 402 of 439 dispatches with
   // "no room" - the bytes were there and the threads would not fit.
-  const budget = pool.placeableRam(ram.grow) * TARGET_RAM_BUDGET;
+  const budget = streamBudget(pool, ram);
   // priceTargets sorts by paper income per GB-second; in BN8 admission goes by
   // the stock position a target pushes first (stable, so ties stay in paper order).
   const order = byStocks ? [...priced].sort((a, b) => push.valueFor(b.host) - push.valueFor(a.host)) : priced;
@@ -838,12 +871,26 @@ export function rescan(ns, math, opts) {
   const evaluate = (n) => {
     const take = feasible.slice(0, n);
     if (take.length < n) return null;
-    const width = budget / n;
+    // Equal shares, then whatever a target at its ceiling cannot use goes to the
+    // ones still short. A cheap target saturates on a fraction of an equal share:
+    // a live 26 PB pool at 2.2 PB each held catalyst, alpha-ent and syscore near
+    // 60% steal with 14 PB free, and pricing rich targets on that narrow slice is
+    // what had the count flip omega-net and silver-helix in and out every few
+    // minutes. One width for all: a capped stream never reaches it.
+    let width = budget / n;
+    let fits = [];
+    for (let pass = 0; pass < n; pass++) {
+      fits = take.map((p) => chooseSteal(math, p.snap, ram, width, { pin, drift: drifts.get(p.host) }));
+      if (fits.some((f) => !f)) return null;
+      const short = fits.filter((f) => !f.capped).length;
+      const spare = budget - fits.reduce((sum, f) => sum + f.gb, 0);
+      if (!short || spare < width * 0.01) break;
+      width += spare / short;
+    }
     const picks = new Map();
     let total = 0;
-    for (const p of take) {
-      const fit = chooseSteal(math, p.snap, ram, width, { pin, drift: drifts.get(p.host) });
-      if (!fit) return null;
+    for (const [i, p] of take.entries()) {
+      const fit = fits[i];
       picks.set(p.host, fit);
       // A target whose single batch cannot fit its slice earns NOTHING - it
       // places weakens and never places its grow. Scoring it at its arithmetic
@@ -884,12 +931,6 @@ export function rescan(ns, math, opts) {
   const next = [];
 
   const baseFor = new Map();
-  // What the admitted streams will really occupy, at the fraction and pace the
-  // calculator settled on. admitTargets' own `committed` is priced against the
-  // PROVISIONAL slice - budget / maxTargets - so on a pool where one target is
-  // admitted it under-states the commitment threefold, and prep would read the
-  // other two thirds as spare when the one live stream is about to take it.
-  let spent = 0;
 
   for (const p of admitted) {
     const picked = plan.picks.get(p.host);
@@ -899,7 +940,6 @@ export function rescan(ns, math, opts) {
     // the chosen count is not maxTargets.
     p.depth = Math.min(Math.ceil(p.times.weaken / picked.cadence), MAX_IN_FLIGHT);
     baseFor.set(p.host, picked.steal);
-    spent += picked.gb;
     // Re-state the admission figures at the fraction actually chosen. Leaving
     // them at the seed fraction used for ranking would have the log report a
     // batch size the stream never uses.
@@ -981,6 +1021,11 @@ export function rescan(ns, math, opts) {
   // killed - see stream.windDown for why killing loses money.
   for (const s of streams) {
     if (want.has(s.host)) continue;
+    // Off baseline is why it failed pricing, not a sign it was outranked. Winding
+    // it down would stop its repair, and a live run ended with every stream gone
+    // that way: 8.7 PB free and nothing dispatching. Once back on baseline it is
+    // priced like the rest and loses its slot here if it really has.
+    if (s.stopped && !s.retiring) { next.push(s); continue; }
     if (!s.retiring) log(`  -${s.host}: no longer in the top ${maxTargets}, draining`);
     s.windDown();
     if (s.depth > 0) next.push(s);
@@ -1037,23 +1082,11 @@ export function rescan(ns, math, opts) {
   ];
 
   // How many targets may be QUEUED for prep. Not how many get RAM - that is
-  // decided by servicePreps, which stops at the first wave the pool could not
-  // cover in full. Queuing reserves nothing, so an extra entry here costs a map
-  // slot and a line in the report.
-  //
-  // Spare is what the ADMITTED STREAMS will not use, NOT what happens to be free
-  // this instant. Free RAM was the first attempt and it is wrong at exactly the
-  // moment that matters: at startup nothing is placed yet, so the pool reads
-  // 100% idle and every slot is granted. `spent` is the calculator's own figure
-  // for what the streams will occupy in steady state, which is the honest
-  // answer - but note it does not save this from the startup case either, since
-  // with no target prepped there is nothing to admit and `spent` is 0. Only
-  // placement knows whether one target's need fits; see the `tight` gate in
-  // servicePreps.
-  const capacity = pool.placeableRam(ram.grow);
-  const idle = Math.max(0, budget - spent);
-  const spare = capacity > 0 ? Math.floor(idle / (capacity * PREP_SPARE_SHARE)) : 0;
-  let slots = Math.min(PREP_CONCURRENCY, 1 + spare) - preps.size;
+  // decided by servicePreps, wave by wave. Queuing reserves nothing, so this is
+  // not rationed by RAM. Rationing it on planned stream use held a live 11 PB pool
+  // to one slot with 9 PB free, and repairs took that slot: the richest targets
+  // went 24 minutes unprepped.
+  let slots = PREP_CONCURRENCY - preps.size;
   for (const t of queue) {
     if (slots <= 0) break;
     if (prepped.has(t.host) || streaming.has(t.host) || preps.has(t.host)) continue;
@@ -1107,9 +1140,9 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
   // be repaired.
   for (const s of streams) {
     if (!s.stopped || s.retiring) continue;
-    // Wait for its own batches to clear first: measuring a target while its
-    // last hacks are still landing reads the transient as the drift.
-    if (s.depth > 0) continue;
+    // Wait for its own hacks to land first: measuring a target while they are
+    // still landing reads the transient as the drift.
+    if (s.landing > 0) continue;
     if (!preps.has(s.host)) preps.set(s.host, freshPrep());
   }
 
@@ -1121,11 +1154,12 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
   // exceeds the whole pool, three queued preps split it three ways and all three
   // crawl instead of one finishing and starting to earn.
   //
-  // PREP_SPARE_SHARE cannot catch this. It compares RAM SHARES, and at startup
-  // no target is prepped, so nothing is admitted, `spent` is 0, `idle` is the
-  // whole budget and every slot is granted however small the pool is. Need
-  // against capacity is knowable only here, at placement.
+  // Need against capacity is knowable only here, at placement. So a wave that came
+  // up short, or one past PREP_EXTRA_SHARE of the pool, holds back the preps
+  // behind it: on 1.6 TB one wave is the constraint, on 11 PB it is a rounding error.
   let tight = false;
+  const earning = streams.some((s) => !s.stopped && !s.retiring);
+  const prepLimit = earning ? pool.usableRam * PREP_LIVE_SHARE : Infinity;
 
   // Repairs before fresh preps. A stopped stream is a target we already admitted
   // that earns nothing until it is back on baseline, so with prep serialised it
@@ -1183,6 +1217,8 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
     // weak to outrun the security it adds.
     if (active.waves >= PREP_MAX_CYCLES) {
       preps.delete(host);
+      // Or a stopped stream re-queues this prep on the next tick, for ever.
+      byHost.get(host)?.windDown?.();
       log(
         `  ${host}: prep ABANDONED after ${active.waves} waves - ` +
           `${fmtMoney(snap.money)} of ${fmtMoney(snap.maxMoney)}, ` +
@@ -1196,7 +1232,7 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
     // reservation of a wave that has already landed.
     if (tight) continue;
 
-    const wave = placePrepWave(pool, ram, math, snap);
+    const wave = placePrepWave(pool, ram, math, snap, prepLimit - pool.pendingRam);
     if (!wave) { tight = true; continue; } // pool busy - try again next tick
 
     const times = math.opTimes(snap);
@@ -1204,8 +1240,10 @@ export function servicePreps(ns, { math, pool, ram, streams, preps, log }) {
     active.wave = wave;
     active.deadline = res.landAt + REPREP_GRACE_MS;
     active.waves++;
-    active.shrunk = wave.shrunk;
-    if (wave.shrunk) tight = true;
+    const held = [...wave.grow.placements, ...wave.weaken.placements]
+      .reduce((n, p) => n + p.gb, 0);
+    active.shrunk = wave.shrunk || held > pool.usableRam * PREP_EXTRA_SHARE;
+    if (active.shrunk) tight = true;
   }
 
   return finished;

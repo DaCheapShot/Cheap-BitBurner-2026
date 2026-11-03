@@ -165,11 +165,19 @@ export function snapshot(ns, host) {
  * and returns -1 whenever it exceeds the money on the server - so it fails on
  * every unprepped target. Stays live: it moves with hacking level, and reacting
  * to that is the point of re-deriving each batch at dispatch.
+ *
+ * Formulas: asked at MINIMUM security, because that is where a hack lands - the
+ * weaken-2 ahead of it cancels every transient. The live reading sits up to 10%
+ * low on a 40-minimum server, so a batch took that much more than its grow
+ * covered, and the same noise read as a 24% drift trend against 6.9% measured.
+ * Analyze has no way to ask, so it keeps the live reading.
  */
 export function hackFractionPerThread(snap) {
   if (!snap.ns) return 0;
   return snap.player
-    ? snap.ns.formulas.hacking.hackPercent(snap.server, snap.player)
+    ? snap.ns.formulas.hacking.hackPercent(
+        { ...snap.server, hackDifficulty: snap.minSec }, snap.player,
+      )
     : snap.ns.hackAnalyze(snap.host);
 }
 

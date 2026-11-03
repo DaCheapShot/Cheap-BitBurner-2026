@@ -29,6 +29,7 @@ import {
   MAX_DRIFT_TOLERANCE,
   MIN_DRIFT_TOLERANCE,
   MAX_IN_FLIGHT,
+  PREP_LIVE_SHARE,
   LATE_TOLERANCE_MS,
   LAUNCH_LEAD_MS,
   MAX_STEAL_FRACTION,
@@ -114,31 +115,40 @@ const LAUNCH_ORDER = ["W1", "W2", "G", "H"];
  * Prep and share are not, but they are running RAM, already in freeRam, and
  * treating them as never ending is the safe direction.
  *
- * ponytail: sorts the whole ledger per dispatch, O(n log n) in ops in flight
- * across streams; keep it sorted incrementally if depth ~1000 x 3 shows up in
- * a profile.
+ * Steps land in SPACER_MS buckets instead of being sorted: a sort took 8 ms per
+ * dispatch at 6 x 1200 depth and 31 ms at 6 x 4000, on the one thread every
+ * dispatch and landing shares. An op holds its RAM through the whole bucket it
+ * ends in, so rounding only ever refuses, by under a spacer per op.
  */
 export function timelineFits(pool, fresh, now) {
   const ledger = pool.ledger ?? (pool.ledger = new Set());
-  const steps = [];
+  const bucket = (t) => Math.floor((Math.max(t, now) - now) / SPACER_MS);
+  let last = now;
   for (const e of ledger) {
-    if (e.end <= now) { ledger.delete(e); continue; }
-    if (!e.launched) steps.push([Math.max(e.start, now), -e.gb]);
-    steps.push([e.end, e.gb]);
+    if (e.end <= now) ledger.delete(e);
+    else if (e.end > last) last = e.end;
   }
   let from = Infinity;
   let to = -Infinity;
   for (const f of fresh) {
-    steps.push([f.start, -f.gb], [f.end, f.gb]);
     if (f.start < from) from = f.start;
     if (f.end > to) to = f.end;
   }
-  // Takes before gives at the same instant: the pessimistic tie.
-  steps.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const steps = new Float64Array(bucket(Math.max(last, to)) + 2);
+  for (const e of ledger) {
+    if (!e.launched) steps[bucket(e.start)] -= e.gb;
+    steps[bucket(e.end) + 1] += e.gb;
+  }
+  for (const f of fresh) {
+    steps[bucket(f.start)] -= f.gb;
+    steps[bucket(f.end) + 1] += f.gb;
+  }
+  const first = bucket(from);
+  const end = bucket(to);
   let free = pool.freeRam;
-  for (const [t, d] of steps) {
-    free += d;
-    if (t >= from && t < to && free < 0) return false;
+  for (let i = 0; i <= end; i++) {
+    free += steps[i];
+    if (i >= first && free < 0) return false;
   }
   return true;
 }
@@ -330,7 +340,8 @@ export function createStream(ns, math, opts) {
     if (perThreadLog[perThreadLog.length - 1].t - base.t < lastWeaken) return 0;
     let peak = base.v;
     for (const s of perThreadLog) if (s.v > peak) peak = s.v;
-    return peak / base.v - 1;
+    // Hack is re-sized at launch, so only its own run can overshoot.
+    return (peak / base.v - 1) * exposure;
   }
 
   const driftBudget = () => {
@@ -351,6 +362,8 @@ export function createStream(ns, math, opts) {
   const ceiling = () => Math.min(base, maxStealForDrift(driftBudget()));
   let holdUntil = 0;
   let lastWeaken = 0;
+  // Share of a weaken window a hack is exposed to drift for: launch to landing.
+  let exposure = 1;
   // No-room evidence is not counted before this. After a step, the pool is still
   // full of batches sized at the OLD fraction until the last of them lands, so a
   // refusal in that window says nothing about the new one - and counting it cut
@@ -391,7 +404,10 @@ export function createStream(ns, math, opts) {
     // The pool refusing a batch is evidence about SIZE, not about the target -
     // and at high steal a batch is over ten times its size at 10%, so a
     // contended pool is fixed by taking a smaller bite, not by queueing.
-    if (why.startsWith("no room") && now >= noRoomFrom) sample.noRoom++;
+    // Unless prep holds past its share: that wave was placed before any limit
+    // applied, and a smaller batch frees none of it. See PREP_LIVE_SHARE.
+    const prepInTheWay = pool.pendingRam > pool.usableRam * PREP_LIVE_SHARE;
+    if (why.startsWith("no room") && now >= noRoomFrom && !prepInTheWay) sample.noRoom++;
     return { dispatched: false, why };
   };
 
@@ -520,6 +536,7 @@ export function createStream(ns, math, opts) {
     // schedules. See anchorSwingFor for why there are two figures.
     const { swing, anchorSwing } = anchorSwingFor(th, snap.minSec);
     pace(th, times, swing, anchorSwing);
+    exposure = Math.min(1, (times.hack * (1 + swing)) / times.weaken);
 
     // Free: planThreads already measured it, and this is the only place that
     // knows both the value and the window it has to be compared across.
@@ -687,8 +704,9 @@ export function createStream(ns, math, opts) {
    * at the instant of the call, so measuring at the instant we call is exact,
    * where the old design measured once and hoped it still held a window later.
    */
-  function launchOp(item, opTime) {
-    const { batch, op, land, threads } = item;
+  function launchOp(item, opTime, perThread) {
+    const { batch, op, land } = item;
+    let { threads } = item;
 
     // Slack is how much time the op has in hand. Negative means it will land
     // late by that much.
@@ -709,6 +727,15 @@ export function createStream(ns, math, opts) {
     const kind = OP_WORKER[op];
     let placements;
     if (op === "H") {
+      // Re-sized here, because ns.hack takes its percent at LANDING. From dispatch
+      // that is a whole weaken window of rising hacking level, and a live run
+      // measured 10-14% overshoot: at 91% steal, the whole balance. From launch it
+      // is about a quarter of that. Only ever down, since the grow already out
+      // covers the planned take and nothing more. The sliver keeps float error
+      // from costing a thread when nothing has changed.
+      if (perThread > 0) {
+        threads = Math.min(threads, Math.max(1, Math.floor(batch.steal / perThread + 1e-9)));
+      }
       // Hack gets no core bonus, so its demand IS its raw thread count.
       placements = pool.allocate(ram.hack, threads, { order: OP_FILL_ORDER.H });
     } else {
@@ -791,6 +818,7 @@ export function createStream(ns, math, opts) {
     // One fresh measurement per tick, taken lazily - only when something is
     // actually going out.
     let fresh = null;
+    let perThread = 0;
 
     for (const op of LAUNCH_ORDER) {
       const q = queues[op];
@@ -808,8 +836,12 @@ export function createStream(ns, math, opts) {
         if (item.land - worst - now > lead) break;
 
         dequeue(q);
-        if (!fresh) fresh = opTimesByOp(math.opTimes(math.snapshot(ns, host)));
-        launchOp(item, fresh[op]);
+        if (!fresh) {
+          const snap = math.snapshot(ns, host);
+          fresh = opTimesByOp(math.opTimes(snap));
+          perThread = math.hackFractionPerThread(snap);
+        }
+        launchOp(item, fresh[op], perThread);
         launched++;
       }
     }
@@ -941,6 +973,12 @@ export function createStream(ns, math, opts) {
       // perfect order - which is exactly why the per-batch verdict cannot see
       // it and the flag has to be carried on the batch.
       if (b.intruded) v.ok = false;
+      // Late is not wrong. A stall delays every stream at once, and those
+      // batches still land in order: a live run stopped omega-net on
+      // [H,W1,G,W2] at 247ms and cut three streams 40% in the same second. Only
+      // a broken sequence says anything about this stream, so only that earns
+      // a strike or moves the fraction. stats.bad still counts the rest.
+      const fault = !v.orderOk || b.intruded;
       stats.jitterSum += v.jitter;
       stats.jitterMax = Math.max(stats.jitterMax, v.jitter);
       // Came within half a spacer of the ops reordering. Counted because a
@@ -969,7 +1007,7 @@ export function createStream(ns, math, opts) {
       // empty until the new fraction's own batches start landing.
       const mine = b.plannedAt === sample.steal;
       if (mine) sample.batches++;
-      if (mine && !v.ok) sample.bad++;
+      if (mine && fault) sample.bad++;
       if (v.hackHit && b.take > 0) {
         const over = v.stolen / b.take - 1;
         // One number, two signals, separated by sign. Money clamps at maxMoney,
@@ -997,11 +1035,11 @@ export function createStream(ns, math, opts) {
         lastUnder = over;
       }
 
-      if (v.ok) {
-        stats.ok++;
+      if (v.ok) stats.ok++;
+      else stats.bad++;
+      if (!fault) {
         strikes = 0;
       } else {
-        stats.bad++;
         strikes++;
         if (strikes >= strikeLimit && !stopped) {
           stopped = "desynced";
@@ -1202,6 +1240,15 @@ export function createStream(ns, math, opts) {
     stats,
     get retiring() { return retiring; },
     get depth() { return inFlight.size; },
+    // Batches that can still land a hack. Hack launches last and a stop aborts
+    // everything queued, so on a stopped stream a live batch is one whose hack is
+    // out. Repair waits for this, not for depth: aborted batches sit in flight
+    // until their deadline, up to a whole weaken window with nothing to wait for.
+    get landing() {
+      let n = 0;
+      for (const b of inFlight.values()) if (!b.aborted) n++;
+      return n;
+    },
     // What the pipeline still owes the pool. Reported because "why has this
     // stream stopped dispatching against a pool with free RAM" is otherwise
     // unanswerable from a log - the answer is that the free RAM is spoken for.

@@ -603,11 +603,55 @@ trend in `hackFractionPerThread` over a weaken window) and sizes every batch for
 steady state `worstOver / tolerance ≈ 1 / DRIFT_SAFETY`, whatever the fraction or the target — so
 a climb threshold below that is one no healthy stream can ever meet.
 
-**`MAX_TARGETS = 3`, but the count is chosen by INCOME, not capacity.** Running the most targets
+**`MAX_IN_FLIGHT` is 4000, and the gate buckets instead of sorting.** A stream needs `W / cadence`
+in flight or it falls into waves: at 1200 a 575 s target sent its batches in 6 minutes, then earned
+$0 until they landed, and computek read $13b/s for half a run with 12 PB free. `timelineFits` sums
+steps into `SPACER_MS` buckets, 0.7 ms a dispatch at 6 x 4000 against 31 ms for the sort, and
+rounding only ever refuses.
+
+**Late is not wrong.** Only a broken sequence or an intrusion earns a strike or moves the steal;
+`stats.bad` still counts a batch landing in order past the spacer. A stall delays every stream at
+once, and a live run stopped omega-net on `[H,W1,G,W2]` at 247 ms. Above `BAD_BATCH_TOLERANCE` the
+cut also needs `BAD_BATCH_RATE` (2%) of the window, which is ~1000 batches at depth. `stall:` lines
+say whether a pause over `SPACER_MS` fell inside the manager or outside it: the game's 60 s autosave
+writes every running script unless `ExcludeRunningScriptsFromSave` is set. Setting it took a live run from 63 bad batches in 2 hours to 3 in 4.6, with one stall logged.
+
+**Hack is re-sized at its own launch, only ever down.** `ns.hack` takes its percent at landing, so
+a count fixed at dispatch is a weaken window stale, and at 91% steal a 10% overshoot is the whole
+balance. A live run drained the-hub, rho and alpha that way, with 750 batches committed before the
+first report. `launchOp` re-reads `hackFractionPerThread` and cuts the threads to the planned take,
+which leaves about a quarter of the exposure. It never raises them: the grow is already out.
+`predictedDrift` is scaled to that same exposure, and the formulas backend reads hack power at
+minimum security, where a hack lands: the live reading ran up to 10% low on a 40-minimum server,
+which oversized batches and read as a 24% trend against 6.9% measured.
+
+**A stopped stream repairs when its hacks have landed, not when `depth` is 0** (`s.landing`), and
+rescan never winds one down. After a stop `depth` is mostly aborted batches waiting out deadlines
+with no hack to land, so waiting on it cost a weaken window. A stopped stream also fails pricing,
+which read as outranked, and retiring streams are never repaired: a live run ended with 8.7 PB free
+and nothing dispatching. It resumes first and loses its slot at a later rescan if it really has.
+
+**`MAX_TARGETS = 10`, but the count is chosen by INCOME, not capacity.** Running the most targets
 that fit is only right when the budget is not the constraint. When it is, every extra target
 narrows the slice for all of them and income is near-linear in the slice — a live run measured
 phantasy alone at $2.84m/s against $1.96m/s for three. `rescan` prices 1..N and takes the best
-total, so the count rises to 3 on its own as the pool grows.
+total, so the count rises on its own as the pool grows. The ceiling is 10 because a stream at the
+300 ms floor saturates, so the count is what spends a big pool: at six, a 25 PB pool dropped
+silver-helix ($2.4b/s), phantasy and iron-gym for new targets with 12 PB free.
+
+**A target at its ceiling hands its unused slice on.** `evaluate` starts from equal shares, then
+re-prices with the spare RAM split among targets not yet `capped`. All streams get the one final
+width; a capped stream never reaches it. At a flat `budget / n`, ten targets took 2.2 PB each of
+a 26 PB pool: the cheap ones hit 95% on half of that, catalyst, alpha-ent and syscore sat near
+60%, and 14 PB stayed free at $143b/s. The narrow slice also underpriced the rich targets, so the
+count flipped omega-net and silver-helix in and out every few minutes.
+
+**Grow and weaken fill home first, and hack leaves it for last**, whatever its cores (`hostsBy`,
+the user's rule). A foreign host can out-core home, but it holds a few GB, and each one taken first
+is another split. `sync` re-reads home's cores, since sing buys them mid-run. `coreMap` caches
+nothing: `initForeignServers` re-rolls foreign cores at every install and the module outlives the
+process, so a cache over-stated hosts and under-delivered grow and weaken. Each rescan logs a
+`home:` line with its cores and free RAM.
 
 **Prep runs concurrently with streaming**, one target at a time unless the pool genuinely has
 leftovers. Four concurrent preps on a 1.6 TB pool reserved the whole of it and starved the only
@@ -617,12 +661,18 @@ live stream to 169 aborts in 170 batches.
 first wave the pool could not cover in full — `placePrepWave` reports that as `shrunk` — so
 extras only ever get leftovers. It has to be placement that decides, because prep need is set
 by the target's excess security and money deficit, not by the pool, and one target's need
-routinely exceeds the whole pool early in a BitNode. `PREP_CONCURRENCY` and `PREP_SPARE_SHARE`
-survive as bounds on how many hosts are QUEUED; queuing reserves nothing. Both were written as
-the RAM throttle and neither could be one: a ratio of shares cannot answer "does one target's
-need fit", and at the start of a BitNode nothing is prepped, so nothing is admitted, `spent` is
-0, `idle` is the whole budget and all four slots are granted on a 32 GB home exactly as readily
-as on 26 PB — the 1.6 TB failure reached from the other end.
+routinely exceeds the whole pool early in a BitNode. A wave over `PREP_EXTRA_SHARE` (5%) of the
+pool counts the same as a short one, so on 1.6 TB preps go one at a time and on 11 PB they run
+side by side. `PREP_CONCURRENCY` only bounds how many hosts are QUEUED; queuing reserves nothing.
+Rationing the queue by shares of the RAM budget failed both ways: at the start of a BitNode nothing
+is admitted, so all four slots went to a 32 GB home, and once planned stream use filled the budget
+a live 11 PB pool got one slot with 9 PB free, leaving $559b-a-batch targets 24 minutes unprepped.
+
+**While a stream earns, prep holds at most `PREP_LIVE_SHARE` (half) of the pool.** One wave
+past the extras gate used to take everything: a 1.1 TB opening held 1.05 TB in prep for 50
+minutes, the live stream earned $1.5k/s, and "1/1 dispatches found no room" cut its steal from
+19.8% to 1.4%. `streamBudget` takes prep off the slice, and a refusal while prep is over its
+share is not evidence about batch size. With nothing earning, prep takes the lot.
 
 The gate is carried on the prep entry, not recomputed per tick, because a short wave is still
 the constraint while it is in flight. Without that the split just moves from space into time:

@@ -312,6 +312,10 @@ export class ServerPool {
 
     for (const s of this.servers) s.refresh(true);
 
+    // The one host whose cores move under a running manager: sing buys them.
+    const home = this.get("home");
+    if (home && coresFor) home.cores = coresFor("home");
+
     const known = new Set(this.servers.map((s) => s.hostname));
     const excluded = new Set(opts.exclude ?? []);
     const added = [];
@@ -361,19 +365,29 @@ export class ServerPool {
    * A sorted COPY of the host list for one op's fill order.
    *
    *   "ram"       most free RAM first - fewest hosts touched, shallowest split
-   *   "coresDesc" best cores first - for grow and weaken, where a thread on a
-   *               high-core host does more work for the same RAM
-   *   "coresAsc"  worst cores first - for hack, which gets no core bonus, so
-   *               that it leaves the core-bearing RAM for the ops that multiply
+   *   "coresDesc" home, then best cores - for grow and weaken, where a thread
+   *               on a high-core host does more work for the same RAM
+   *   "coresAsc"  worst cores first, home last - for hack, which gets no core
+   *               bonus, so that it leaves the core-bearing RAM for the ops that
+   *               multiply
+   *
+   * Home goes first whatever its cores, the user's rule. A foreign host can have
+   * up to 15 against home's 8, but it holds a few GB: the gain is a sliver, and
+   * each one taken first splits the op into another exec and another report.
    *
    * Ties break on free RAM in every order, so the choice among equal-core hosts
    * is still the shallow-split one.
    */
   hostsBy(order = "ram") {
     const byRam = (a, b) => b.freeRam - a.freeRam;
+    const isHome = (s) => Number(s.hostname === "home");
     const copy = [...this.servers];
-    if (order === "coresDesc") return copy.sort((a, b) => b.cores - a.cores || byRam(a, b));
-    if (order === "coresAsc") return copy.sort((a, b) => a.cores - b.cores || byRam(a, b));
+    if (order === "coresDesc") {
+      return copy.sort((a, b) => isHome(b) - isHome(a) || b.cores - a.cores || byRam(a, b));
+    }
+    if (order === "coresAsc") {
+      return copy.sort((a, b) => isHome(a) - isHome(b) || a.cores - b.cores || byRam(a, b));
+    }
     return copy.sort(byRam);
   }
 

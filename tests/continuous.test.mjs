@@ -105,12 +105,7 @@ function makeCoreNs(hosts, cores = {}) {
 async function makePool(hosts, cores = {}, opts = {}) {
   const { mods } = await loadContinuous();
   const { ServerPool } = mods["lib/server"];
-  const { coreMap, resetCoreCache } = mods["lib/cores"];
-
-  // The core cache is module-level and lives for the whole test run, so a test
-  // that reuses a hostname with different cores would otherwise read the
-  // previous test's answer.
-  resetCoreCache();
+  const { coreMap } = mods["lib/cores"];
 
   const ns = makeCoreNs(hosts, cores);
   const pool = ServerPool.build(ns, { cores: coreMap(ns, Object.keys(hosts)), ...opts });
@@ -165,9 +160,8 @@ function mathNs({ hosts = { home: 4096 }, servers = {}, cores = {}, formulas = f
 async function makeMath(which, opts = {}) {
   const { mods } = await loadContinuous();
   const { ServerPool } = mods["lib/server"];
-  const { coreMap, resetCoreCache } = mods["lib/cores"];
+  const { coreMap } = mods["lib/cores"];
 
-  resetCoreCache();
   const ns = mathNs({ ...opts, formulas: which === "formulas" });
   const math = mods["lib/math"];
 
@@ -1802,6 +1796,20 @@ export const tests = {
     assert(later >= 1, "no-room evidence must count again once the pipeline turned over");
   },
 
+  // A live run cut harakiri-sushi 19.8% -> 1.4% on "1/1 dispatches found no room"
+  // with prep holding the pool. No size of batch fixes that.
+  "a refusal while prep is over its share says nothing about the batch": async () => {
+    const { s, pool, mods } = await makeStream();
+    const { CADENCE_MS } = mods["config"];
+    Object.defineProperty(pool, "freeRam", { get: () => 0, configurable: true });
+    Object.defineProperty(pool, "pendingRam", { get: () => pool.usableRam, configurable: true });
+
+    const t0 = Date.now();
+    const before = s.steal;
+    for (let i = 0; i < 20; i++) { s.dispatch(t0 + i * CADENCE_MS); s.retire(t0 + i * CADENCE_MS); }
+    assert(s.steal === before, `steal cut to ${s.steal}`);
+  },
+
   "a refused batch waits a cadence before trying again": async () => {
     const { s, mods } = await makeStream({ hosts: { home: 12 } });
     const { CADENCE_MS } = mods["config"];
@@ -1874,6 +1882,27 @@ export const tests = {
 
     s.resume();
     assert(s.stopped === null && s.strikes === 0, "resume should clear the stop");
+  },
+
+  "a late batch that landed in order is no fault of the stream": async () => {
+    const { s, calls, fire, mods } = await makeStream();
+    const { DESYNC_STRIKES } = mods["config"];
+
+    // A live run stopped omega-net with 'last saw [H,W1,G,W2], jitter 247ms' -
+    // the right order, delayed by a stall every stream on the pool felt at once.
+    const late = { H: [1000, 0], W1: [1100, 0], G: [1200, 250], W2: [1300, 250] };
+    for (let i = 0; i < DESYNC_STRIKES; i++) {
+      calls.length = 0;
+      fire();
+      for (const c of calls) {
+        const [p, by] = late[c.args[5]];
+        s.credit({ b: c.args[2], op: c.args[5], t: c.threads, p, a: p + by, r: c.args[5] === "H" ? 5e7 : 1 });
+      }
+      s.retire();
+    }
+    assert(s.stats.bad === DESYNC_STRIKES, `fixture landed ${s.stats.bad} bad, want them still counted`);
+    assert(s.strikes === 0, `strikes ${s.strikes}`);
+    assert(s.stopped === null, `stopped: ${s.stopped}`);
   },
 
   "reports are credited to their own batch and retired in order": async () => {
@@ -2073,6 +2102,16 @@ export const tests = {
     // there, while rho-construction took the same 1-in-536 and held.
     const one = nextSteal(0.50, { batches: 20, bad: BAD_BATCH_TOLERANCE, worstOver: 0 }, 0.95);
     assert(one.steal >= 0.50, `one bad batch cut the fraction to ${one.steal}`);
+  },
+
+  "bad batches back off on their RATE, not a count over a whole window": async () => {
+    const { mods } = await loadContinuous();
+    const { nextSteal } = mods["lib/plan"];
+    // A live run cut omega-net from 94.8% to 56.9% on 2 bad of about 700, and
+    // the-hub to 16.0% of a 95% ceiling on 17 of 10,600 spread over an hour.
+    assert(nextSteal(0.90, { batches: 1000, bad: 2, worstOver: 0 }, 0.95).steal >= 0.90, "2 in 1000 cut the fraction");
+    // A pattern still backs off, however long the window.
+    assert(nextSteal(0.90, { batches: 1000, bad: 30, worstOver: 0 }, 0.95).steal < 0.90, "3% bad was ignored");
   },
 
   "it will not step up from the edge of tolerance": async () => {
@@ -2334,9 +2373,9 @@ export const tests = {
     const now = Date.now();
     s.dispatch(now);
 
-    // Hack effectiveness rises 6% over one weaken window. That IS the drift: a
-    // batch dispatched at the start of the window lands into this.
-    t.hackPercentPerThread = 0.003 * 1.06;
+    // Hack effectiveness rises 40% over one weaken window. A hack launched a
+    // quarter of a window before landing lands into a quarter of that.
+    t.hackPercentPerThread = 0.003 * 1.4;
     s.dispatch(now + 21000);
 
     // The report-based estimator cannot see this. `over` is stolen/take - 1, so
@@ -2346,9 +2385,10 @@ export const tests = {
     // then took overshoots of 6.23% and 9.16%. All three drained to under 1%.
     assert(
       s.drift > GROW_DRIFT_TOLERANCE + 1e-9,
-      `budget ignored a 6% trend: ${(s.drift * 100).toFixed(2)}%`,
+      `budget ignored the trend: ${(s.drift * 100).toFixed(2)}%`,
     );
-    assertClose(s.drift, 0.06 * DRIFT_SAFETY, 2e-3, "budget should be the trend times the safety factor");
+    // A hair over the quarter: the exposure carries the batch's swing as well.
+    assertClose(s.drift, 0.4 * 0.25 * DRIFT_SAFETY, 0.02, "budget should be the exposed trend times the safety factor");
   },
 
   "the drift budget cannot grow to excuse itself": async () => {
@@ -3239,15 +3279,17 @@ export const tests = {
 
     // Queued 80 over [10, 20) on a 100 pool: another 80 after it lands fits.
     // The scalar it replaced read 100 - 80 < 80 and refused - the idle RAM.
-    assert(timelineFits(pool(100, op(10, 20, 80)), [op(25, 30, 80)], 0), "a later op was refused");
+    assert(timelineFits(pool(100, op(1000, 2000, 80)), [op(2500, 3000, 80)], 0), "a later op was refused");
     // Overlapping it does not: this is the grows-come-due-together pile-up.
-    assert(!timelineFits(pool(100, op(10, 20, 80)), [op(15, 30, 80)], 0), "an overlap was admitted");
+    assert(!timelineFits(pool(100, op(1000, 2000, 80)), [op(1500, 3000, 80)], 0), "an overlap was admitted");
+    // Rounding must err towards refusing: one landing as the next starts overlaps.
+    assert(!timelineFits(pool(100, op(1000, 2000, 80)), [op(2000, 3000, 80)], 0), "the tie was given away");
     // A running op gives its RAM back at landing, and not before.
-    assert(timelineFits(pool(40, op(0, 12, 50, true)), [op(15, 30, 80)], 0), "a landed op still held RAM");
-    assert(!timelineFits(pool(40, op(0, 12, 50, true)), [op(5, 30, 80)], 0), "a running op was treated as free");
+    assert(timelineFits(pool(40, op(0, 1200, 50, true)), [op(1500, 3000, 80)], 0), "a landed op still held RAM");
+    assert(!timelineFits(pool(40, op(0, 1200, 50, true)), [op(500, 3000, 80)], 0), "a running op was treated as free");
     // Ended entries are pruned, so the ledger cannot grow without bound.
-    const p = pool(100, op(0, 5, 10, true));
-    timelineFits(p, [op(20, 30, 1)], 10);
+    const p = pool(100, op(0, 500, 10, true));
+    timelineFits(p, [op(2000, 3000, 1)], 1000);
     assert(p.ledger.size === 0, `ended entries kept: ${p.ledger.size}`);
   },
 
@@ -3413,6 +3455,15 @@ export const tests = {
     }));
     const { admitted } = admitTargets(priced, Infinity, 5);
     assert(admitted.length === 5, `ceiling ignored: ${admitted.length}`);
+  },
+
+  "the depth cap holds a stream on a 1200s weaken at the cadence floor": async () => {
+    const { mods } = await loadContinuous();
+    const { MAX_IN_FLIGHT, CADENCE_MS } = mods["config"];
+    // A live run's 1200 cap sent syscore's batches in 6 minutes, then earned $0
+    // on 48% of rows with 16 PB free. The comment already said 4000; only this
+    // holds the number to it.
+    assert(MAX_IN_FLIGHT * CADENCE_MS >= 1200e3, `${MAX_IN_FLIGHT} batches at ${CADENCE_MS}ms`);
   },
 
   "in-flight depth is capped by MAX_IN_FLIGHT, not just by cadence": async () => {
@@ -3919,14 +3970,43 @@ export const tests = {
     assert(roomy.length === 3, `a roomy budget should run three, got ${roomy.length}`);
   },
 
-  "prep slots scale with the RAM the streams will not use": async () => {
+  "a cheap target's unused slice goes to the rich one beside it": async () => {
+    const target = (weakenTime) => ({
+      moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+      hackPercentPerThread: 0.003, growBase: 1.0018,
+      weakenTime, growTime: weakenTime * 0.8, hackTime: weakenTime / 4,
+    });
+    const stealOfRich = async (homeRam) => {
+      const { ns, math, pool, ram, mods } = await makeMath("analyze", {
+        hosts: { home: homeRam },
+        servers: { rich: target(600000), cheap: target(6000) },
+      });
+      ns.exec = () => 1;
+      const lines = [];
+      const streams = mods["core"].rescan(ns, math, {
+        pool, ram, steal: 0.1, maxTargets: 2, forced: null,
+        streams: [], preps: new Map(), log: (l) => lines.push(l), verbose: false,
+      });
+      assert(streams.length === 2, `both should run, got ${streams.length}`);
+      return Number(lines.find((l) => l.includes("+rich")).match(/steal ([\d.]+)%/)[1]);
+    };
+
+    // A live 26 PB pool gave ten targets 2.2 PB each. the-hub and rothman-uni hit
+    // the steal ceiling on half of that while catalyst, alpha-ent and syscore sat
+    // at ~60% on theirs, with 14 PB free.
+    const ceiling = await stealOfRich(1073741824);
+    const shared = await stealOfRich(16777216);
+    assert(shared === ceiling, `rich target held to ${shared}% of a ${ceiling}% ceiling`);
+  },
+
+  "prep slots are queued however much of the budget the streams want": async () => {
     const dirty = (moneyMax) => ({
       moneyMax, moneyAvailable: moneyMax * 0.2, minDifficulty: 5, hackDifficulty: 40,
       hackPercentPerThread: 0.003, growBase: 1.0018,
       weakenTime: 20000, growTime: 16000, hackTime: 5000,
     });
     const candidates = {};
-    for (let i = 0; i < 6; i++) candidates[`d${i}`] = dirty(1e9 - i * 1e7);
+    for (let i = 0; i < 10; i++) candidates[`d${i}`] = dirty(1e9 - i * 1e7);
 
     const run = async (prepped) => {
       const { ns, math, pool, ram, mods } = await makeMath("analyze", {
@@ -3951,28 +4031,109 @@ export const tests = {
     // - so a fixture with fixed ms times quietly gets a deeper pipeline every
     // time the spacer is tightened, and stops being the small target the test
     // needs. Five cadences of weaken is that target at any spacer.
-    const { CADENCE_MS } = (await loadContinuous()).mods["config"];
-    const { preps: wide, mods } = await run({
+    const { CADENCE_MS, PREP_CONCURRENCY } = (await loadContinuous()).mods["config"];
+    const { preps: wide } = await run({
       moneyMax: 1e7, moneyAvailable: 1e7, minDifficulty: 5, hackDifficulty: 5,
       hackPercentPerThread: 0.003, growBase: 1.0018,
       weakenTime: 5 * CADENCE_MS, growTime: 4 * CADENCE_MS, hackTime: 1.25 * CADENCE_MS,
     });
-    const { PREP_CONCURRENCY } = mods["config"];
     assert(
       wide.size === PREP_CONCURRENCY,
       `a pool with room should still fan out to ${PREP_CONCURRENCY}, got ${wide.size}`,
     );
 
-    // Same candidates; the only difference is a stream whose pipeline wants the
-    // whole budget. Measuring FREE RAM instead would grant every slot here too,
-    // because at rescan nothing is placed yet and the pool reads 100% idle -
-    // which is the exact moment four waves took a 1.6 TB pool and kept it.
+    // A stream whose pipeline wants the whole budget. Queuing reserves nothing,
+    // and a live 11 PB pool held one slot this way: planned use filled the budget
+    // while 9 PB sat free, and $559b-a-batch targets went 24 minutes unprepped.
     const { preps: narrow } = await run({
       moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
       hackPercentPerThread: 0.003, growBase: 1.0018,
       weakenTime: 600000, growTime: 480000, hackTime: 150000,
     });
-    assert(narrow.size === 1, `a fully-spoken-for pool preps one at a time, got ${narrow.size}`);
+    assert(narrow.size === PREP_CONCURRENCY, `queue held to ${narrow.size}`);
+  },
+
+  // One wave here is ~13 TB. RAM is decided at placement, against the wave itself.
+  "a wave that is a large part of the pool holds the next prep back": async () => {
+    const { ns, math, pool, ram, mods, targets } = await prepFixture(65536);
+    const preps = new Map([["a", freshPrepEntry()], ["b", freshPrepEntry()]]);
+    mods["core"].servicePreps(ns, { math, pool, ram, streams: [], preps, log: () => {} });
+    assert(targets().join() === "a", `expected only a, got [${targets()}]`);
+
+    // Still the constraint while it is in flight, not only on the tick it landed.
+    mods["core"].servicePreps(ns, { math, pool, ram, streams: [], preps, log: () => {} });
+    assert(targets().join() === "a", `b took a turn, got [${targets()}]`);
+  },
+
+  // A live opening held 1.05 of 1.1 TB in prep for 50 minutes while the one live
+  // stream earned $1.5k/s. A batch earns now, and that money buys the RAM prep wants.
+  "prep leaves a live stream its share of the pool": async () => {
+    const { ns, math, pool, ram, mods } = await prepFixture(16384);
+    const { PREP_LIVE_SHARE } = mods["config"];
+    const preps = new Map([["a", freshPrepEntry()], ["b", freshPrepEntry()]]);
+    const streams = [{ host: "live", stopped: null, retiring: false, landing: 0 }];
+    mods["core"].servicePreps(ns, { math, pool, ram, streams, preps, log: () => {} });
+    assert(pool.pendingRam > 0, "prep must still make progress");
+    assert(pool.pendingRam <= pool.usableRam * PREP_LIVE_SHARE,
+      `prep holds ${pool.pendingRam} of ${pool.usableRam}`);
+  },
+
+  "with no stream earning, prep takes the whole pool": async () => {
+    const { ns, math, pool, ram, mods } = await prepFixture(16384);
+    const { PREP_LIVE_SHARE } = mods["config"];
+    const preps = new Map([["a", freshPrepEntry()]]);
+    const streams = [{ host: "gone", stopped: null, retiring: true, landing: 0 }];
+    mods["core"].servicePreps(ns, { math, pool, ram, streams, preps, log: () => {} });
+    assert(pool.pendingRam > pool.usableRam * PREP_LIVE_SHARE,
+      `prep held back to ${pool.pendingRam} with nothing to protect`);
+  },
+
+  "the stream budget leaves what prep may hold, and a small prep costs it nothing": async () => {
+    const { pool, ram, mods } = await prepFixture(65536);
+    const { streamBudget } = mods["core"];
+    const { PREP_LIVE_SHARE, TARGET_RAM_BUDGET } = mods["config"];
+    const full = pool.placeableRam(ram.grow);
+    assert(streamBudget(pool, ram) === full * TARGET_RAM_BUDGET, "idle pool");
+
+    Object.defineProperty(pool, "pendingRam", { get: () => full * 0.01, configurable: true });
+    assert(streamBudget(pool, ram) === full * TARGET_RAM_BUDGET, "a sliver of prep cut the budget");
+
+    // Past its share prep only holds a wave placed before the stream existed.
+    // Priced at nothing, the first stream could never be admitted.
+    Object.defineProperty(pool, "pendingRam", { get: () => full, configurable: true });
+    assert(streamBudget(pool, ram) === full * (1 - PREP_LIVE_SHARE), "no floor under the budget");
+  },
+
+  "a wave that is a sliver of the pool lets the next prep go": async () => {
+    const { ns, math, pool, ram, mods, targets } = await prepFixture(8388608);
+    const preps = new Map([["a", freshPrepEntry()], ["b", freshPrepEntry()]]);
+    mods["core"].servicePreps(ns, { math, pool, ram, streams: [], preps, log: () => {} });
+    assert(targets().join() === "a,b", `expected both, got [${targets()}]`);
+  },
+
+  // Hack lands at minimum security: its weaken-2 went before it. Read at a
+  // transient it is under-stated, 8-10% on a 40-minimum server, so the batch took
+  // that much more than its grow covered.
+  "hack power is read at minimum security, where the hack lands": async () => {
+    const { ns, math } = await makeMath("formulas", {
+      servers: { t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 20, hackDifficulty: 40 } },
+    });
+    ns.formulas.hacking.hackPercent = (s) => ((100 - s.hackDifficulty) / 100) * 0.01;
+    assertClose(math.hackFractionPerThread(math.snapshot(ns, "t")), 0.008, 1e-12, "read at 40, not 20");
+  },
+
+  // Hack is sized at launch, so only launch-to-landing can overshoot. Charging the
+  // whole window held a stream to 73% on 24% against 6.9% measured.
+  "predicted drift covers the hack's own run, not the whole window": async () => {
+    const { s, ns } = await makeStream();
+    const t = Date.now();
+    s.dispatch(t);
+    ns.hackAnalyze = () => 0.003 * 1.2;
+    s.dispatch(t + 21000);
+    s.dispatch(t + 21300);
+    // 20% over the window x 0.25 exposure x 1.5 safety, a little more for swing.
+    assert(s.drift < 0.1, `budget ${s.drift} still charges the whole window`);
+    assert(s.drift > 0.07, `budget ${s.drift} lost the trend`);
   },
 
   "a prep that never converges releases its slot": async () => {
@@ -4108,7 +4269,9 @@ export const tests = {
   },
 
   "prep still fans out when the pool has room for both": async () => {
-    const { ns, math, pool, ram, mods, targets } = await prepFixture(262144);
+    // Twice the old size: at 256 TB this wave is 5.2% of the pool, just over
+    // PREP_EXTRA_SHARE.
+    const { ns, math, pool, ram, mods, targets } = await prepFixture(524288);
     const { servicePreps } = mods["core"];
 
     const preps = new Map([["a", freshPrepEntry()], ["b", freshPrepEntry()]]);
@@ -4467,6 +4630,20 @@ export const tests = {
     assert(Number(ns.getPortHandle(SHARE_PORT).peek()) === 0.25, "releasing the hold restores the fraction");
   },
 
+  // A live run had share enabled, the player at Bachman (company work, which the
+  // bonus never multiplies), and not one share line in the log: "it's not
+  // submitting share scripts" was the report. A hold the user did not set must say so.
+  "a hold over an enabled share is logged, not silent": async () => {
+    const { ns, pool, mods } = await makePool({ home: 1024 });
+    const { serviceShare } = mods["lib/share"];
+    const { SHARE_HOLD_MARKER } = mods["config"];
+    ns._files["/data/settings.txt"] = '{"share.enabled":1,"share.fraction":0.25}';
+    ns._files[SHARE_HOLD_MARKER] = "hold";
+    const lines = [];
+    serviceShare(ns, pool, (l) => lines.push(l));
+    assert(lines.some((l) => l.includes("HELD")), `nothing said why share is off: ${JSON.stringify(lines)}`);
+  },
+
   // A host bought by cloud.js while the batcher runs is admitted by
   // ServerPool.sync and gets the batch workers - but scripts/deploy.js only
   // runs when root.js roots something NEW, and a purchased server arrives
@@ -4642,5 +4819,123 @@ export const tests = {
     // The trader is told which companies are reachable; a host with no org is not one.
     const { STOCK_PUSHABLE_FILE } = mods["config"];
     assert(ns.read(STOCK_PUSHABLE_FILE) === '["B Corp"]', `pushable: ${ns.read(STOCK_PUSHABLE_FILE)}`);
+  },
+
+  // ns.hack takes its percent at LANDING. Sized at dispatch it is a weaken window
+  // stale: a live run measured 10-14% overshoot, and at 91% steal that is the
+  // whole balance. Sized at launch it is a quarter of that.
+  "a hack launches smaller when hacking has improved since dispatch": async () => {
+    const { s, ns, calls } = await makeStream();
+    s.dispatch();
+    ns.hackAnalyze = () => 0.0045; // planned at 0.003: 33 threads for 9.9%
+    s.tick(Date.now() + 1e9);
+
+    const hack = calls.find((c) => c.args[5] === "H");
+    assert(hack.threads === 22, `expected 22 hack threads, got ${hack.threads}`);
+  },
+
+  // The grow is sized for the planned take and was launched first. A weaker
+  // reading at launch must not raise the take past it.
+  "a hack never launches larger than it was planned": async () => {
+    const { s, ns, calls } = await makeStream();
+    s.dispatch();
+    ns.hackAnalyze = () => 0.002;
+    s.tick(Date.now() + 1e9);
+
+    const hack = calls.find((c) => c.args[5] === "H");
+    assert(hack.threads === 33, `expected the planned 33, got ${hack.threads}`);
+  },
+
+  // After a stop `depth` is mostly aborted batches waiting out their deadlines. A
+  // live run sat dead 155 report lines waiting on batches with no hack to land.
+  "a stopped stream is repaired once no hack is left to land": async () => {
+    const servers = {
+      t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+           hackPercentPerThread: 0.003, growBase: 1.0018,
+           weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+    };
+    const { s, ns, math, pool, ram, mods } = await makeStream({ servers });
+    const { DESYNC_STRIKES } = mods["config"];
+
+    s.dispatch(); // queued, nothing launched
+    servers.t.moneyAvailable = 1e3;
+    for (let i = 0; i < DESYNC_STRIKES; i++) s.dispatch();
+    assert(s.stopped, "the fixture should stop the stream");
+    s.tick(Date.now() + 1e9);
+    assert(s.depth > 0, "the aborted batch should still be in flight");
+
+    const preps = new Map();
+    mods["core"].servicePreps(ns, { math, pool, ram, streams: [s], preps, log: () => {} });
+    assert(preps.has("t"), "nothing can land a hack, so repair must start now");
+  },
+
+  "a stopped stream waits for a hack already launched": async () => {
+    const servers = {
+      t: { moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+           hackPercentPerThread: 0.003, growBase: 1.0018,
+           weakenTime: 20000, growTime: 16000, hackTime: 5000 },
+    };
+    const { s, ns, math, pool, ram, mods, fire } = await makeStream({ servers });
+    const { DESYNC_STRIKES } = mods["config"];
+
+    fire(); // every op out, the hack included
+    servers.t.moneyAvailable = 1e3;
+    for (let i = 0; i < DESYNC_STRIKES; i++) s.dispatch();
+    assert(s.stopped, "the fixture should stop the stream");
+
+    const preps = new Map();
+    mods["core"].servicePreps(ns, { math, pool, ram, streams: [s], preps, log: () => {} });
+    assert(!preps.has("t"), "measuring now would read that hack's transient as the drift");
+  },
+
+  // A stopped target fails pricing, so it read as outranked, and a retiring
+  // stream is never repaired. The live log ends with every stream gone this way.
+  "rescan keeps a stopped stream so it can be repaired": async () => {
+    const { ns, math, pool, ram, mods } = await makeMath("analyze", { hosts: { home: 262144 } });
+    ns.exec = () => 1;
+    const stopped = {
+      host: "gone", stopped: "off baseline", retiring: false, depth: 5, drained: true,
+      drift: 0, windDown() { this.retiring = true; },
+    };
+
+    const next = mods["core"].rescan(ns, math, {
+      pool, ram, steal: 0.1, maxTargets: 3, forced: null,
+      streams: [stopped], preps: new Map(), log: () => {}, verbose: false,
+    });
+
+    assert(next.includes(stopped), "the stopped stream was dropped");
+    assert(!stopped.retiring, "a retiring stream is never repaired");
+  },
+
+  "grow and weaken fill home first, even against more cores": async () => {
+    const { pool } = await makePool({ home: 1024, big: 2048, low: 4096 }, { home: 4, big: 15 });
+    const order = pool.hostsBy("coresDesc").map((s) => s.hostname);
+    assert(order.join() === "home,big,low", `got ${order}`);
+  },
+
+  "hack leaves home for last, even when it ties on one core": async () => {
+    const { pool } = await makePool({ home: 8192, a: 1024, b: 2048 }, {});
+    const order = pool.hostsBy("coresAsc").map((s) => s.hostname);
+    assert(order.join() === "b,a,home", `got ${order}`);
+  },
+
+  // sing buys home cores while the manager runs.
+  "home's cores are re-read at sync": async () => {
+    const cores = { home: 2 };
+    const { ns, pool, mods } = await makeMath("analyze", { cores });
+    cores.home = 8;
+    pool.sync((h) => mods["lib/cores"].coreMap(ns, [h])[h]);
+    assert(pool.get("home").cores === 8, `home still reads ${pool.get("home").cores}`);
+  },
+
+  // initForeignServers re-rolls cpuCores at every install and the module outlives
+  // the process, so a cache hands the next run another install's numbers.
+  "coreMap reads a foreign host's cores fresh": async () => {
+    const cores = { a: 12 };
+    const { ns, mods } = await makeMath("analyze", { hosts: { home: 4096, a: 64 }, cores });
+    const { coreMap } = mods["lib/cores"];
+    coreMap(ns, ["a"]);
+    cores.a = 3;
+    assert(coreMap(ns, ["a"]).a === 3, "a stale core count over-states grow and weaken");
   },
 };
