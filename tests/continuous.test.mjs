@@ -3970,6 +3970,35 @@ export const tests = {
     assert(roomy.length === 3, `a roomy budget should run three, got ${roomy.length}`);
   },
 
+  "a cheap target's unused slice goes to the rich one beside it": async () => {
+    const target = (weakenTime) => ({
+      moneyMax: 1e9, moneyAvailable: 1e9, minDifficulty: 5, hackDifficulty: 5,
+      hackPercentPerThread: 0.003, growBase: 1.0018,
+      weakenTime, growTime: weakenTime * 0.8, hackTime: weakenTime / 4,
+    });
+    const stealOfRich = async (homeRam) => {
+      const { ns, math, pool, ram, mods } = await makeMath("analyze", {
+        hosts: { home: homeRam },
+        servers: { rich: target(600000), cheap: target(6000) },
+      });
+      ns.exec = () => 1;
+      const lines = [];
+      const streams = mods["core"].rescan(ns, math, {
+        pool, ram, steal: 0.1, maxTargets: 2, forced: null,
+        streams: [], preps: new Map(), log: (l) => lines.push(l), verbose: false,
+      });
+      assert(streams.length === 2, `both should run, got ${streams.length}`);
+      return Number(lines.find((l) => l.includes("+rich")).match(/steal ([\d.]+)%/)[1]);
+    };
+
+    // A live 26 PB pool gave ten targets 2.2 PB each. the-hub and rothman-uni hit
+    // the steal ceiling on half of that while catalyst, alpha-ent and syscore sat
+    // at ~60% on theirs, with 14 PB free.
+    const ceiling = await stealOfRich(1073741824);
+    const shared = await stealOfRich(16777216);
+    assert(shared === ceiling, `rich target held to ${shared}% of a ${ceiling}% ceiling`);
+  },
+
   "prep slots are queued however much of the budget the streams want": async () => {
     const dirty = (moneyMax) => ({
       moneyMax, moneyAvailable: moneyMax * 0.2, minDifficulty: 5, hackDifficulty: 40,
@@ -3977,7 +4006,7 @@ export const tests = {
       weakenTime: 20000, growTime: 16000, hackTime: 5000,
     });
     const candidates = {};
-    for (let i = 0; i < 6; i++) candidates[`d${i}`] = dirty(1e9 - i * 1e7);
+    for (let i = 0; i < 10; i++) candidates[`d${i}`] = dirty(1e9 - i * 1e7);
 
     const run = async (prepped) => {
       const { ns, math, pool, ram, mods } = await makeMath("analyze", {

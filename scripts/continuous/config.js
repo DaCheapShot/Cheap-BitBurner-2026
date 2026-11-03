@@ -732,7 +732,8 @@ export const DESYNC_STRIKES = 3;
  * idle. A 25 PB pool at six dropped earning streams (silver-helix $2.4b/s,
  * phantasy $1.3b/s, iron-gym $1b/s) for new ones with 12 PB free, so ten.
  *
- * ponytail: rescan's chooseSteal calls grow with n^2. Trim if a stall line blames it.
+ * ponytail: rescan's chooseSteal calls grow with n^2 times the slice passes. Trim
+ * if a stall line blames it.
  */
 export const MAX_TARGETS = 10;
 
@@ -821,9 +822,11 @@ export const PUSH_MS = 2000;
  * It used to be unreachable: rescan queued only the top maxTargets * 2
  * candidates, and the streams occupied most of those, so the queue ran out
  * before the slots did however much RAM was spare. The queue is the whole
- * ranking now, so this is the real bound on its length.
+ * ranking now, so this is the real bound on its length. At 4 a live 25 PB pool
+ * held 12 TB in prep for half an hour at $5b/s, while rho-construction, worth
+ * $36b/s, waited until minute 73 for a place in the queue.
  */
-export const PREP_CONCURRENCY = 4;
+export const PREP_CONCURRENCY = 8;
 
 /**
  * Largest share of the pool one prep wave may hold and still let the next prep

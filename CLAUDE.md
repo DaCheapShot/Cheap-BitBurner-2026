@@ -639,6 +639,13 @@ total, so the count rises on its own as the pool grows. The ceiling is 10 becaus
 300 ms floor saturates, so the count is what spends a big pool: at six, a 25 PB pool dropped
 silver-helix ($2.4b/s), phantasy and iron-gym for new targets with 12 PB free.
 
+**A target at its ceiling hands its unused slice on.** `evaluate` starts from equal shares, then
+re-prices with the spare RAM split among targets not yet `capped`. All streams get the one final
+width; a capped stream never reaches it. At a flat `budget / n`, ten targets took 2.2 PB each of
+a 26 PB pool: the cheap ones hit 95% on half of that, catalyst, alpha-ent and syscore sat near
+60%, and 14 PB stayed free at $143b/s. The narrow slice also underpriced the rich targets, so the
+count flipped omega-net and silver-helix in and out every few minutes.
+
 **Grow and weaken fill home first, and hack leaves it for last**, whatever its cores (`hostsBy`,
 the user's rule). A foreign host can out-core home, but it holds a few GB, and each one taken first
 is another split. `sync` re-reads home's cores, since sing buys them mid-run. `coreMap` caches

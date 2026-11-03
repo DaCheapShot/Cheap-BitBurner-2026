@@ -871,12 +871,26 @@ export function rescan(ns, math, opts) {
   const evaluate = (n) => {
     const take = feasible.slice(0, n);
     if (take.length < n) return null;
-    const width = budget / n;
+    // Equal shares, then whatever a target at its ceiling cannot use goes to the
+    // ones still short. A cheap target saturates on a fraction of an equal share:
+    // a live 26 PB pool at 2.2 PB each held catalyst, alpha-ent and syscore near
+    // 60% steal with 14 PB free, and pricing rich targets on that narrow slice is
+    // what had the count flip omega-net and silver-helix in and out every few
+    // minutes. One width for all: a capped stream never reaches it.
+    let width = budget / n;
+    let fits = [];
+    for (let pass = 0; pass < n; pass++) {
+      fits = take.map((p) => chooseSteal(math, p.snap, ram, width, { pin, drift: drifts.get(p.host) }));
+      if (fits.some((f) => !f)) return null;
+      const short = fits.filter((f) => !f.capped).length;
+      const spare = budget - fits.reduce((sum, f) => sum + f.gb, 0);
+      if (!short || spare < width * 0.01) break;
+      width += spare / short;
+    }
     const picks = new Map();
     let total = 0;
-    for (const p of take) {
-      const fit = chooseSteal(math, p.snap, ram, width, { pin, drift: drifts.get(p.host) });
-      if (!fit) return null;
+    for (const [i, p] of take.entries()) {
+      const fit = fits[i];
       picks.set(p.host, fit);
       // A target whose single batch cannot fit its slice earns NOTHING - it
       // places weakens and never places its grow. Scoring it at its arithmetic
