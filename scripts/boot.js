@@ -1,7 +1,8 @@
 import { ROOT_MARKER, CLOUD_DONE_MARKER, CLOUD_RECHECK_MS, CLOUD_STATUS_FILE,
          WORKER_LIST,
          DEPLOY_LIST, DEPLOY_MANIFEST, SHARE_HOLD_MARKER, TARGETS_MARKER,
-         REP_WANT_MARKER, SLEEVE_FACTION_MARKER, STANEK_RESERVE_FILE, stanekReserve } from "./config.js";
+         REP_WANT_MARKER, SLEEVE_FACTION_MARKER, STANEK_RESERVE_FILE, stanekReserve,
+         CORP_STATE_FILE } from "./config.js";
 // The gang supervisor's path. Same kind of import as the line above - that file
 // is constants only, no ns call anywhere in it, so this is 0 GB.
 import { GANG_SERVICE } from "./gang/config.js";
@@ -12,6 +13,7 @@ import { HACKNET_MONEY_SERVICE, HACKNET_HASH_SERVICE } from "./hacknet/config.js
 import { STOCKS_SERVICE } from "./stocks/config.js";
 import { GO_SERVICE } from "./go/config.js";
 import { STANEK_SERVICE, CHARGE_WORKER, STATUS_FILE as STANEK_STATUS_FILE } from "./stanek/config.js";
+import { CORP_SERVICE } from "./corp/config.js";
 import { SETTINGS_FILE, setting, settingsLog, BOOT_TICK_S } from "./settings.js";
 import { rpc } from "./rpc.js";
 
@@ -31,6 +33,9 @@ import { rpc } from "./rpc.js";
  *                     ns.gang.inGang() and ns.heart.break() are 0 GB, so the check costs nothing on
  *                     every BitNode that will never have one. The gang
  *                     supervisor holds no gang API itself; it runs transients.
+ *   6a. corp        - kept alive as a service, BN3/SF3 only (asked once). It
+ *                     holds no corporation call; its bodies need CORP_BODY_GB
+ *                     free on home, which the manager leaves while it runs.
  *   6b. stanek      - a transient, one pass per tick, BN13/SF13 only, and
  *                     BEFORE sing: it must accept the gift before any aug is
  *                     bought. It keeps the charge worker running on the
@@ -68,6 +73,7 @@ import { rpc } from "./rpc.js";
  *         run scripts/boot.js --no-hacknet        (do not buy hacknet nodes or spend hashes)
  *         run scripts/boot.js --no-stocks         (don't run the stock trader)
  *         run scripts/boot.js --no-stanek         (don't run the Stanek's Gift pass)
+ *         run scripts/boot.js --no-corp           (don't run the corporation supervisor)
  *         run scripts/boot.js --no-hud            (don't paint stats into the overview, every hud.tick)
  *         run scripts/boot.js --no-formulas       (always use the *Analyze math)
  *         run scripts/boot.js --targets 5         (cap the manager's target count)
@@ -324,6 +330,15 @@ return r.currentNode === 13 || r.ownedSF.has(13);
 `;
 
 /**
+ * Can a corporation exist here - BitNode 3, or Source-File 3? The game's own
+ * test (canAccessBitNodeFeature(3)); asked once, like HAS_STANEK.
+ */
+const HAS_CORP = `
+const r = ns.getResetInfo();
+return r.currentNode === 3 || r.ownedSF.has(3);
+`;
+
+/**
  * Run a script and wait for it to exit.
  *
  * Polls ns.ps rather than ns.isRunning purely to avoid paying for a second API
@@ -375,6 +390,9 @@ export async function main(ns) {
   const noHud = args.includes("--no-hud");
   const noStanek = args.includes("--no-stanek");
   const noGo = args.includes("--no-go");
+  const noCorp = args.includes("--no-corp");
+  // Whether a corporation can exist here; null until asked (see the corp step).
+  let hasCorp = null;
   // sing.js holds share off whenever the player is not doing faction work, and
   // publishes the rep work sleeves take on. With sing opted out nothing would
   // ever release that hold or refresh that list, so clear both here.
@@ -570,6 +588,22 @@ export async function main(ns) {
     } else if (!noGang && (ns.gang.inGang() || ns.heart.break() <= GANG_KARMA_TARGET)) {
       killDuplicates(ns, GANG_SERVICE, log);
       ensureService(ns, GANG_SERVICE, [], log);
+    }
+    // The corporation supervisor, BN3/SF3 only, asked once - the HAS_STANEK
+    // shape. Off (or no access) stops it and clears CORP_STATE_FILE, which is
+    // what releases the CORP_BODY_GB the manager holds free on home for its
+    // bodies; --no-corp only stops it starting, as every --no-X does.
+    const corpOn = !noCorp && live("corp");
+    if (corpOn && hasCorp === null) {
+      hasCorp = await rpc(ns, HAS_CORP).catch(() => null);
+      if (hasCorp !== null) log(hasCorp ? "corp: BN3/SF3 - running the corporation" : "corp: no BN3/SF3 - not running");
+    }
+    if (!live("corp") || hasCorp === false || (noCorp && !isUp(ns, CORP_SERVICE))) {
+      stopService(ns, CORP_SERVICE, log);
+      if (ns.read(CORP_STATE_FILE) !== "") ns.write(CORP_STATE_FILE, "", "w");
+    } else if (corpOn && hasCorp) {
+      killDuplicates(ns, CORP_SERVICE, log);
+      ensureService(ns, CORP_SERVICE, [], log);
     }
     // Stanek's Gift, one pass per tick - a TRANSIENT, the sleeve shape; what it
     // leaves running is the charge worker, on the host the reserve file names. BEFORE SING, and that is the

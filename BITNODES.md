@@ -36,7 +36,7 @@ cheaper; nodes that need a new subsystem written come after, one subsystem at a 
 | 2 | **BN6.1** Like Tears in Rain | **no** - needs a Bladeburner subsystem | Bladeburner access + combat stat mults. Destroyable by hacking too, but slowly. Build `scripts/bladeburner/` first. |
 | 3 | **BN7.1** Bladeburners 2079 | reuses #2 | Bladeburner API outside BN7; 7.3 gives Blade's Simulacrum (bladeburner while working). Then take 6 and 7 to level 3. Note SF7.3: Stanek's Gift must be accepted BEFORE joining Bladeburner. |
 | 4 | **BN15.1** Secrets of the Dark Net | **no** - fork-specific darknet, needs new scripts | TOR + DarkscapeNavigator at start everywhere; 15.2/15.3 make charisma boost rep. The Red Pill is not in Daedalus here - sing's `RED_PILL` path will not work as-is. |
-| 5 | **BN3.1** Corporatocracy | **no** - corporation automation is a large project | Corp API everywhere; a running corp is the biggest money engine in the game. Highest payoff, highest build cost. |
+| 5 | **BN3.1** Corporatocracy | **yes** - `corp/` (2026-11-03), untested live | Corp API everywhere; a running corp is the biggest money engine in the game. **The user's pick for now (2026-11-03), ahead of the queue.** |
 
 After the queue: SF8.3 (cheap, `stocks/` ready) whenever a filler node is wanted, then more BN12
 levels (vanilla SF12 starts each node with NeuroFlux levels - verify the fork's effect before farming
@@ -45,6 +45,15 @@ further).
 ## Per-node notes
 
 Fill these in during a run - what broke, what had to be tuned, how long it took.
+
+- **BN3**: corp seed money is free and the Office/Warehouse APIs come unlocked. `corp.js` starts on boot's
+  first tick (BN3/SF3 only) and plays the manual's standard strategy: rounds 1-4, Tobacco, public, dividends.
+  - Watch `cat /data/corp.txt` (stage, funds, offer, what it waits on) and `cat /data/corp.log.txt`.
+  - Built-in Smart Supply and researched TA2, the user's pick: expect round 1 ~300-350b, round 2 ~10-15t.
+  - The corp's bodies need ~62 GB free on home; sing buys home RAM at full cash until 256 GB. If the log
+    shows `WARN: read corp failed - ... no free RAM`, home is still too small.
+  - Bribes open at $100t valuation; sing bribes for Daedalus rep (Red Pill) with `corp.bribeCash` of funds.
+  - Untested live: note here what the first run does at each round and which numbers needed tuning.
 
 - **BN14**: GoPower x4, hacking level x0.4, hack speed x0.3, rep work x0.2, aug prices x1.5,
   daemon difficulty x5.

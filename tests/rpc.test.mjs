@@ -225,10 +225,12 @@ export const tests = {
     const per = (n) => bodies.filter(([f]) => f === n).length;
     assert(per("gang/gang") === 5, `gang.js should have 5 bodies (tick, war, ascend, equip, create), found ${per("gang/gang")}`);
     assert(per("continuous/lib/math") === 1, `continuous/lib/math.js should have 1 body, found ${per("continuous/lib/math")}`);
-    assert(per("sing/sing") === 36,
-      `sing.js should have 36 bodies (upgrade, cores, tor, tix, 4S, 4S mult, progs, invites, join, read, gym, crime, faction, study, ` +
+    assert(per("sing/sing") === 37,
+      `sing.js should have 37 bodies (upgrade, cores, tor, tix, 4S, 4S mult, progs, invites, join, read, gym, crime, faction, study, ` +
         `crime stats, crime chance, company, apply, travel, owned, faction augs, prereq, aug info, aug stats, buy, favor, favor gain, bitnode mults, sweep, ` +
-        `liquidate, install, backdoors, donate, graft, graft price, graftable), found ${per("sing/sing")}`);
+        `liquidate, install, backdoors, donate, bribe, graft, graft price, graftable), found ${per("sing/sing")}`);
+    assert(per("corp/corp") === 13,
+      `corp.js should have 13 bodies (create, two reads, ten action bodies), found ${per("corp/corp")}`);
     assert(per("contracts/contracts") === 3, `contracts.js should have 3 bodies (find, submit, dummy), found ${per("contracts/contracts")}`);
     assert(per("sleeve/sleeve") === 14,
       `sleeve.js should have 8 bodies (count, read, tasks, recover, sync, crime, gym, faction, company, avail, buy, stats, buy sleeve, memory), found ${per("sleeve/sleeve")}`);

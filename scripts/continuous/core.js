@@ -42,6 +42,8 @@ import {
   SHARE_WORKER,
   STANEK_RESERVE_FILE,
   stanekReserve,
+  CORP_STATE_FILE,
+  corpState,
   STEAL_FRACTION,
   STREAM_TICK_MS,
   TARGET_RAM_BUDGET,
@@ -722,11 +724,17 @@ export async function supervise(ns, math, opts) {
  * host is reset each call, so a worker that moved hands its old host back;
  * freeRam reads staticReserve live, so setting it is the whole change.
  * ns.read is 0 GB, so calling this every PUSH_MS costs nothing.
+ *
+ * The corporation's bodies ride the same reset: 20-60 GB each, far past
+ * HOME_RESERVE_GB, so while corp.js publishes CORP_STATE_FILE home keeps its
+ * `reserveGb` free too. Without it every corp body is an ns.run 0 once the
+ * batcher fills home, and the corp never acts.
  */
 function applyStanekReserve(ns, pool) {
   const stanek = stanekReserve(ns.read(STANEK_RESERVE_FILE));
+  const corp = corpState(ns.read(CORP_STATE_FILE)).reserveGb;
   for (const s of pool.servers) {
-    s.staticReserve = (s.hostname === "home" ? HOME_RESERVE_GB : 0) + (s.hostname === stanek.host ? stanek.gb : 0);
+    s.staticReserve = (s.hostname === "home" ? HOME_RESERVE_GB + corp : 0) + (s.hostname === stanek.host ? stanek.gb : 0);
   }
 }
 

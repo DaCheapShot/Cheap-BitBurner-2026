@@ -102,17 +102,21 @@ export function repTargets(augsOf, owned, info, priority = null) {
  * @param o.rep      {faction: rep} for joined factions - only these can sell
  * @param o.cash     money on hand
  * @param o.donate   { perRep, can(faction) } - or null, and nothing is donated
+ * @param o.corpRep    { perRep, budget, can(faction) } - or null: rep bought with CORP funds
+ *                   (ns.corporation.bribe, $1e9 a rep, valuation >= $100t). Used only where
+ *                   a donation cannot reach, and counted against `budget`, never `cash`.
  * @param o.priority {aug: bool} - priority augs are planned first (tier 1), each class dearest first
  * @param o.value    {aug: augValue}, NFG's per level included - or null; a missing aug ranks above NFG
  * @param o.force    buy what fits even under MIN_AUG_BATCH
  * @param o.minBatch the live `sing.minAugBatch`; MIN_AUG_BATCH when omitted
  * @param o.priceMult each queued aug's price ladder step (augPriceMult); AUG_PRICE_MULT when omitted
  * @returns {{ buys: {faction, name, cost}[], donations: {faction, amount, rep}[],
+ *             bribes: {faction, amount, rep}[],
  *             batch: number, total: number, eligible: number,
  *             nfg: {faction, levels, why: "rep"|"cash", ...}|null }}
  */
-export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, donate = null, priority = null, value = null,
-  force = false, minBatch = MIN_AUG_BATCH, priceMult = AUG_PRICE_MULT }) {
+export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, donate = null, corpRep = null,
+  priority = null, value = null, force = false, minBatch = MIN_AUG_BATCH, priceMult = AUG_PRICE_MULT }) {
   // Who sells each aug, among joined factions we may buy from.
   const sellers = {};
   for (const [faction, augs] of Object.entries(augsOf)) {
@@ -123,32 +127,45 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, d
   const reach = { ...rep };
   const best = (factions) => factions.reduce((b, f) => (reach[f] > reach[b] ? f : b));
   const have = new Set(owned);
-  /** Money to lift faction f to `need` rep: 0 if it is there, Infinity if it cannot be bought. */
+  /**
+   * What lifting faction f to `need` rep costs: player cash by donation where
+   * the faction takes one, else corp funds by bribe, else it cannot be bought
+   * (null). Both 0 if the rep is already there.
+   */
   const lift = (f, need) => {
-    if (reach[f] >= need) return 0;
-    return donate?.can(f) ? (need - reach[f] + 1) * donate.perRep : Infinity;
+    if (reach[f] >= need) return { cash: 0, corp: 0 };
+    if (donate?.can(f)) return { cash: (need - reach[f] + 1) * donate.perRep, corp: 0 };
+    if (corpRep?.can(f)) return { cash: 0, corp: (need - reach[f] + 1) * corpRep.perRep };
+    return null;
   };
-  const cheapest = (c) => c.sellers.reduce((b, f) => (lift(f, c.need) < lift(b, c.need) ? f : b));
+  // The seller whose lift costs least: player cash first, then corp funds.
+  const worse = (x, y) => !x || (y && (x.cash > y.cash || (x.cash === y.cash && x.corp > y.corp)));
+  const cheapest = (c) => c.sellers.reduce((b, f) => (worse(lift(b, c.need), lift(f, c.need)) ? f : b));
 
   const rank = (c) => (priority?.[c.name] === false ? 0 : 1);
   const eligible = Object.keys(sellers)
     .filter((a) => a !== NFG && !have.has(a) && info[a])
     .map((a) => ({ name: a, sellers: sellers[a], price: info[a].price, need: info[a].rep }))
-    .filter((c) => Number.isFinite(lift(cheapest(c), c.need)))
+    .filter((c) => lift(cheapest(c), c.need) !== null)
     .sort((x, y) => rank(y) - rank(x) || y.price - x.price);
 
   const buys = [];
   const donated = {};
+  const bribed = {};
   let total = 0;
+  let corpTotal = 0;
+  const lifted = (f, d, need) => {
+    if (d.cash) donated[f] = (donated[f] ?? 0) + d.cash;
+    if (d.corp) bribed[f] = (bribed[f] ?? 0) + d.corp;
+    if (d.cash || d.corp) reach[f] = need + 1;
+    total += d.cash;
+    corpTotal += d.corp;
+  };
   const pill = eligible.find((c) => c.name === RED_PILL);
   if (pill) {
     const f = cheapest(pill);
     const d = lift(f, pill.need);
-    if (d && d <= cash) {
-      donated[f] = d;
-      reach[f] = pill.need + 1;
-      total = d;
-    }
+    if ((d.cash || d.corp) && d.cash <= cash && d.corp <= (corpRep?.budget ?? 0)) lifted(f, d, pill.need);
   }
   const take = (list) => {
     for (const c of list) {
@@ -156,13 +173,10 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, d
       const f = cheapest(c);
       const d = lift(f, c.need);
       const cost = c.price * priceMult ** buys.length;
-      if (total + cost + d > cash) continue;
-      if (d) {
-        donated[f] = (donated[f] ?? 0) + d;
-        reach[f] = c.need + 1;
-      }
+      if (total + cost + d.cash > cash || corpTotal + d.corp > (corpRep?.budget ?? 0)) continue;
+      lifted(f, d, c.need);
       buys.push({ faction: f, name: c.name, cost });
-      total += cost + d;
+      total += cost;
       have.add(c.name);
     }
   };
@@ -192,8 +206,13 @@ export function planAugBuys({ augsOf, owned, queued, info, prereqs, rep, cash, d
   const batch = queued + buys.length;
   const donations = Object.entries(donated)
     .map(([faction, amount]) => ({ faction, amount, rep: amount / donate.perRep }));
+  const bribes = Object.entries(bribed)
+    .map(([faction, amount]) => ({ faction, amount, rep: amount / corpRep.perRep }));
   const go = batch >= minBatch || force || buys.some((b) => b.name === RED_PILL);
-  return { buys: go ? buys : [], donations: go ? donations : [], batch, total, eligible: eligible.length, nfg };
+  return {
+    buys: go ? buys : [], donations: go ? donations : [], bribes: go ? bribes : [],
+    batch, total, eligible: eligible.length, nfg,
+  };
 }
 
 /** Dollars per rep point donated (donation.ts): 1e6 / faction_rep / FactionWorkRepGain. */

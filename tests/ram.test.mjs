@@ -136,6 +136,24 @@ const COST = {
   giftWidth: 0.4, giftHeight: 0.4, chargeFragment: 0.4, fragmentDefinitions: 0,
   activeFragments: 5, clearGift: 0, canPlaceFragment: 0.5, placeFragment: 5,
   getFragment: 2, removeFragment: 0.15, acceptGift: 2,
+  // ns.corporation: RamCostConstants.CorporationInfo = 10 for a read,
+  // CorporationAction = 20 for an action. The whole namespace, because every
+  // name is an ordinary word the corp code wants as a local: `research`,
+  // `bribe`, `sellShares`... `getConstants`, `nextUpdate` and `getBonusTime`
+  // are above at 0; hasCorporation and canCreateCorporation are free too.
+  hasCorporation: 0, canCreateCorporation: 0,
+  createCorporation: 20, hasUnlock: 10, getUnlockCost: 10, getUpgradeLevel: 10, getUpgradeLevelCost: 10,
+  getInvestmentOffer: 10, getIndustryData: 10, getMaterialData: 10, acceptInvestmentOffer: 20, goPublic: 20,
+  bribe: 20, getCorporation: 10, getDivision: 10, expandIndustry: 20, expandCity: 20, purchaseUnlock: 20,
+  levelUpgrade: 20, issueDividends: 20, issueNewShares: 20, buyBackShares: 20, sellShares: 20, sellDivision: 20,
+  sellMaterial: 20, sellProduct: 20, discontinueProduct: 20, setSmartSupply: 20, setSmartSupplyOption: 20,
+  buyMaterial: 20, bulkPurchase: 20, getWarehouse: 10, getProduct: 10, getMaterial: 10,
+  setMaterialMarketTA1: 20, setMaterialMarketTA2: 20, setProductMarketTA1: 20, setProductMarketTA2: 20,
+  exportMaterial: 20, cancelExportMaterial: 20, purchaseWarehouse: 20, upgradeWarehouse: 20, makeProduct: 20,
+  limitMaterialProduction: 20, limitProductProduction: 20, getUpgradeWarehouseCost: 10, hasWarehouse: 10,
+  hireEmployee: 20, upgradeOfficeSize: 20, throwParty: 20, buyTea: 20, hireAdVert: 20, research: 20,
+  getOffice: 10, getHireAdVertCost: 10, getHireAdVertCount: 10, getResearchCost: 10, hasResearched: 10,
+  setJobAssignment: 20, getOfficeSizeUpgradeCost: 10,
   window: 25, document: 25,
 };
 const BASE = 1.6;
@@ -456,8 +474,11 @@ export const tests = {
       // graftAugmentation alone is 7.50 - the one body allowed over the ceiling:
       // it cannot be split, runs once per graft, and only in BN10 / SF10.
       GRAFT: 9.10,
+      // ns.corporation.bribe is 20.00 - the second exception, and for the same
+      // reasons: one call, and only once the corp's valuation is past $100t.
+      BRIBE: 21.60,
     };
-    const OVER = ["GRAFT"];
+    const OVER = ["GRAFT", "BRIBE"];
     const got = bodiesOf("sing/sing");
     assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),
       `sing.js bodies ${Object.keys(got)} - every body must be pinned here`);
@@ -587,9 +608,9 @@ export const tests = {
   // there rather than in boot, which is pinned at 3.55 - and importing rpc.js
   // costs boot nothing, since it already pays ns.run for runToCompletion.
   // HAS_STANEK is the same shape for BN13/SF13.
-  "boot's SF10 and SF13 checks are its only bodies, at 2.60 each": () => {
+  "boot's SF10, SF13 and SF3 checks are its only bodies, at 2.60 each": () => {
     const got = bodiesOf("boot");
-    assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(["HAS_SLEEVES", "HAS_STANEK"]),
+    assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(["HAS_CORP", "HAS_SLEEVES", "HAS_STANEK"]),
       `boot bodies: ${Object.keys(got)}`);
     for (const [name, gb] of Object.entries(got)) assert(Math.abs(gb - 2.60) < 0.011, `${name}: ${gb.toFixed(2)}`);
   },
@@ -622,6 +643,41 @@ export const tests = {
       `stanek.js bodies ${Object.keys(got)} - every body must be pinned here`);
     for (const [name, gb] of Object.entries(want)) {
       assert(Math.abs(got[name] - gb) < 0.011, `${name} body: expected ${gb.toFixed(2)} GB, got ${got[name].toFixed(2)}`);
+    }
+  },
+
+  // The corporation. Every ns.corporation name is 10 or 20 GB and the strategy
+  // needs ~45 of them, so corp.js holds none: the three it names are 0 GB, and
+  // getServerMoneyAvailable is the self-funded founding check outside BN3.
+  "corp.js holds no priced corporation call: 2.70 GB": () => {
+    const ram = ramOf("corp/corp");
+    assert(Math.abs(ram - 2.70) < 0.011,
+      `expected 2.70 GB (1.60 + run 1.00 + getServerMoneyAvailable 0.10), got ${ram.toFixed(2)}`);
+  },
+  // config.js is imported by boot, settings and sing (one billed name there is
+  // charged to boot's pinned 3.55); math.js is the planner, where a local named
+  // `research` would cost 20 GB.
+  "the corp subsystem's shared modules are free to import": () => {
+    for (const mod of ["corp/config", "corp/math"]) {
+      const r = ramOf(mod);
+      assert(Math.abs(r - BASE) < 0.011, `${mod}.js costs ${(r - BASE).toFixed(2)} GB to import; it must be 0`);
+    }
+  },
+  // rpc() runs one body at a time, so the largest is what home needs - and the
+  // manager reserves exactly CORP_BODY_GB for it. Every body pinned.
+  "every corp body is priced, and none exceeds CORP_BODY_GB": async () => {
+    const want = {
+      CREATE: 21.60, READ_CORP: 41.60, READ_DIV: 61.60,
+      SETUP: 61.60, UNLOCK: 41.60, UPGRADE: 61.60, STAFF: 61.60, MORALE: 41.60,
+      TRADE: 41.60, EXPORT: 41.60, PRODUCT: 61.60, TA: 61.60, FINANCE: 61.60,
+    };
+    const got = bodiesOf("corp/corp");
+    assert(JSON.stringify(Object.keys(got).sort()) === JSON.stringify(Object.keys(want).sort()),
+      `corp.js bodies ${Object.keys(got)} - every body must be pinned here`);
+    const { CORP_BODY_GB } = (await loadScripts())["corp/config"];
+    for (const [name, gb] of Object.entries(want)) {
+      assert(Math.abs(got[name] - gb) < 0.011, `${name} body: expected ${gb.toFixed(2)} GB, got ${got[name].toFixed(2)}`);
+      assert(got[name] <= CORP_BODY_GB, `${name} body is ${got[name].toFixed(2)} GB - over CORP_BODY_GB ${CORP_BODY_GB}`);
     }
   },
 
@@ -661,7 +717,7 @@ export const tests = {
                          "root", "connectme",
                          "continuous/manager", "continuous/servers",
                          "gang/gang", "contracts/contracts", "sing/sing", "sleeve/sleeve",
-                         "stocks/stocks", "stocks/sellall", "hud", "stanek/stanek"]) {
+                         "stocks/stocks", "stocks/sellall", "hud", "stanek/stanek", "corp/corp"]) {
       for (const mod of closure(entry)) seen.add(mod);
     }
 
@@ -692,14 +748,14 @@ export const tests = {
   // priced into the totals above.
   "no script names a variable after an expensive ns function": () => {
     const BANNED = { window: 25, document: 25, attempt: 10, share: 2.4, run: 1, probe: 0.2, connect: 2,
-      travel: 4, getTask: 4, getSleeve: 4 };
+      travel: 4, getTask: 4, getSleeve: 4, research: 20, bribe: 20, sellShares: 20, goPublic: 20 };
     const entries = new Set();
     for (const e of ["boot", "cloud", "deploy",
                      "root", "connectme",
                      "continuous/manager", "continuous/servers",
                      "gang/gang", "contracts/contracts", "sing/sing",
                      "hacknet/hacknet", "hacknet/hashes", "sleeve/sleeve",
-                     "stocks/stocks", "stocks/sellall", "hud", "stanek/stanek"]) {
+                     "stocks/stocks", "stocks/sellall", "hud", "stanek/stanek", "corp/corp"]) {
       for (const mod of closure(e)) entries.add(mod);
     }
 
@@ -719,7 +775,7 @@ export const tests = {
       //
       // The trailing (?!\s*:) skips object keys - `{ hack: 1.70 }` costs nothing,
       // because acorn-walk only walks a Property key when it is computed.
-      const BANNED_RE = /(?<![\w$])(\.?)(window|document|attempt|share|run|probe|connect|travel|getTask|getSleeve)(?![\w$])(?!\s*:)/g;
+      const BANNED_RE = /(?<![\w$])(\.?)(window|document|attempt|share|run|probe|connect|travel|getTask|getSleeve|research|bribe|sellShares|goPublic)(?![\w$])(?!\s*:)/g;
       for (const m of src.matchAll(BANNED_RE)) {
         const name = m[2];
         if (calls.has(name)) continue;
