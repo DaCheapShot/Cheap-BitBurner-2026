@@ -6,7 +6,7 @@ import {
   MAIN_OFFICE_SHARE, PRODUCT_SHARE, SUPPORT_WAREHOUSE_SHARE, PRODUCT_INVEST, BOOST_FUNDS_SHARE,
   LATE_BOOST_RATIO, DUMMY_FUNDS_SHARE, SUPPORT_RND, SUPPORT_JOBS, MAIN_JOBS, PROFIT_HIGH, RESEARCH, LAB, TA,
   STAT_RESEARCH, PRODUCTION_RESEARCH, STAT_SHARE, PRODUCTION_SHARE, TA_POOL_MULT, SUPPORT_LAB_SHARE,
-  DIV_MIN, DIV_MAX, DIV_FAST, DIV_WINDOW,
+  DIV_MIN, DIV_MAX, DIV_FAST, DIV_WINDOW, CAPEX_CAP_FUNDS, PUBLIC_CAPEX_SHARE,
 } from "./config.js";
 
 /**
@@ -532,6 +532,14 @@ function growth(ctx) {
   const s = ctx.s;
   const stage = ctx.stage;
   const profit = (s.revenue ?? 0) - (s.expenses ?? 0);
+  // Public and rich: spend PUBLIC_CAPEX_SHARE of the cycle's RETAINED profit,
+  // never the funds. A public valuation is funds + assetDelta x 85e3 with the
+  // negatives counted, and every capex dollar is -2 in assetDelta (see
+  // `watching` below). A live run spent the funds every pass at $1.47e99, read
+  // valuation $10.00b - the game's floor - and so never opened bribes ($100t).
+  // Under 1/2 of retained profit the delta stays positive and valuation ~ funds.
+  const capped = stage === "public" && s.funds >= CAPEX_CAP_FUNDS;
+  if (capped) ctx.cash = Math.min(ctx.cash, Math.max(0, profit * 10 * (1 - (s.dividendRate ?? 0)) * PUBLIC_CAPEX_SHARE));
   if (!ensureDivision(ctx, TOBACCO, "Tobacco")) return { setupDone: false, mode: "opening Tobacco" };
   const citiesDone = ensureCities(ctx, TOBACCO);
   for (const [name, ind] of [[AGRI, "Agriculture"], [CHEM, "Chemical"], [TOBACCO, "Tobacco"]]) {
@@ -564,7 +572,7 @@ function growth(ctx) {
   if (citiesDone && !watching) dummies(ctx);
 
   // Two cycles of expenses stay put: tea, salaries and a party must never bounce.
-  const floor = 2 * 10 * (s.expenses ?? 0);
+  const floor = capped ? 0 : 2 * 10 * (s.expenses ?? 0); // capped: the funds stay put anyway
   const spendable = Math.max(0, ctx.cash - floor);
   const productShare = stage === "public" || stage === 5 ? PRODUCT_SHARE.later : PRODUCT_SHARE.early;
   const support = watching ? 0 : spendable * (1 - productShare);
@@ -575,7 +583,6 @@ function growth(ctx) {
   if (citiesDone) boosts(ctx, TOBACCO, "Tobacco", LATE_BOOST_RATIO, ctx.cash * BOOST_FUNDS_SHARE);
 
   if (stage === 5) push(ctx, "public", 0);
-  if (stage === "public") ctx.notes.push(`profit ${profit}/s`);
   if (offering && !profitMode) ctx.notes.push(`round ${stage}: ${finished}/${need} products before the offer`);
   const mode = profitMode ? "profit (before the offer)" : stage === "public" ? "public" : `round ${stage}`;
   return { setupDone: profitMode && citiesDone, mode };
@@ -600,7 +607,9 @@ function products(ctx, t, design = true) {
     const worst = done.reduce((w, n) => (t.prods[n].rating < t.prods[w].rating ? n : w));
     push(ctx, "drop", TOBACCO, worst);
   }
-  const invest = Math.max(1e9, ctx.s.funds * PRODUCT_INVEST);
+  // Of what this pass may spend, not of funds: under the public capex cap the
+  // funds outgrow the budget and 1% of them would stop products altogether.
+  const invest = Math.max(1e9, Math.min(ctx.s.funds, ctx.cash) * PRODUCT_INVEST);
   if (pay(ctx, 2 * invest)) {
     const next = Math.max(0, ...names.map(productIndex)) + 1;
     push(ctx, "make", TOBACCO, MAIN_CITY, `Tobacco-${next}`, invest, invest);

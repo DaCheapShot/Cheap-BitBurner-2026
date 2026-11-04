@@ -251,6 +251,15 @@ export const DIV_WINDOW = 360;
 /** Don't reissue dividends for a change smaller than this. */
 export const DIV_STEP = 0.02;
 
+/**
+ * Once public with funds past CAPEX_CAP_FUNDS, a pass spends at most
+ * PUBLIC_CAPEX_SHARE of the cycle's retained profit, so valuation tracks funds
+ * and bribes open. Below 0.5 keeps assetDelta positive (capex counts -2x).
+ * 1e18 funds already bribes ~5e8 rep at corp.bribeCash 0.5.
+ */
+export const CAPEX_CAP_FUNDS = 1e18;
+export const PUBLIC_CAPEX_SHARE = 0.4;
+
 /** Valuation at which bribes open (Constants.ts bribeThreshold) and their price per rep. */
 export const BRIBE_VALUATION = 100e12;
 export const BRIBE_PER_REP = 1e9;

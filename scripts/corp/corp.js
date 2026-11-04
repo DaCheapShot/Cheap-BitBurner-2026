@@ -291,6 +291,13 @@ const BODIES = { SETUP, UNLOCK, UPGRADE, STAFF, EXPORT, TRADE, MORALE, PRODUCT, 
 /** Ops worth a line in the history file - the rest happen every cycle. */
 const LOGGED = new Set(["industry", "city", "warehouse", "unlock", "upgrade", "whUp", "advert", "size",
   "export", "unexport", "make", "drop", "lab", "accept", "public", "dividend"]);
+/**
+ * From round 3 on, these buy every pass, so they are summed and logged once
+ * per ROLLUP_PASSES (5 min). Line by line they were 4 lines a pass, and the
+ * 500-line history held 20 minutes - a live run lost when TA2 landed.
+ */
+const ROLLUP = new Set(["upgrade", "whUp", "advert", "size"]);
+const ROLLUP_PASSES = 30;
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -331,7 +338,7 @@ export async function main(ns) {
   // The reserve and the home-RAM priority go up before the first body runs.
   publish(null);
 
-  const mem = { taOn: new Set(), seen: [], seenStage: null, profits: [] };
+  const mem = { taOn: new Set(), seen: [], seenStage: null, profits: [], rolled: {}, rolledPasses: 0 };
   let parked = "";
 
   for (;;) {
@@ -413,6 +420,7 @@ async function pass(ns, call, say, mem, money) {
   // What ran, by kind: a kind with a few ops gets a line each, a busy one a
   // count - in the growth stage every pass buys upgrades in every city.
   const done = {};
+  const rollup = typeof p.stage !== "number" || p.stage >= 3;
   for (const body of BODY_ORDER) {
     const ops = p.ops.filter((op) => BODY_OF[op[0]] === body);
     if (!ops.length) continue;
@@ -433,8 +441,19 @@ async function pass(ns, call, say, mem, money) {
       } else if (op[0] === "public") {
         say("went public (0 shares issued)");
         ns.tprint("corp: went public - dividends follow");
+      } else if (rollup && ROLLUP.has(op[0])) {
+        // upgrade [name, n], advert [div, n], whUp/size [div, city, n]: the count is last.
+        const k = op[0] === "upgrade" ? op[1]
+          : `${op[1]} ${op[0] === "advert" ? "Advert" : op[0] === "whUp" ? "warehouse levels" : "office size"}`;
+        mem.rolled[k] = (mem.rolled[k] ?? 0) + op[op.length - 1];
       } else if (LOGGED.has(op[0])) (done[op[0]] ??= []).push(op);
     });
+  }
+  if (rollup && ++mem.rolledPasses >= ROLLUP_PASSES) {
+    const parts = Object.entries(mem.rolled).map(([k, n]) => `${k} +${n}`);
+    if (parts.length) say(`bought over ${mem.rolledPasses} cycles: ${parts.join(", ")}`);
+    mem.rolled = {};
+    mem.rolledPasses = 0;
   }
   for (const [k, ops] of Object.entries(done)) {
     if (ops.length <= 3) for (const op of ops) say(describe(op, money));

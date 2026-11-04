@@ -1735,6 +1735,15 @@ and adds nothing. The first live run spent every pass and took round 3 at $5.53t
 against round 2's $3.37t: the offer was funds/3 alone, flat from cycle one, so the plateau rule fired as
 soon as `OFFER_WAIT` let it. Tea, parties, Advert and materials are operating flows and stay on.
 
+**Public and past `CAPEX_CAP_FUNDS` (1e18), a pass spends `PUBLIC_CAPEX_SHARE` (0.4) of the cycle's
+retained profit, never the funds.** A public valuation is `funds + assetDelta x 85e3` and counts the
+negatives, at -2 per capex dollar. The live run spent its $1.47e99 funds every pass and read valuation
+$10.00b, the game's floor, so bribes ($100t) never opened. Under half of retained profit the delta stays
+positive and valuation tracks funds. Product investment is 1% of what the pass may spend, not of funds, or
+the growing pile would price products out of the cap. Routine buys (upgrades, Advert, warehouse levels,
+office size) are summed into one log line per `ROLLUP_PASSES` (5 min) from round 3 on: one line each
+filled the 500-line history in 20 minutes.
+
 **Tobacco researches nothing until it can buy both TAs** (`TA_POOL_MULT` x their 70k). Products sell at
 `MP` until TA2, and the first run bought ADA and Drones along the way and sat under the bar for 2.5 hours.
 

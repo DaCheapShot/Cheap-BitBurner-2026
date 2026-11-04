@@ -399,6 +399,23 @@ export const tests = {
     assert(!r.setupDone && kinds(r).includes("size"), "still building before the first product: spends");
   },
 
+  // Live: $1.47e99 funds spent every pass, valuation pinned at the game's $10b
+  // floor, bribes never opened. Public valuation counts negative assetDelta.
+  "public and rich, a pass spends under half the retained profit, never the funds": () => {
+    const divs = () => ({ Agriculture: division("Agriculture", { office: () => office(8) }),
+      Chemical: division("Chemical", { office: () => office(3) }),
+      Tobacco: division("Tobacco", { office: () => office(30), products: [] }) });
+    const u = { "Smart Supply": true, "Export": true };
+    const priced = (p) => p.ops.some((o) => ["size", "upgrade", "whUp", "advert", "make"].includes(o[0]));
+    const s = (funds, dividendRate = 0) => corp({ round: 5, public: true, funds, revenue: 2e20, expenses: 1e20,
+      dividendRate, divs: divs(), unlocks: u });
+    assert(priced(M.plan(s(1e30))), "still buys from profit");
+    const none = M.plan(corp({ round: 5, public: true, funds: 1e30, revenue: 1e20, expenses: 2e20, divs: divs(), unlocks: u }));
+    assert(!priced(none), `a loss leaves nothing to spend: ${JSON.stringify(none.ops.filter((o) => o[0] === "size"))}`);
+    const poor = M.plan(corp({ round: 5, public: true, funds: 1e15, revenue: 1e10, expenses: 0, divs: divs(), unlocks: u }));
+    assert(priced(poor) && opsOf(poor, "size").length, "under CAPEX_CAP_FUNDS the funds still go in");
+  },
+
   "Tobacco saves its RP for both TAs before any other research": () => {
     const lab = ["Hi-Tech R&D Laboratory"];
     const plan = (rp) => M.plan(corp({ round: 5, funds: 1e15, unlocks: { "Smart Supply": true, "Export": true },
