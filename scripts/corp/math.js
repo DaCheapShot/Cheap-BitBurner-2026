@@ -171,8 +171,15 @@ export function takeOffer(seen, round) {
  */
 export function dividendRate(profits) {
   if (profits.length < DIV_WINDOW) return DIV_MIN;
-  const then = profits[profits.length - DIV_WINDOW];
-  const now = profits[profits.length - 1];
+  // Medians of the window's oldest and newest tenth, not two single passes: one
+  // cycle's profit swings with product sales, and a live run read 81%, 10%, 90%
+  // in three consecutive passes off single samples. A median, because a mean
+  // still follows one 100x pass.
+  const k = Math.max(1, Math.floor(DIV_WINDOW / 10));
+  const median = (a) => [...a].sort((x, y) => x - y)[Math.floor(a.length / 2)];
+  const w = profits.slice(-DIV_WINDOW);
+  const then = median(w.slice(0, k));
+  const now = median(w.slice(-k));
   if (!(then > 0) || !(now > 0)) return DIV_MIN;
   const growth = Math.log(now / then) / Math.log(DIV_FAST);
   const t = Math.min(1, Math.max(0, 1 - growth));
@@ -543,15 +550,25 @@ function growth(ctx) {
   const need = PRODUCTS_FOR_OFFER[stage] ?? 0;
   const offering = stage === 3 || stage === 4;
   const profitMode = offering && finished >= need;
-  products(ctx, t);
-  if (citiesDone) dummies(ctx);
+  // While the offer is watched, nothing is bought that this fork counts as a
+  // capital expenditure (FundsSource.ts: office, warehouse, upgrades, product
+  // development). Each one ADDS its price to the cycle's assets and then takes it
+  // from funds, so assetDelta - the 315e3x term of a private valuation - goes
+  // negative for that cycle and counts as 0. A live run spent every pass and
+  // took round 3 at $5.53t and round 4 at $6.62t against a 1e16 target: the
+  // offer was funds/3 and nothing else, flat from the first cycle, so the
+  // plateau rule fired the moment OFFER_WAIT allowed it. Tea, parties, Advert
+  // and materials are operating flows and stay on.
+  const watching = profitMode && citiesDone;
+  products(ctx, t, !watching);
+  if (citiesDone && !watching) dummies(ctx);
 
   // Two cycles of expenses stay put: tea, salaries and a party must never bounce.
   const floor = 2 * 10 * (s.expenses ?? 0);
   const spendable = Math.max(0, ctx.cash - floor);
   const productShare = stage === "public" || stage === 5 ? PRODUCT_SHARE.later : PRODUCT_SHARE.early;
-  const support = spendable * (1 - productShare);
-  if (citiesDone) productDivision(ctx, spendable * productShare, profit, finished, profitMode);
+  const support = watching ? 0 : spendable * (1 - productShare);
+  if (citiesDone) productDivision(ctx, watching ? 0 : spendable * productShare, profit, finished, profitMode);
   supportDivision(ctx, AGRI, "Agriculture", support * 5 / 6);
   supportDivision(ctx, CHEM, "Chemical", support / 6);
   for (const name of [AGRI, CHEM, TOBACCO]) labWork(ctx, name);
@@ -571,14 +588,14 @@ function growth(ctx) {
  * effect scales with the investment^0.1, so more buys little. Finished products
  * sell everything at market price until TA2 sets the price.
  */
-function products(ctx, t) {
+function products(ctx, t, design = true) {
   const names = t?.products ?? [];
   const developing = names.filter((n) => !(t.prods?.[n]?.developmentProgress >= 100));
   const done = names.filter((n) => t.prods?.[n]?.developmentProgress >= 100);
   for (const n of done) {
     if (t.prods[n].desiredSellAmount !== "MAX") push(ctx, "psell", TOBACCO, n, "MAX", "MP");
   }
-  if (developing.length || !t?.offices?.[MAIN_CITY]) return;
+  if (!design || developing.length || !t?.offices?.[MAIN_CITY]) return;
   if (names.length >= (t.maxProducts ?? 3) && done.length) {
     const worst = done.reduce((w, n) => (t.prods[n].rating < t.prods[w].rating ? n : w));
     push(ctx, "drop", TOBACCO, worst);
@@ -739,7 +756,13 @@ function labWork(ctx, name) {
   if (ok(LAB) && RESEARCH[LAB].cost <= pool * (product ? 1 : SUPPORT_LAB_SHARE)) take(LAB);
   if (!have.has(LAB)) return;
   const taCost = TA.reduce((n, r) => n + (have.has(r) ? 0 : RESEARCH[r].cost), 0);
-  if (taCost && pool >= TA_POOL_MULT * taCost) for (const r of TA) if (!have.has(r)) take(r);
+  if (taCost && pool >= TA_POOL_MULT * taCost) {
+    for (const r of TA) if (!have.has(r)) take(r);
+  }
+  // The product division saves for TA before anything else: products sell at MP
+  // until TA2 prices them. Buying ADA and Drones on the way kept a live Tobacco
+  // under the 140k bar for 2.5 hours.
+  else if (taCost && product) return;
   for (const r of STAT_RESEARCH) if (ok(r) && RESEARCH[r].cost <= pool * STAT_SHARE) take(r);
   for (const r of PRODUCTION_RESEARCH) if (ok(r) && RESEARCH[r].cost <= pool * PRODUCTION_SHARE) take(r);
 

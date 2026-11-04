@@ -53,7 +53,10 @@ Fill these in during a run - what broke, what had to be tuned, how long it took.
   - The corp's bodies need ~62 GB free on home; sing buys home RAM at full cash until 256 GB. If the log
     shows `WARN: read corp failed - ... no free RAM`, home is still too small.
   - Bribes open at $100t valuation; sing bribes for Daedalus rep (Red Pill) with `corp.bribeCash` of funds.
-  - Untested live: note here what the first run does at each round and which numbers needed tuning.
+  - First live run (2026-11-04): founded and through round 2 with no errors; offers $342b / $3.37t /
+    $5.53t / $6.62t, public at 1h30. Rounds 3-4 were wrecked by spending while the offer was watched
+    (fixed: capex frozen then), TA never researched in 2.5 h (fixed: Tobacco saves for it first),
+    dividend rate flapped 10-90% (fixed: medians).
 
 - **BN14**: GoPower x4, hacking level x0.4, hack speed x0.3, rep work x0.2, aug prices x1.5,
   daemon difficulty x5.

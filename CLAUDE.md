@@ -1727,8 +1727,20 @@ setup is done and `OFFER_WAIT` (10) cycles have passed - valuation is a mean of 
 round's target, on an `OFFER_PLATEAU` (5) cycle plateau, or at `OFFER_MAX_WAIT` (60). Rounds 3 and 4 also
 wait for 1 and 2 finished products (the manual's 1P/2P), switching the main office to its profit setup.
 
+**While a round 3 or 4 offer is watched, no capital is spent.** This fork's private valuation is
+`10e9 + funds/3 + max(0, assetDelta) x 315e3`, and `assetDelta` is the change in total assets, not profit.
+`FundsSource.ts` marks office, warehouse, upgrades and product development long-term: each adds its price
+to the cycle's assets and also takes it from funds, so a cycle with any of them reads `assetDelta <= 0`
+and adds nothing. The first live run spent every pass and took round 3 at $5.53t and round 4 at $6.62t
+against round 2's $3.37t: the offer was funds/3 alone, flat from cycle one, so the plateau rule fired as
+soon as `OFFER_WAIT` let it. Tea, parties, Advert and materials are operating flows and stay on.
+
+**Tobacco researches nothing until it can buy both TAs** (`TA_POOL_MULT` x their 70k). Products sell at
+`MP` until TA2, and the first run bought ADA and Drones along the way and sat under the bar for 2.5 hours.
+
 **Dividends ramp with growth** (`dividendRate`): 10% while profit multiplies 10x or more over 360
-passes, 90% when flat, log-linear between; `corp.dividend` pins it. **sing bribes with corp funds** once
+passes, 90% when flat, log-linear between, comparing the MEDIANS of the window's first and last
+tenth - one-pass samples read 81%, 10%, 90% on three passes in a row live. `corp.dividend` pins it. **sing bribes with corp funds** once
 valuation passes $100t: `planAugBuys` takes a `corpRep` source at $1e9 a rep against a budget of
 `corp.bribeCash` x funds, used only where no donation reaches, and the BRIBE body runs before donations
 with the same refused-stops-the-batch rule. The Red Pill is bribed for first. An install keeps the corp

@@ -259,7 +259,12 @@ export const tests = {
     assertClose(M.dividendRate(series(1e9, 1e12)), C.DIV_MIN, 1e-9, "fast growth");
     assertClose(M.dividendRate(series(1e12, 1e12)), C.DIV_MAX, 1e-9, "flat");
     const mid = M.dividendRate(series(1e12, 1e12 * Math.sqrt(C.DIV_FAST)));
-    assertClose(mid, (C.DIV_MIN + C.DIV_MAX) / 2, 1e-9, "half-speed growth");
+    assertClose(mid, (C.DIV_MIN + C.DIV_MAX) / 2, 0.05, "half-speed growth (tenth-means span 0.9 of the window)");
+    // Flat profit with one-pass spikes either end must still read flat.
+    const noisy = series(1e12, 1e12);
+    noisy[0] = 1e10;
+    noisy[noisy.length - 1] = 1e14;
+    assert(M.dividendRate(noisy) > 0.8, `one-pass spikes moved the rate to ${M.dividendRate(noisy)}`);
   },
 
   // --------------------------------------------------------------- plan ----
@@ -363,12 +368,46 @@ export const tests = {
     const tob = division("Tobacco", { office: () => office(30), products: Object.keys(prods), prods });
     const agri = division("Agriculture", { office: () => office(8) });
     const chem = division("Chemical", { office: () => office(3) });
-    const p = M.plan(corp({ round: 4, funds: 1e15, divs: { Agriculture: agri, Chemical: chem, Tobacco: tob },
+    // Round 5: past the offers, so nothing is frozen for one.
+    const p = M.plan(corp({ round: 5, funds: 1e15, divs: { Agriculture: agri, Chemical: chem, Tobacco: tob },
       unlocks: { "Smart Supply": true, "Export": true } }));
     assert(JSON.stringify(opsOf(p, "drop")) === JSON.stringify([["drop", "Tobacco", "Tobacco-2"]]), JSON.stringify(opsOf(p, "drop")));
     assert(opsOf(p, "make")[0]?.[3] === "Tobacco-4", JSON.stringify(opsOf(p, "make")));
     assert(JSON.stringify(opsOf(p, "psell")) === JSON.stringify([["psell", "Tobacco", "Tobacco-3", "MAX", "MP"]]), "unsold product");
-    assert(p.setupDone === false || p.mode.includes("profit"), "two products finished makes round 4 ready");
+  },
+
+  // FundsSource.ts: office, warehouse, upgrades and product development are
+  // long-term sources, and a cycle with one has assetDelta <= 0 - the private
+  // valuation's 315e3x term then counts nothing. Live: round 3 $5.53t, round 4 $6.62t.
+  "while a round 3 or 4 offer is watched, nothing counted as capital spending is bought": () => {
+    const prods = {
+      "Tobacco-1": { developmentProgress: 100, rating: 50, desiredSellAmount: "MAX" },
+      "Tobacco-2": { developmentProgress: 100, rating: 60, desiredSellAmount: "MAX" },
+    };
+    const divs = () => ({ Agriculture: division("Agriculture", { office: () => office(8) }),
+      Chemical: division("Chemical", { office: () => office(3) }),
+      Tobacco: division("Tobacco", { office: () => office(30), products: Object.keys(prods), prods }) });
+    const u = { "Smart Supply": true, "Export": true };
+    const w = M.plan(corp({ round: 4, funds: 1e15, divs: divs(), unlocks: u }));
+    assert(w.setupDone, "two products finished: round 4 is watched");
+    for (const k of ["size", "upgrade", "whUp", "make", "industry", "city", "warehouse"]) {
+      assert(!kinds(w).includes(k), `${k} bought while watching: ${JSON.stringify(opsOf(w, k))}`);
+    }
+    assert(kinds(w).includes("jobs"), "the profit job split still goes in");
+    const r = M.plan(corp({ round: 3, funds: 1e15, divs: { ...divs(), Tobacco: division("Tobacco",
+      { office: () => office(30), products: ["Tobacco-1"], prods: { "Tobacco-1": { developmentProgress: 40 } } }) }, unlocks: u }));
+    assert(!r.setupDone && kinds(r).includes("size"), "still building before the first product: spends");
+  },
+
+  "Tobacco saves its RP for both TAs before any other research": () => {
+    const lab = ["Hi-Tech R&D Laboratory"];
+    const plan = (rp) => M.plan(corp({ round: 5, funds: 1e15, unlocks: { "Smart Supply": true, "Export": true },
+      divs: { Agriculture: division("Agriculture"), Chemical: division("Chemical"),
+        Tobacco: division("Tobacco", { office: () => office(30), rp, researched: lab }) } }));
+    const labs = (p) => opsOf(p, "lab").filter((o) => o[1] === "Tobacco").map((o) => o[2]);
+    assert(labs(plan(100e3)).length === 0, `bought under the TA bar: ${labs(plan(100e3))}`);
+    const got = labs(plan(150e3));
+    assert(got[0] === "Market-TA.I" && got[1] === "Market-TA.II", JSON.stringify(got));
   },
 
   "after the fourth round it lists with no shares issued": () => {
