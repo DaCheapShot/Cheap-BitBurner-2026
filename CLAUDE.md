@@ -412,8 +412,9 @@ never reads as negative income; the samples are `/data/hud.txt`. The boot test m
 the settings read straight after a sleep, not on each sleep, because the sleep is sliced. The corp
 rows (`corpRows`, the user's pick) read `CORP_STATE_FILE` at 0 GB: before public `R<round> · <offer>`
 and a `Corp wait` line (the plan's first note less its `round N:` prefix, cut to 22 characters - the
-sidebar fits ~33 a row with the label, and 28 ran the label into the value); public, profit/s with
-` · bribes` once valuation clears `BRIBE_VALUATION`. No corp, no rows.
+sidebar fits ~33 a row with the label, and 28 ran the label into the value); public, profit/s and a
+`Corp val` row (`$8.52t / $100t`, then `$150t · bribes` once it clears `BRIBE_VALUATION`) - two rows
+either side, the user's rule, since dropping to one read as a row gone missing. No corp, no rows.
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It

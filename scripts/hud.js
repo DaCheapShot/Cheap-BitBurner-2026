@@ -45,12 +45,16 @@ const WAIT_WIDTH = 22;
 
 /**
  * The corp's rows, the user's pick: before public the round with its offer and
- * what it waits on; public, profit/s tagged "bribes" once valuation clears the
- * bribe bar. Nothing without a corp. `st` is corpState(); `money` formats.
+ * what it waits on; public, profit/s and the valuation against the bribe bar,
+ * tagged "bribes" once it clears. Public keeps two rows on purpose - the user's
+ * rule, dropping to one read as a row gone missing. Nothing without a corp.
+ * `st` is corpState(); `money` formats.
  */
 export function corpRows(st, money) {
   if (st.public) {
-    return [["Corp", `${money(st.profit)}/s${st.valuation >= BRIBE_VALUATION ? " · bribes" : ""}`]];
+    const bribes = st.valuation >= BRIBE_VALUATION;
+    return [["Corp", `${money(st.profit)}/s`],
+      ["Corp val", bribes ? `${money(st.valuation)} · bribes` : `${money(st.valuation)} / ${money(BRIBE_VALUATION)}`]];
   }
   if (!st.round) return [];
   const rows = [["Corp", `R${st.round} · ${money(st.offer)}`]];

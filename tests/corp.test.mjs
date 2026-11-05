@@ -482,8 +482,9 @@ export const tests = {
     assert(pre[1][1] === "0/1 products", `the round prefix stays on the Corp row: ${JSON.stringify(pre)}`);
     assert(H.corpRows(st({ round: 1, offer: 1 }), money).length === 1, "nothing waited on, no wait row");
     const pub = (valuation) => H.corpRows(st({ public: true, round: 5, profit: 9, valuation }), money);
-    assert(JSON.stringify(pub(1e13)) === JSON.stringify([["Corp", "$9/s"]]), JSON.stringify(pub(1e13)));
-    assert(pub(C.BRIBE_VALUATION)[0][1] === "$9/s · bribes", JSON.stringify(pub(C.BRIBE_VALUATION)));
+    assert(JSON.stringify(pub(1e13)) === JSON.stringify([["Corp", "$9/s"], ["Corp val", `$${1e13} / $${C.BRIBE_VALUATION}`]]),
+      JSON.stringify(pub(1e13)));
+    assert(pub(C.BRIBE_VALUATION)[1][1] === `$${C.BRIBE_VALUATION} · bribes`, JSON.stringify(pub(C.BRIBE_VALUATION)));
   },
 
   // The plan never spends what it does not have, however much it wants.
