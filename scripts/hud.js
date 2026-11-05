@@ -1,5 +1,6 @@
-import { HACKNET_HOST_PREFIX } from "./config.js";
+import { HACKNET_HOST_PREFIX, CORP_STATE_FILE, corpState } from "./config.js";
 import { HELD_FILE } from "./stocks/config.js";
+import { BRIBE_VALUATION } from "./corp/config.js";
 
 /**
  * Paints extra rows into the sidebar overview, then exits. boot runs it every
@@ -21,6 +22,9 @@ import { HELD_FILE } from "./stocks/config.js";
  * SAMPLE_FILE and the rate is over the last WINDOW_MS - the user's 15 s, long
  * enough to smooth the batcher's bursts of landing hacks.
  *
+ * The corp rows come from CORP_STATE_FILE, which corp.js writes every cycle
+ * and boot clears when the corp stops - an ns.read, 0 GB.
+ *
  * RAM: 1.60 base + getMoneySources 1.00 + getServerMoneyAvailable 0.10
  *      + getSharePower 0.20 + scan 0.20 + hasRootAccess/getServerMaxRam/
  *      getServerUsedRam 0.15 = 3.25 GB, for a few ms a tick.
@@ -32,6 +36,25 @@ const WINDOW_MS = 15000;
 /** Every MoneySourceTracker field that records money coming IN. */
 const EARNINGS = ["hacking", "stock", "gang", "hacknet", "crime", "work", "codingcontract", "sleeves",
   "corporation", "bladeburner", "infiltration", "casino", "darknet", "other"];
+
+/** Widest a "Corp wait" value gets; the sidebar is narrow and corp.txt has it whole. */
+const WAIT_WIDTH = 28;
+
+/**
+ * The corp's rows, the user's pick: before public the round with its offer and
+ * what it waits on; public, profit/s tagged "bribes" once valuation clears the
+ * bribe bar. Nothing without a corp. `st` is corpState(); `money` formats.
+ */
+export function corpRows(st, money) {
+  if (st.public) {
+    return [["Corp", `${money(st.profit)}/s${st.valuation >= BRIBE_VALUATION ? " · bribes" : ""}`]];
+  }
+  if (!st.round) return [];
+  const rows = [["Corp", `R${st.round} · ${money(st.offer)}`]];
+  const w = st.waiting;
+  if (w) rows.push(["Corp wait", w.length > WAIT_WIDTH ? `${w.slice(0, WAIT_WIDTH - 1)}…` : w]);
+  return rows;
+}
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -58,6 +81,7 @@ export async function main(ns) {
   if (base && now > base.t) {
     rows.push(["Income", `${$((earned - base.earned) / ((now - base.t) / 1000))}/s`]);
   }
+  rows.push(...corpRows(corpState(ns.read(CORP_STATE_FILE)), $));
 
   // ponytail: after a sell-all HELD_FILE holds a COUNT of refused sales, not
   // dollars; the $1m floor hides that. A real position that small hides too.

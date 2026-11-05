@@ -419,15 +419,24 @@ export function stanekReserve(text) {
  */
 export const CORP_STATE_FILE = "/data/corp-state.txt";
 
-/** The corp state, every field a finite number >= 0 (0 when missing or broken). */
+/**
+ * The corp state. The four above are finite numbers >= 0 (0 when missing or
+ * broken). For hud.js also: `round` (0 no corp, 1-4 the offer rounds, 5 ready to
+ * list), `offer` and `profit` (finite, profit may be negative), `public` and
+ * `waiting` (the plan's first note, "" for none).
+ */
 export function corpState(text) {
-  const out = { valuation: 0, funds: 0, reserveGb: 0, homeWant: 0 };
+  const out = { valuation: 0, funds: 0, reserveGb: 0, homeWant: 0, round: 0, offer: 0, profit: 0,
+    public: false, waiting: "" };
   try {
     const o = JSON.parse(String(text ?? "").trim() || "{}");
-    for (const k of Object.keys(out)) {
+    for (const k of ["valuation", "funds", "reserveGb", "homeWant", "round", "offer"]) {
       const v = Number(o?.[k]);
       if (Number.isFinite(v) && v > 0) out[k] = v;
     }
+    if (Number.isFinite(Number(o?.profit))) out.profit = Number(o.profit);
+    out.public = o?.public === true;
+    if (typeof o?.waiting === "string") out.waiting = o.waiting;
   } catch { /* inert */ }
   return out;
 }
