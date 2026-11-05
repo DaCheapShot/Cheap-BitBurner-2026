@@ -477,7 +477,9 @@ export const tests = {
     assert(H.corpRows(st({}), money).length === 0, "no corp, no rows");
     const r3 = H.corpRows(st({ round: 3, offer: 5, waiting: "x".repeat(60) }), money);
     assert(r3[0][0] === "Corp" && r3[0][1] === "R3 · $5", JSON.stringify(r3));
-    assert(r3[1][0] === "Corp wait" && r3[1][1].length === 28 && r3[1][1].endsWith("…"), JSON.stringify(r3));
+    assert(r3[1][0] === "Corp wait" && r3[1][1].length === 22 && r3[1][1].endsWith("…"), JSON.stringify(r3));
+    const pre = H.corpRows(st({ round: 3, offer: 5, waiting: "round 3: 0/1 products" }), money);
+    assert(pre[1][1] === "0/1 products", `the round prefix stays on the Corp row: ${JSON.stringify(pre)}`);
     assert(H.corpRows(st({ round: 1, offer: 1 }), money).length === 1, "nothing waited on, no wait row");
     const pub = (valuation) => H.corpRows(st({ public: true, round: 5, profit: 9, valuation }), money);
     assert(JSON.stringify(pub(1e13)) === JSON.stringify([["Corp", "$9/s"]]), JSON.stringify(pub(1e13)));

@@ -37,8 +37,11 @@ const WINDOW_MS = 15000;
 const EARNINGS = ["hacking", "stock", "gang", "hacknet", "crime", "work", "codingcontract", "sleeves",
   "corporation", "bladeburner", "infiltration", "casino", "darknet", "other"];
 
-/** Widest a "Corp wait" value gets; the sidebar is narrow and corp.txt has it whole. */
-const WAIT_WIDTH = 28;
+/**
+ * Widest a "Corp wait" value gets; corp.txt has it whole. The sidebar fits
+ * ~33 characters a row, label included: 28 ran "Corp wait" into its value.
+ */
+const WAIT_WIDTH = 22;
 
 /**
  * The corp's rows, the user's pick: before public the round with its offer and
@@ -51,7 +54,8 @@ export function corpRows(st, money) {
   }
   if (!st.round) return [];
   const rows = [["Corp", `R${st.round} · ${money(st.offer)}`]];
-  const w = st.waiting;
+  // "round 3: 0/1 products..." - the Corp row already says R3.
+  const w = st.waiting.replace(/^round \d+: /, "");
   if (w) rows.push(["Corp wait", w.length > WAIT_WIDTH ? `${w.slice(0, WAIT_WIDTH - 1)}…` : w]);
   return rows;
 }
