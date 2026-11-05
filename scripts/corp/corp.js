@@ -332,8 +332,12 @@ export async function main(ns) {
     }
   };
 
-  const publish = (corp) => ns.write(CORP_STATE_FILE, JSON.stringify({
+  // `p` is the pass's plan: round, offer, profit and waiting are for hud.js.
+  const publish = (corp, p) => ns.write(CORP_STATE_FILE, JSON.stringify({
     valuation: corp?.valuation ?? 0, funds: corp?.funds ?? 0, reserveGb: CORP_BODY_GB, homeWant: CORP_HOME_GB,
+    round: corp?.offer?.round ?? 0, public: Boolean(corp?.public), offer: corp?.offer?.funds ?? 0,
+    profit: (corp?.revenue ?? 0) - (corp?.expenses ?? 0),
+    waiting: p?.notes?.[0] ?? (p?.setupDone ? "watching the offer" : ""),
   }), "w");
   // The reserve and the home-RAM priority go up before the first body runs.
   publish(null);
@@ -354,8 +358,8 @@ export async function main(ns) {
     }
     const state = await ns.corporation.nextUpdate();
     if (state !== "START") continue;
-    const corp = await pass(ns, call, say, mem, money);
-    if (corp) publish(corp);
+    const r = await pass(ns, call, say, mem, money);
+    if (r) publish(r.corp, r.p);
     flush();
   }
 }
@@ -379,7 +383,7 @@ async function create(ns, call, say) {
   return "";
 }
 
-/** One cycle: read, plan, act, report. Returns READ_CORP's snapshot, or null. */
+/** One cycle: read, plan, act, report. Returns { corp: READ_CORP's snapshot, p: the plan or null }, or null. */
 async function pass(ns, call, say, mem, money) {
   const corp = await call("read corp", READ_CORP);
   if (!corp) return null;
@@ -388,7 +392,7 @@ async function pass(ns, call, say, mem, money) {
   let divs = {};
   if (apis && names.length) {
     divs = await call("read divisions", READ_DIV, JSON.stringify(names.map((n) => [n, !n.startsWith(DUMMY_PREFIX)])));
-    if (!divs) return corp;
+    if (!divs) return { corp, p: null };
   }
   const s = { ...corp, divs };
   const p = plan(s, mem);
@@ -478,7 +482,7 @@ async function pass(ns, call, say, mem, money) {
   if (dummies) lines.push(`dummy divisions: ${dummies}`);
   for (const n of p.notes) lines.push(`waiting: ${n}`);
   ns.write(STATUS_FILE, lines.join("\n") + "\n", "w");
-  return corp;
+  return { corp, p };
 }
 
 /** One history line for an op the plan ran. */

@@ -457,7 +457,31 @@ export const tests = {
     assert(log.includes("founded") && log.includes("opened Agriculture"), log);
     const st = JSON.parse(r.read(C.CORP_STATE_FILE));
     assert(st.reserveGb === C.CORP_BODY_GB && st.homeWant === C.CORP_HOME_GB, JSON.stringify(st));
+    assert(st.round === 1 && st.public === false && typeof st.waiting === "string", `hud fields: ${JSON.stringify(st)}`);
     assert(r.read(C.STATUS_FILE).startsWith("stage 1"), r.read(C.STATUS_FILE));
+  },
+
+  "corpState passes the hud's fields and stays inert on junk": () => {
+    const st = C.corpState(JSON.stringify({ valuation: 2e14, round: 3, offer: 5.5e12, profit: -4, public: false,
+      waiting: "Tobacco: 0/1 products" }));
+    assert(st.round === 3 && st.offer === 5.5e12 && st.profit === -4 && st.waiting === "Tobacco: 0/1 products", JSON.stringify(st));
+    const junk = C.corpState("{not json");
+    assert(junk.round === 0 && junk.public === false && junk.waiting === "" && junk.profit === 0, JSON.stringify(junk));
+    assert(C.corpState('{"public":"yes","waiting":7}').public === false, "only a real true is public");
+  },
+
+  "the hud shows the round and its wait before public, profit and bribes after": () => {
+    const H = mods["hud"];
+    const money = (n) => `$${n}`;
+    const st = (o) => C.corpState(JSON.stringify(o));
+    assert(H.corpRows(st({}), money).length === 0, "no corp, no rows");
+    const r3 = H.corpRows(st({ round: 3, offer: 5, waiting: "x".repeat(60) }), money);
+    assert(r3[0][0] === "Corp" && r3[0][1] === "R3 · $5", JSON.stringify(r3));
+    assert(r3[1][0] === "Corp wait" && r3[1][1].length === 28 && r3[1][1].endsWith("…"), JSON.stringify(r3));
+    assert(H.corpRows(st({ round: 1, offer: 1 }), money).length === 1, "nothing waited on, no wait row");
+    const pub = (valuation) => H.corpRows(st({ public: true, round: 5, profit: 9, valuation }), money);
+    assert(JSON.stringify(pub(1e13)) === JSON.stringify([["Corp", "$9/s"]]), JSON.stringify(pub(1e13)));
+    assert(pub(C.BRIBE_VALUATION)[0][1] === "$9/s · bribes", JSON.stringify(pub(C.BRIBE_VALUATION)));
   },
 
   // The plan never spends what it does not have, however much it wants.

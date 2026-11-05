@@ -384,7 +384,7 @@ editor's RAM panel when one moves.
 | `stocks/stocks.js` | entry: resident trader, one decision per market tick | 2.65 |
 | ↳ four bodies | transients: init, terms, read (every tick), trade | 6.60–13.60 |
 | `stocks/sellall.js` | closes every position; sing's SWEEP runs it before an install | 10.65 |
-| `hud.js` | paints income/s, stocks, worth, karma, share, RAM into the overview; boot runs it every `hud.tick` | 3.25 |
+| `hud.js` | paints income/s, corp, stocks, worth, karma, share, RAM into the overview; boot runs it every `hud.tick` | 3.25 |
 | `stanek/config.js` | Stanek tunables, `FRAGMENT_ORDER`, paths | 0 |
 | `stanek/plan.js` | rotation (`fullAt` transcribed), board packer, host pick, worker sizing - pure | 0 |
 | `stanek/stanek.js` | entry: ONE pass then exits; boot runs it every tick before sing, BN13/SF13 only | 5.55 |
@@ -409,7 +409,10 @@ by slicing its own sleep between ticks; every other step keeps `boot.tick`. It r
 `globalThis["document"]`: a computed key is a Literal and free, the bare name is 25.00 GB. Income
 is the change in what `getMoneySources().sinceInstall` has EARNED over the last 15 s, so spending
 never reads as negative income; the samples are `/data/hud.txt`. The boot test mock ends a tick at
-the settings read straight after a sleep, not on each sleep, because the sleep is sliced.
+the settings read straight after a sleep, not on each sleep, because the sleep is sliced. The corp
+rows (`corpRows`, the user's pick) read `CORP_STATE_FILE` at 0 GB: before public `R<round> · <offer>`
+and a `Corp wait` line (the plan's first note, cut to 28 characters); public, profit/s with
+` · bribes` once valuation clears `BRIBE_VALUATION`. No corp, no rows.
 
 The continuous manager is the entry that has to fit a fresh BitNode's 32 GB home alongside
 `boot.js` and `cloud.js`, and `tests/ram.test.mjs` holds it under 16 GB for that reason. It
