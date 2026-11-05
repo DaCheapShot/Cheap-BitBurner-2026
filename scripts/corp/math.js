@@ -583,7 +583,8 @@ function growth(ctx) {
   if (citiesDone) boosts(ctx, TOBACCO, "Tobacco", LATE_BOOST_RATIO, ctx.cash * BOOST_FUNDS_SHARE);
 
   if (stage === 5) push(ctx, "public", 0);
-  if (offering && !profitMode) ctx.notes.push(`round ${stage}: ${finished}/${need} products before the offer`);
+  // Short: it is the HUD's "Corp wait" row, ~22 characters (the stage is on the row above).
+  if (offering && !profitMode) ctx.notes.push(`products ${finished}/${need}`);
   const mode = profitMode ? "profit (before the offer)" : stage === "public" ? "public" : `round ${stage}`;
   return { setupDone: profitMode && citiesDone, mode };
 }
