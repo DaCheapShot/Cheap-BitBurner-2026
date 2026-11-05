@@ -402,6 +402,37 @@ export function stanekReserve(text) {
 }
 
 /**
+ * What the corporation resident publishes for the parties that do not import
+ * it, rewritten every corp pass: JSON `{ valuation, funds, reserveGb, homeWant }`.
+ *
+ * - The continuous manager leaves `reserveGb` free on HOME on top of
+ *   HOME_RESERVE_GB - the corp's largest rpc body. Corp bodies are 20-60 GB
+ *   (every corporation function is 10 or 20), far past HOME_RESERVE_GB, so
+ *   without it every body is an `ns.run` 0 once the batcher fills home.
+ * - sing's UPGRADE body buys home RAM at full cash while home is under
+ *   `homeWant`, and the aug pass may bribe with corp funds once `valuation` is
+ *   at the bribe bar.
+ *
+ * Written by scripts/corp/corp.js; boot.js clears it when the corp is switched
+ * off or cannot exist here. Missing, empty or unparseable reads as all zero -
+ * the inert failure: no reserve, no priority, no bribes.
+ */
+export const CORP_STATE_FILE = "/data/corp-state.txt";
+
+/** The corp state, every field a finite number >= 0 (0 when missing or broken). */
+export function corpState(text) {
+  const out = { valuation: 0, funds: 0, reserveGb: 0, homeWant: 0 };
+  try {
+    const o = JSON.parse(String(text ?? "").trim() || "{}");
+    for (const k of Object.keys(out)) {
+      const v = Number(o?.[k]);
+      if (Number.isFinite(v) && v > 0) out[k] = v;
+    }
+  } catch { /* inert */ }
+  return out;
+}
+
+/**
  * Hostname prefix of a BitNode 9 hacknet server, which both RAM pools skip.
  *
  * calculateHashGainRate (src/Hacknet/formulas/HacknetServers.ts) carries

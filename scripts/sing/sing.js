@@ -14,6 +14,9 @@ import { rpc } from "scripts/rpc.js";
 // One 0 GB path: the aug batch counts stock positions as cash.
 import { HELD_FILE } from "scripts/stocks/config.js";
 import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
+// The corp's published valuation and funds, for bribes - 0 GB constants and a parser.
+import { CORP_STATE_FILE, corpState } from "scripts/config.js";
+import { BRIBE_VALUATION, BRIBE_PER_REP } from "scripts/corp/config.js";
 
 /**
  * The singularity supervisor: a cheap resident loop whose singularity calls all
@@ -87,12 +90,18 @@ import { SETTINGS_FILE, setting, settingsLog } from "scripts/settings.js";
  * batch, which spends everything an install would reset anyway. Each upgrade
  * doubles the next price, so at 0.25 this is usually one. A non-finite cost
  * would cross JSON as null, so it crosses as -1.
+ *
+ * And at fraction 1 while home is under the corp's `homeWant` (BN3/SF3, while
+ * corp.js runs) - the user's rule: the corp is that node's income and runs
+ * nothing until home holds its largest body beside everything else.
  */
 const UPGRADE = `
 import { SETTINGS_FILE, setting } from "/scripts/settings.js";
-const frac = args.length ? Number(args[0]) : setting(ns.read(SETTINGS_FILE), "sing.homeRam");
-let money = ns.getServerMoneyAvailable("home");
+import { CORP_STATE_FILE, corpState } from "/scripts/config.js";
 const before = ns.getServerMaxRam("home");
+const corpWants = before < corpState(ns.read(CORP_STATE_FILE)).homeWant;
+const frac = args.length ? Number(args[0]) : corpWants ? 1 : setting(ns.read(SETTINGS_FILE), "sing.homeRam");
+let money = ns.getServerMoneyAvailable("home");
 let cost = ns.singularity.getUpgradeHomeRamCost();
 let bought = 0;
 let spent = 0;
@@ -542,6 +551,18 @@ for (const [f, amt] of JSON.parse(args[0])) if (ns.singularity.donateToFaction(f
 return done;
 `;
 
+/**
+ * [[faction, $], ...] of CORP funds - returns the factions the game accepted.
+ * ns.corporation.bribe is 20 GB: over CRIME's 6.60 ceiling, the GRAFT
+ * exception again. It only runs once the corp's valuation is past $100t, when
+ * home is long past the size that ceiling protects.
+ */
+const BRIBE = `
+const done = [];
+for (const [f, amt] of JSON.parse(args[0])) if (ns.corporation.bribe(f, amt)) done.push(f);
+return done;
+`;
+
 // ------------------------------------------------------------------ format ---
 
 const money$ = (ns, v) => `$${ns.format.number(v, 2)}`;
@@ -778,6 +799,21 @@ export async function main(ns) {
   };
 
   /**
+   * How the batch may buy rep with CORP funds, or null - the user's rule: once
+   * the corp's valuation passes the bribe bar, a faction's rep is bought with
+   * `corp.bribeCash` of corp funds wherever no donation reaches it. The corp's
+   * figures come from CORP_STATE_FILE (0 GB). bribe() refuses a faction that
+   * offers no work - the same set an empty work-type list marks.
+   */
+  const corpRepTerms = (r) => {
+    const corp = corpState(ns.read(CORP_STATE_FILE));
+    if (corp.valuation < BRIBE_VALUATION) return null;
+    const budget = corp.funds * setting(ns.read(SETTINGS_FILE), "corp.bribeCash");
+    if (!(budget > 0)) return null;
+    return { perRep: BRIBE_PER_REP, budget, can: (f) => (r.workTypes?.[f] ?? []).length > 0 };
+  };
+
+  /**
    * Install the queue, restarting through boot.js. Returns only when it did
    * NOT install - AUTO_INSTALL off, or a body that failed and warned. Home RAM
    * first, with everything: the install resets money and keeps home RAM.
@@ -933,6 +969,7 @@ export async function main(ns) {
     graft = congruity = null;
     if (grafts) await graftPass(r, owned);
     const donate = await donateTerms(r);
+    const corpRep = corpRepTerms(r);
     // Nothing left worth working, and an install would open some faction's rep
     // to money: install now rather than grind rep a donation will buy. Not while
     // a travel stop is still to collect - that invite is work to come.
@@ -949,7 +986,7 @@ export async function main(ns) {
     const value = Object.fromEntries(Object.entries(augMults)
       .map(([a, m]) => [a, PRIORITY_AUGS.includes(a) ? Infinity : augValue(m)]));
     const planFor = (c) => planAugBuys({
-      augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash: c, donate, priority, value, force,
+      augsOf, owned: owned.all, queued: owned.queued, info, prereqs, rep: r.rep, cash: c, donate, corpRep, priority, value, force,
       minBatch, priceMult: augPriceMult(r.sf11),
     });
     let plan = planFor(cash);
@@ -982,7 +1019,21 @@ export async function main(ns) {
     }
     // The rep first, then the augs it unlocks. A refused donation stops the
     // batch before any buy: the buys behind it would stop at that aug and leave
-    // a partial batch, which the batch rule exists to prevent.
+    // a partial batch, which the batch rule exists to prevent. Bribes the same.
+    if (plan.bribes.length) {
+      const pairs = plan.bribes.map((b) => [b.faction, b.amount]);
+      const done = (await call("bribe", BRIBE, JSON.stringify(pairs))) ?? [];
+      const got = plan.bribes.filter((b) => done.includes(b.faction));
+      if (got.length) {
+        log(`bribe: ${donationsLine(ns, got)} of corp funds`);
+        ns.tprint(`sing: bribed ${donationsLine(ns, got)} of corp funds`);
+      }
+      if (got.length < plan.bribes.length) {
+        log(`WARN: bribe refused (${plan.bribes.filter((b) => !got.includes(b)).map((b) => b.faction)}) - ` +
+          "batch not bought this pass");
+        return;
+      }
+    }
     if (plan.donations.length) {
       const pairs = plan.donations.map((d) => [d.faction, d.amount]);
       const done = (await call("donate", DONATE, JSON.stringify(pairs))) ?? [];

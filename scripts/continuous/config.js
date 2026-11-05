@@ -53,6 +53,8 @@ export {
   STOCK_PUSH_FILE, STOCK_PUSHABLE_FILE,
   // The host RAM the Stanek charge worker holds back - see core.js rescan.
   STANEK_RESERVE_FILE, stanekReserve,
+  // The home RAM the corporation's rpc bodies need - see core.js applyStanekReserve.
+  CORP_STATE_FILE, corpState,
 } from "scripts/config.js";
 
 // -------------------------------------------------------------- batching ----

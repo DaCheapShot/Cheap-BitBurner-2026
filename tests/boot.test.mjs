@@ -28,12 +28,13 @@ const TRANSIENT = [
 async function runBoot({
   args = [], files = {}, running = [], workers = [], ticks = 3, hasFormulas = false,
   inGang = false, karma = 0, onTprint = () => {}, onTick = (_tick, procs) => procs, onSleep = () => {},
-  sleeves = true, tix = true, stanek = false,
+  sleeves = true, tix = true, stanek = false, corp = false,
 }) {
   const ports = {};
   const runs = [];
   let rpcCalls = 0;
   let stanekAsks = 0;
+  let corpAsks = 0;
   const { main } = (await loadScripts())["boot"];
   let procs = running.map((f, i) => ({ filename: f, host: "home", pid: i + 1, args: [], threads: 1 }));
   let nextPid = procs.length + 1;
@@ -96,12 +97,15 @@ async function runBoot({
       const stored = file.replace(/^\/+/, "");
       afterSleep = false;
       if (stored.startsWith("tmp/rpc-")) {
-        // Boot's two bodies, told apart by what they ask: HAS_STANEK reads SF13.
-        // rpcCalls counts the SF10 ask, stanekAsks the other.
-        const asksStanek = (store[file] ?? "").includes("has(13)");
+        // Boot's three bodies, told apart by what they ask: HAS_STANEK reads
+        // SF13, HAS_CORP SF3. rpcCalls counts the SF10 ask.
+        const body = store[file] ?? "";
+        const asksStanek = body.includes("has(13)");
+        const asksCorp = body.includes("has(3)");
         if (asksStanek) stanekAsks++;
+        else if (asksCorp) corpAsks++;
         else rpcCalls++;
-        (ports[a[0]] ??= []).push(JSON.stringify({ v: asksStanek ? stanek : sleeves }));
+        (ports[a[0]] ??= []).push(JSON.stringify({ v: asksStanek ? stanek : asksCorp ? corp : sleeves }));
         return nextPid++;
       }
       launched.push(stored);
@@ -119,7 +123,7 @@ async function runBoot({
   };
 
   try { await main(ns); } catch (e) { if (e.message !== "STOP") throw e; }
-  return { launched, killed, procs, store, logs, rpcCalls, stanekAsks, runs };
+  return { launched, killed, procs, store, logs, rpcCalls, stanekAsks, corpAsks, runs };
 }
 
 /** A killed manager's batches, still running out on the network. */
@@ -529,6 +533,39 @@ export const tests = {
     assert(!r.launched.includes("scripts/stanek/stanek.js"), `launched ${r.launched}`);
     assert(!r.killed.includes("scripts/stanek/charge.js"), "--no-stanek must not kill");
     assert(r.stanekAsks === 0, "nothing to ask when the pass is opted out");
+  },
+
+  // The user's rule: the corporation only where it can exist - BN3, or SF3.
+  // Asked once; a state file left by an earlier node is cleared, or the manager
+  // would hold CORP_BODY_GB of home back for a resident that never runs.
+  "no BN3/SF3: corp.js never starts, boot asks once, a stale reserve is cleared": async () => {
+    const r = await runBoot({ ticks: 4, files: { "/data/corp-state.txt": '{"reserveGb":62}' } });
+    assert(!r.launched.includes("scripts/corp/corp.js"), `started without BN3/SF3: ${r.launched}`);
+    assert(r.corpAsks === 1, `asked ${r.corpAsks} times`);
+    assert(r.store["/data/corp-state.txt"] === "", "the stale reserve must be cleared");
+  },
+
+  "BN3: corp.js is kept running as a service": async () => {
+    const r = await runBoot({ corp: true, ticks: 3 });
+    const starts = r.launched.filter((f) => f === "scripts/corp/corp.js").length;
+    assert(starts === 1, `expected one start, got ${starts}: ${r.launched}`);
+    assert(r.corpAsks === 1, `asked ${r.corpAsks} times`);
+  },
+
+  "corp.enabled off stops corp.js and releases its home reserve; --no-corp kills nothing": async () => {
+    const off = await runBoot({
+      corp: true, ticks: 2, running: ["scripts/corp/corp.js"],
+      files: { "/data/settings.txt": '{"corp.enabled":0}', "/data/corp-state.txt": '{"reserveGb":62}' },
+    });
+    assert(off.killed.includes("scripts/corp/corp.js"), `not stopped: ${off.killed}`);
+    assert(off.store["/data/corp-state.txt"] === "", "the reserve must be released");
+    const flag = await runBoot({
+      corp: true, ticks: 2, args: ["--no-corp"], running: ["scripts/corp/corp.js"],
+      files: { "/data/corp-state.txt": '{"reserveGb":62}' },
+    });
+    assert(!flag.killed.includes("scripts/corp/corp.js"), "--no-corp must not kill");
+    assert(flag.store["/data/corp-state.txt"] !== "", "a running corp keeps its reserve under --no-corp");
+    assert(flag.corpAsks === 0, "nothing to ask when the corp is opted out");
   },
 
   "--no-gang is passed through to the sleeve pass": async () => {

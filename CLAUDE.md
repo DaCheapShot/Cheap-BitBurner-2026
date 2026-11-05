@@ -63,6 +63,7 @@ run scripts/boot.js --no-stocks         # do not run the stock trader
 run scripts/boot.js --no-hud            # do not paint stats into the overview sidebar
 run scripts/boot.js --no-stanek         # do not run the Stanek's Gift pass (BN13/SF13 only anyway)
 run scripts/boot.js --no-go             # do not run the IPvGO player
+run scripts/boot.js --no-corp           # do not run the corporation supervisor (BN3/SF3 only anyway)
 ```
 
 **There is one batcher**, `scripts/continuous/`. A second, the volley-firing "shotgun"
@@ -108,6 +109,10 @@ cat /data/go.txt                        # the IPvGO player: current game, each o
 cat /data/go.log.txt                    # one line per game (last 500)
 run scripts/set.js go.searchMs 500      # search per Go move on boards up to 7x7, live (0 = heuristic only)
 run scripts/set.js go.cheat off         # no go.cheat even with access (needs SF14.2, or SF14.1 in BN14)
+cat /data/corp.txt                      # the corporation: stage, funds, profit, offer, each division, what it waits on
+cat /data/corp.log.txt                  # what it did: divisions, upgrades, products, offers taken, refusals (last 500)
+run scripts/set.js corp.dividend 0.5    # pin the dividend rate once public (default -1 = ramp with profit growth)
+run scripts/set.js corp.bribeCash 0.2   # share of corp funds sing may bribe factions with (valuation >= $100t)
 run scripts/last.js /data/sleeves.log.txt  # its last 10 lines in a tail window (any file; 2nd arg = count)
 run scripts/set.js sleeve.augCash 0.25  # sleeve aug budget per pass; sleeve.augMin = batch size
 run scripts/set.js sleeve.covenantCash 0.5  # BN10: fraction of cash a Covenant sleeve/memory buy may cost
@@ -392,6 +397,11 @@ editor's RAM panel when one moves.
 | `go/go.js` | entry: resident player, one game after another, every node | 10.60 |
 | ↳ ENV body | transient: node, SF14, GoPower | 6.60 |
 | ↳ three cheat bodies | transients, with SF14 access only: odds, remove, two moves | 3.60–9.60 |
+| `corp/config.js` | corp tunables, the manual's recipe, industry data, paths | 0 |
+| `corp/math.js` | cost formulas, boost optimizer, `plan()` - every decision, pure | 0 |
+| `corp/corp.js` | entry: resident, one pass per corp cycle, BN3/SF3 only | 2.70 |
+| ↳ two read bodies | transients: corp-wide, then every division | 41.60–61.60 |
+| ↳ eleven action bodies | transients: create, setup, unlock, upgrade, staff, morale, trade, export, product, TA, finance | 21.60–61.60 |
 
 `hud.js` writes into the overview's `overview-extra-hook-0/1` cells, which React never fills, so the
 rows outlive the transient - the user's rule was no new resident. Boot runs it every `hud.tick` (5 s)
@@ -426,7 +436,7 @@ which stays the one home of a default. `setting()` never throws - a mangled file
 defaults - and `setSetting()` is where bad input is refused. Home-only file is fine because every
 reader runs on home; a worker on another host would need a port (see share).
 
-**Switches** (`cloud.enabled|gang|sing|hacknet|sleeve|contracts|go`, on/off) are read by `boot.js`
+**Switches** (`cloud.enabled|gang|sing|hacknet|sleeve|contracts|go|corp`, on/off) are read by `boot.js`
 every tick. Off STOPS a running resident (gang, sing) and skips a transient (cloud too); sing off also
 clears `SHARE_HOLD_MARKER` and `REP_WANT_MARKER`, since a killed sing cannot, and sleeve off clears
 `SLEEVE_FACTION_MARKER`. The `--no-X` flags keep their old meaning (don't
@@ -1255,8 +1265,9 @@ market) and holds the install if any survive, then runs one
 contract sweep and waits it out (an install destroys every unsolved contract), then UPGRADE at
 fraction 1, then CORES, take the cash the install would reset. SWEEP is split from INSTALL - together 7.70 - and
 its body imports `CONTRACTS_SERVICE` from `contracts/config.js` and two paths from `stocks/config.js`
-(sing.js itself imports `HELD_FILE` from there for the aug batch, and LIQUIDATE the same two paths) -
-the only cross-subtree imports in sing/, all 0 GB. `sing.autoInstall` (default `AUTO_INSTALL`) is read inside SWEEP,
+(sing.js itself imports `HELD_FILE` from there for the aug batch, and LIQUIDATE the same two paths;
+sing.js also reads the bribe bar and price from `corp/config.js` and `CORP_STATE_FILE` from
+`scripts/config.js`, as does UPGRADE) - the only cross-subtree imports in sing/, all 0 GB. `sing.autoInstall` (default `AUTO_INSTALL`) is read inside SWEEP,
 so it is LIVE like the karma grind: off, the queue waits for a hand install. `sing.minAugBatch`
 (default `MIN_AUG_BATCH`) is read once per aug pass and passed to `planAugBuys` as `minBatch`. A sweep over rpc's 10 s times out, and
 the install waits for the next pass rather than kill the sweep mid-attempt.
@@ -1668,6 +1679,81 @@ ENV is the one body. Its failure on a busy home is retried before each game. **p
 `getBoardState` with replay through `board.js` plus a `getGameState` score check saves 4.00 GB, if
 10.60 ever blocks a fresh node. A silent AI is raced against `ns.asleep` (`STUCK_MS`), then passed, then
 reset: a stuck game earns nothing.
+
+### The corporation (`scripts/corp/`)
+
+BitNode 3 automation: the full lifecycle from founding to dividends. Self-contained like `sleeve/`: it
+imports `scripts/rpc.js`, `scripts/settings.js` and 0 GB names from `scripts/config.js`; boot, settings
+and sing read 0 GB constants out of `corp/config.js`. **It never runs where a corp cannot exist**:
+boot asks `HAS_CORP` (`currentNode === 3 || ownedSF.has(3)` - the game's `canAccessBitNodeFeature(3)`)
+once, the `HAS_STANEK` shape.
+
+**The recipe is the Corporation manual's standard strategy** (section 19, BN3), with the round numbers
+its author tested headless and published in `catloversg/bitburner-scripts`. Agriculture + Chemical +
+Tobacco: round 1 Agriculture in six cities, office 4, R&D to 55 RP, then 1/1/1/1 and boost materials;
+round 2 Export, Chemical, Plants and Chemicals exported both ways with `(IPROD+IINV/10)*(-1)`, R&D to
+700/390 RP; round 3+ Tobacco products (always one in development), dummy divisions to 20, the manual's
+budget split and office ratios; after round 4 `goPublic(0)` and dividends. The user chose BUILT-IN Smart
+Supply ($25b) and researched Market-TA.I/II over custom scripts: round 1's offer is ~340b against ~550b,
+and products sell at `MP` until TA2 lands. Both custom versions are the obvious next upgrade.
+
+**Every corporation function is 10 GB (read) or 20 GB (action)**, billed by name - ~45 names, ~700 GB
+together. `corp.js` holds none (2.70: `hasCorporation`, `canCreateCorporation` and `nextUpdate` are 0 GB;
+`getServerMoneyAvailable` is the self-funded founding check). Two READ bodies snapshot the corp,
+`plan()` in `corp/math.js` decides the whole pass, and the ops run through action bodies grouped so none
+passes `CORP_BODY_GB` (62). Op names are string literals; a local called `research` or `bribe` is 20 GB,
+and the banned-identifier guard in `tests/ram.test.mjs` covers four of them. A `RegExp.exec` in
+`math.js` cost 1.30 GB as `ns.exec` before it became `String.match`.
+
+**Home keeps `CORP_BODY_GB` free for the bodies, through the manager.** `HOME_RESERVE_GB` (32) cannot hold
+a 61.60 GB body, and the batcher fills home otherwise. `corp.js` writes `CORP_STATE_FILE`
+(`{valuation, funds, reserveGb, homeWant}`, `scripts/config.js`), and `applyStanekReserve` adds
+`reserveGb` to home's static reserve on the same 2 s reset the Stanek worker's reserve uses. Boot clears
+the file when the corp is switched off or cannot exist. sing's UPGRADE buys home RAM at fraction 1 while
+home is under `homeWant` (256 GB) - the user's rule: in BN3 the corp is the income.
+
+**One pass per cycle, right after START.** `nextUpdate()` resolves after each of the five states; job
+changes land at the next START and per-second buys at PURCHASE, so acting after START gives every change
+a full cycle before it is read back. **Boost materials are bought per second for one cycle, never in
+bulk** (bulk pays up front; per-second may go into debt, which rounds 1 and 2 rely on), and the rate is
+set back to 0 the pass after - a buy left on buys forever. Targets come from `boostTargets`, the manual's
+Lagrange closed form re-derived; `tests/corp.test.mjs` checks it reproduces the manual's published
+quantities (777/919/60794 at round 1) rather than a second copy of the derivation.
+
+**No state file of its own.** The stage is the funding round (`getInvestmentOffer().round`), and every
+step is re-derived from the snapshot, so a restart resumes. Memory holds only the offers seen since a
+round's setup finished, recent profit, and which TA2 switches were sent. **An offer is taken** once
+setup is done and `OFFER_WAIT` (10) cycles have passed - valuation is a mean of the last 10 - then at the
+round's target, on an `OFFER_PLATEAU` (5) cycle plateau, or at `OFFER_MAX_WAIT` (60). Rounds 3 and 4 also
+wait for 1 and 2 finished products (the manual's 1P/2P), switching the main office to its profit setup.
+
+**While a round 3 or 4 offer is watched, no capital is spent.** This fork's private valuation is
+`10e9 + funds/3 + max(0, assetDelta) x 315e3`, and `assetDelta` is the change in total assets, not profit.
+`FundsSource.ts` marks office, warehouse, upgrades and product development long-term: each adds its price
+to the cycle's assets and also takes it from funds, so a cycle with any of them reads `assetDelta <= 0`
+and adds nothing. The first live run spent every pass and took round 3 at $5.53t and round 4 at $6.62t
+against round 2's $3.37t: the offer was funds/3 alone, flat from cycle one, so the plateau rule fired as
+soon as `OFFER_WAIT` let it. Tea, parties, Advert and materials are operating flows and stay on.
+
+**Public and past `CAPEX_CAP_FUNDS` (1e18), a pass spends `PUBLIC_CAPEX_SHARE` (0.4) of the cycle's
+retained profit, never the funds.** A public valuation is `funds + assetDelta x 85e3` and counts the
+negatives, at -2 per capex dollar. The live run spent its $1.47e99 funds every pass and read valuation
+$10.00b, the game's floor, so bribes ($100t) never opened. Under half of retained profit the delta stays
+positive and valuation tracks funds. Product investment is 1% of what the pass may spend, not of funds, or
+the growing pile would price products out of the cap. Routine buys (upgrades, Advert, warehouse levels,
+office size) are summed into one log line per `ROLLUP_PASSES` (5 min) from round 3 on: one line each
+filled the 500-line history in 20 minutes.
+
+**Tobacco researches nothing until it can buy both TAs** (`TA_POOL_MULT` x their 70k). Products sell at
+`MP` until TA2, and the first run bought ADA and Drones along the way and sat under the bar for 2.5 hours.
+
+**Dividends ramp with growth** (`dividendRate`): 10% while profit multiplies 10x or more over 360
+passes, 90% when flat, log-linear between, comparing the MEDIANS of the window's first and last
+tenth - one-pass samples read 81%, 10%, 90% on three passes in a row live. `corp.dividend` pins it. **sing bribes with corp funds** once
+valuation passes $100t: `planAugBuys` takes a `corpRep` source at $1e9 a rep against a budget of
+`corp.bribeCash` x funds, used only where no donation reaches, and the BRIBE body runs before donations
+with the same refused-stops-the-batch rule. The Red Pill is bribed for first. An install keeps the corp
+(`prestigeAugmentation` never touches it; only `prestigeSourceFile` clears it).
 
 ### The hacknet subsystem (`scripts/hacknet/`)
 

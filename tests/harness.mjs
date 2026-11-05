@@ -75,6 +75,11 @@ const NESTED = [
   "stanek/plan.js",
   "stanek/stanek.js",
   "stanek/charge.js",
+  // The corporation. math.js is pure and holds every decision; corp.js holds ns
+  // calls only inside main(), and its bodies are parsed by rpc.test.
+  "corp/config.js",
+  "corp/math.js",
+  "corp/corp.js",
 ];
 
 /** Every .js under scripts/, as posix paths relative to it. */

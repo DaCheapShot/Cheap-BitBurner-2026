@@ -349,6 +349,45 @@ export const tests = {
     assert(!noFavor.buys.length && !noFavor.donations.length && noFavor.batch === 9, "no favor: SmartJaw is out of reach");
   },
 
+  // The user's rule: once the corp's valuation passes $100t, rep no donation
+  // reaches is bought with corp funds - $1e9 a rep, against its own budget and
+  // never against the player's cash. A donation still wins where one reaches.
+  "a corp bribe buys rep no donation reaches, from corp funds, within its budget": async () => {
+    const { planAugBuys } = (await loadScripts())["sing/plan"];
+    const nine = Array.from({ length: 9 }, (_, i) => `c${i}`);
+    const info = Object.fromEntries(nine.map((n) => [n, { rep: 1, price: 1e6 }]));
+    info.Big = { rep: 500e3, price: 1e6 };
+    const base = {
+      augsOf: { CyberSec: nine, Daedalus: ["Big"] }, owned: [], queued: 0, info, prereqs: {},
+      rep: { CyberSec: 1e3, Daedalus: 100e3 }, cash: 1e15,
+    };
+    const need = (500e3 - 100e3 + 1) * 1e9;
+    const corpRep = { perRep: 1e9, budget: need, can: (f) => f === "Daedalus" };
+    const ok = planAugBuys({ ...base, corpRep });
+    assert(ok.buys.some((b) => b.name === "Big" && b.faction === "Daedalus"), `bribed for Big: ${ok.buys.map((b) => b.name)}`);
+    assert(ok.bribes.length === 1 && Math.abs(ok.bribes[0].amount - need) < 1 && !ok.donations.length,
+      `one bribe of corp funds: ${JSON.stringify(ok.bribes)}`);
+    assert(ok.total < 1e9, "a bribe must not count against the player's cash");
+
+    const tight = planAugBuys({ ...base, corpRep: { ...corpRep, budget: need - 1e9 } });
+    assert(!tight.buys.some((b) => b.name === "Big") && !tight.bribes.length, "over the bribe budget: not bought");
+
+    const both = planAugBuys({ ...base, corpRep, donate: { perRep: 5, can: (f) => f === "Daedalus" } });
+    assert(both.donations.length === 1 && !both.bribes.length, "a donation reaches it: no bribe");
+  },
+
+  "the Red Pill's rep is bribed for first, and it installs as a queue of one": async () => {
+    const { planAugBuys } = (await loadScripts())["sing/plan"];
+    const { RED_PILL, RED_PILL_FACTION } = (await loadScripts())["sing/config"];
+    const plan = planAugBuys({
+      augsOf: { [RED_PILL_FACTION]: [RED_PILL] }, owned: [], queued: 0, prereqs: {},
+      info: { [RED_PILL]: { rep: 2.5e6, price: 0 } }, rep: { [RED_PILL_FACTION]: 1e5 }, cash: 0,
+      corpRep: { perRep: 1e9, budget: 1e16, can: () => true },
+    });
+    assert(plan.buys.length === 1 && plan.buys[0].name === RED_PILL, JSON.stringify(plan.buys));
+    assert(plan.bribes.length === 1 && plan.bribes[0].faction === RED_PILL_FACTION, JSON.stringify(plan.bribes));
+  },
+
   // Two augs from one faction: it is lifted ONCE, to the higher need.
   "a faction is lifted once, to the highest rep the batch needs from it": async () => {
     const { planAugBuys } = (await loadScripts())["sing/plan"];

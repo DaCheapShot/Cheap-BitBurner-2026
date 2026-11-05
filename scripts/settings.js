@@ -5,6 +5,7 @@ import { SLEEVE_AUG_CASH, SLEEVE_AUG_MIN, SLEEVE_COVENANT_CASH } from "./sleeve/
 import { STOCKS_CASH, PUSH_BONUS } from "./stocks/config.js";
 import { STANEK_MAX_GB } from "./stanek/config.js";
 import { SEARCH_MS } from "./go/config.js";
+import { BRIBE_CASH, CREATE_MULT } from "./corp/config.js";
 import {
   HOME_RAM_BUDGET_FRACTION, HOME_CORES_BUDGET_FRACTION, PROG_BUDGET_FRACTION, SING_TICK_MS,
   AUTO_INSTALL, MIN_AUG_BATCH, IDLE_STUDY, GRAFT, GRAFT_CASH, GRAFT_MIN_GAIN,
@@ -35,7 +36,7 @@ export const SETTINGS_FILE = "/data/settings.txt";
 /**
  * Keys are `<script>.<knob>`, and each script's knobs stay TOGETHER here:
  * set.js lists them in this order, a group per script, and a test holds every
- * prefix contiguous. Order: gang, cloud, share, hacknet, sing, sleeve, stocks, stanek, contracts, boot.
+ * prefix contiguous. Order: gang, cloud, share, hacknet, sing, sleeve, go, stocks, stanek, corp, contracts, boot.
  *
  * `<script>.enabled` is the live switch, read by boot.js every tick. Off STOPS
  * a running resident (gang, sing, stocks) and skips a transient (cloud, hacknet,
@@ -113,6 +114,14 @@ export const KNOBS = {
   // Read by stanek.js each pass. Off leaves a non-empty board alone entirely -
   // a hand layout; an empty board is still laid out.
   "stanek.relayout": { def: 1, min: 0, max: 1, bool: true, doc: "replace the Stanek board when a better layout scores higher; off leaves a hand layout alone" },
+
+  // Read by corp.js each cycle (dividend) and before founding (createMult), and
+  // by sing's aug pass (bribeCash). Off: boot stops corp.js and clears the
+  // reserve it holds on home; the corporation itself keeps running in the game.
+  "corp.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "corp.js supervisor (BN3 or SF3 only)" },
+  "corp.dividend": { def: -1, min: -1, max: 1, doc: "dividend rate once public; -1 = ramp with profit growth" },
+  "corp.bribeCash": { def: BRIBE_CASH, min: 0, max: 1, doc: "fraction of corp funds sing may bribe factions with (valuation >= $100t)" },
+  "corp.createMult": { def: CREATE_MULT, min: 1, max: 100, doc: "outside BN3: found a self-funded corp at this many x $150b cash" },
 
   "contracts.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "coding contract sweep" },
   "hud.enabled": { def: 1, min: 0, max: 1, bool: true, doc: "overview stats (hud.js)" },
