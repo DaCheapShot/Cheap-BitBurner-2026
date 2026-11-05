@@ -20,7 +20,8 @@ SF descriptions below are from this fork's `src/BitNode/BitNode.tsx` (stable), n
 | 11 The Big Crash | 3 | 3 | done - aug ladder 1.9 -> 1.767 (sing plans at it) |
 | 12 The Recursion | 5 | none | repeatable, harder each level |
 | 13 They're lunatics | 3 | 3 | done |
-| 3, 6, 7, 14, 15 | 0 | | not started |
+| 3 Corporatocracy | 1 | 3 | BN3.1 destroyed 2026-11-04 - corp API everywhere |
+| 6, 7, 14, 15 | 0 | | not started |
 
 Last snapshot (2026-10-31):
 `[{"n":1,"lvl":3},{"n":5,"lvl":3},{"n":2,"lvl":3},{"n":4,"lvl":3},{"n":9,"lvl":3},{"n":10,"lvl":3},{"n":8,"lvl":2},{"n":11,"lvl":3},{"n":13,"lvl":3},{"n":12,"lvl":5}]`
@@ -36,7 +37,6 @@ cheaper; nodes that need a new subsystem written come after, one subsystem at a 
 | 2 | **BN6.1** Like Tears in Rain | **no** - needs a Bladeburner subsystem | Bladeburner access + combat stat mults. Destroyable by hacking too, but slowly. Build `scripts/bladeburner/` first. |
 | 3 | **BN7.1** Bladeburners 2079 | reuses #2 | Bladeburner API outside BN7; 7.3 gives Blade's Simulacrum (bladeburner while working). Then take 6 and 7 to level 3. Note SF7.3: Stanek's Gift must be accepted BEFORE joining Bladeburner. |
 | 4 | **BN15.1** Secrets of the Dark Net | **no** - fork-specific darknet, needs new scripts | TOR + DarkscapeNavigator at start everywhere; 15.2/15.3 make charisma boost rep. The Red Pill is not in Daedalus here - sing's `RED_PILL` path will not work as-is. |
-| 5 | **BN3.1** Corporatocracy | **yes** - `corp/` (2026-11-03), untested live | Corp API everywhere; a running corp is the biggest money engine in the game. **The user's pick for now (2026-11-03), ahead of the queue.** |
 
 After the queue: SF8.3 (cheap, `stocks/` ready) whenever a filler node is wanted, then more BN12
 levels (vanilla SF12 starts each node with NeuroFlux levels - verify the fork's effect before farming
@@ -56,7 +56,10 @@ Fill these in during a run - what broke, what had to be tuned, how long it took.
   - First live run (2026-11-04): founded and through round 2 with no errors; offers $342b / $3.37t /
     $5.53t / $6.62t, public at 1h30. Rounds 3-4 were wrecked by spending while the offer was watched
     (fixed: capex frozen then), TA never researched in 2.5 h (fixed: Tobacco saves for it first),
-    dividend rate flapped 10-90% (fixed: medians).
+    dividend rate flapped 10-90% (fixed: medians). Public it reached $1.3e98/s profit, but spending
+    the funds each pass pinned valuation at the $10b floor and shut bribes (fixed: public capex capped
+    to retained profit). After that fix bribes bought the rep and the node was destroyed.
+  - Second run: send `corp.log.txt` once public to confirm the round 3-4 offers with capex frozen.
 
 - **BN14**: GoPower x4, hacking level x0.4, hack speed x0.3, rep work x0.2, aug prices x1.5,
   daemon difficulty x5.
